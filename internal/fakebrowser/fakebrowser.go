@@ -9,6 +9,7 @@ import (
 
 	"github.com/chriscz/mirrormark/internal/db"
 	"github.com/chriscz/mirrormark/internal/merge"
+	"github.com/chriscz/mirrormark/internal/round"
 )
 
 type node struct {
@@ -225,4 +226,19 @@ func (b *Browser) apply(op merge.Op) merge.OpResult {
 		return merge.OpResult{OK: true}
 	}
 	return merge.OpResult{Error: "unknown op " + op.Op}
+}
+
+// Tree returns the whole tree as the extension sends it.
+func (b *Browser) Tree() []round.TreeNode {
+	roots := map[string]string{"1": "toolbar", "2": "other", "3": "mobile"}
+	var out []round.TreeNode
+	var walk func(n *node, parent *string)
+	walk = func(n *node, parent *string) {
+		for i, k := range n.kids {
+			out = append(out, round.TreeNode{ID: k.id, Parent: parent, Index: i, Title: k.title, URL: k.url, Root: roots[k.id]})
+			walk(k, new(k.id))
+		}
+	}
+	walk(b.nodes["0"], nil)
+	return out
 }

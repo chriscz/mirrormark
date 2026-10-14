@@ -50,6 +50,12 @@ a folder name. One profile's folders may not be inside each other.
   bookmark that another profile moved meanwhile counts as such a change: the
   moved copy stays where it went, and yours lands in `_deleted`.
 - Reordering bookmarks inside a folder stays local.
+- A missing member folder is created on the first round. If it later
+  disappears or is replaced by another folder at that path, that profile
+  stops syncing the union until you restore the folder or change its path in
+  `config.yaml`; a new path makes the profile a new member, which deletes
+  nothing.
+- While any member's database file cannot be read, the union does not sync.
 
 ## Development
 
@@ -58,6 +64,10 @@ machine except Docker.
 
     bin/dev run make          # format check, vet, unit tests, build
     bin/dev shell             # a shell in the dev container
+
+The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
+run more with, for example,
+`bin/dev run go test ./internal/round -args -mirrormark.fuzz=20000`.
 
 The binary lands in `build/mirrormark`.
 
