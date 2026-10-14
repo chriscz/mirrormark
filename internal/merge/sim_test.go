@@ -19,6 +19,8 @@ type member struct {
 	rec   []*db.Node
 	has   bool
 	seq   int
+
+	edited bool // the user may have reordered something since the last round
 }
 
 // sim is a union of members whose rounds run one at a time, as under the
@@ -84,7 +86,9 @@ func (s *sim) round(m *member) (bool, error) {
 	if m.has && db.EqualNodes(res.Tree, m.rec) {
 		return false, nil
 	}
-	if m.has && len(res.Ops) == 0 && slices.Equal(fakebrowser.NodeLines(res.Tree), fakebrowser.NodeLines(m.rec)) &&
+	edited := m.edited
+	m.edited = false
+	if m.has && !edited && len(res.Ops) == 0 && slices.Equal(fakebrowser.NodeLines(res.Tree), fakebrowser.NodeLines(m.rec)) &&
 		slices.Equal(flat(res.Tree), flat(m.rec)) {
 		return false, fmt.Errorf("%s: a quiet round wrote an order-only change", m.label)
 	}
