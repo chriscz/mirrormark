@@ -4,7 +4,7 @@
 
 **Goal:** One Go binary, `mirrormark`, that installs an embedded Manifest V3 extension into Google Chrome on Linux, binds chosen profiles to per-profile YAML database files, and keeps union folders the same across those profiles within about 3 seconds.
 
-**Architecture:** Chrome starts `mirrormark` as a native messaging host, one process per bound profile. Each host runs rounds under a global `flock`: it reads `config.yaml` and the member database files, runs a pure three-way merge per union (`merge.Round`), sends the resulting ops to its own browser, and writes only its own database file. Hosts notice each other's writes by polling file modification times once a second. `mirrormark install` packs the embedded extension as a CRX3, writes Chrome's external-extension JSON and the system native-host manifest (as root, via `sudo` if needed), creates the database files and binds each profile by opening `chrome-extension://<id>/bind.html#<db>` in it.
+**Architecture:** Chrome starts `mirrormark` as a native messaging host, one process per bound profile. Each host runs rounds under a global `flock`: it reads `config.yaml` and the member database files, runs a pure three-way merge per union (`merge.Round`), sends the resulting ops to its own browser, and writes only its own database file. Hosts notice each other's writes by polling file modification times once a second. `mirrormark install` packs the embedded extension as a CRX3, writes Chrome's external-extension JSON and the system native-host manifest (as root, via `sudo install` if needed), creates the database files and binds each profile by opening `chrome-extension://<id>/bind.html#<db>` in it.
 
 **Tech Stack:** Go 1.27.2 (standard library plus `go.yaml.in/yaml/v3` v3.0.5); plain JavaScript MV3 extension, no build step; Docker dev image on `ubuntu:24.04` with Google Chrome stable 155.0.8059.79 and Xvfb; end-to-end tests in Go over Chrome's `--remote-debugging-pipe`.
 
@@ -19,9 +19,9 @@
 - No `any`/`interface{}` values and no unchecked type assertions. `any` as a type-parameter constraint is fine.
 - Never reference the RFC in code, comments, tests or build files (no RFC numbers, section numbers or `docs/rfcs/` links). Comments say why in their own words.
 - Every commit: Conventional Commits with scope `rfc-0001`; new functionality ends its subject with `[new feature]`; body ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Each commit builds and passes `bin/dev run make` on its own.
-- Each task updates `README.md` and `docs/as-built.md` for what it adds, in the same commit. Don't repeat in one what the other says: README is for users, as-built is how the code works.
+- Each task updates `README.md` for what it adds, in the same commit. How the code works lives in package doc comments; an as-built document can be generated from the code later instead of being kept by hand.
 - Native host name: `com.github.chriscz.mirrormark`. Extension permissions: `bookmarks`, `nativeMessaging`, `storage`; no host permissions; no web-accessible resources.
-- Paths (XDG, defaults shown): config `~/.config/mirrormark/config.yaml`; data `~/.local/share/mirrormark/` (`profiles/<id>.yaml`, `profiles/<id>.lock`, `backups/<id>/<YYYY-MM-DD>.yaml`, `lock`, `extension/`, `extension.pem`, `mirrormark.crx`); state `~/.local/state/mirrormark/` (`log`, `<id>.status.yaml`). YAML and key files mode `0600`, directories `0700`, CRX `0644`.
+- Paths (XDG, defaults shown): config `~/.config/mirrormark/config.yaml`; data `~/.local/share/mirrormark/` (`profiles/<id>.yaml`, `profiles/<id>.lock`, `backups/<id>/<YYYY-MM-DD>.yaml`, `lock`, `extension/`, `extension.pem`, `mirrormark.crx`); state `~/.local/state/mirrormark/` (`log`). The host touches `profiles/<id>.lock` on each `hello`; its mtime is how `install` and the e2e tests see that a profile connected. YAML and key files mode `0600`, directories `0700`, CRX `0644`.
 - Timings: extension sends a tree after 0.5 s without bookmark events; host polls files every 1 s; host waits 10 s for a batch to apply; at most 500 ops per `apply` message (messages to the extension must stay under 1 MB).
 - Wrong-tree guard: a round that would move more than half of a member folder's base nodes to `_deleted`, when the member folder held more than 5 base nodes, writes nothing and reports `db-mismatch`.
 - Backups: before the first write of each day; keep the newest 30 per profile.
@@ -32,7 +32,7 @@
 
 Run in Docker on 2026-10-14 and recorded in `chrome-install-spike.md`:
 
-- `google-chrome --profile-directory=X chrome-extension://<id>/bind.html#<db>` opens the page in profile X, with Chrome running or not, once the extension is loaded in X. On X's first start after the external JSON appears, the first attempt fails and a retry 4 s later works. Install therefore confirms each binding through the host's status file and retries up to 3 times. The popup fallback is not needed.
+- `google-chrome --profile-directory=X chrome-extension://<id>/bind.html#<db>` opens the page in profile X, with Chrome running or not, once the extension is loaded in X. On X's first start after the external JSON appears, the first attempt fails and a retry 4 s later works. Install therefore confirms each binding through the mtime of the profile's lock file, which the host touches on `hello`, and retries up to 3 times. The popup fallback is not needed.
 - CDP over `--remote-debugging-pipe` works in branded Chrome 155 under Xvfb, and a second `google-chrome --user-data-dir=<same>` invocation still forwards its URL to the running instance.
 
 ## File structure
@@ -42,15 +42,13 @@ Dockerfile                  dev image: Go, later Chrome + Xvfb (task 8)
 Makefile                    the one build system
 bin/dev                     runs commands in the dev image
 README.md                   users: install, usage, config, development
-docs/as-built.md            how the code works, one section per package
 go.mod, go.sum
 cmd/mirrormark/
   main.go                   subcommand dispatch, host-mode detection
-  status.go                 `mirrormark status`
-  install.go                `install`, `uninstall`, `install-system-files`
-  main_test.go, status_test.go, install_test.go
-internal/db/                YAML files, paths, locks, backups, status files
-  paths.go types.go file.go config.go lock.go status.go (+ _test.go)
+  install.go                `install`, `uninstall`, `unpack`
+  main_test.go, install_test.go
+internal/db/                YAML files, paths, locks, backups
+  paths.go types.go file.go config.go lock.go (+ _test.go)
 internal/merge/             pure three-way merge of one union
   merge.go ops.go (+ merge_test.go)
 internal/fakebrowser/       in-memory bookmarks model that applies ops like the extension (tests only)
@@ -81,14 +79,12 @@ func (p Paths) ProfileFile(id string) string
 func (p Paths) ProfileLock(id string) string
 func (p Paths) GlobalLock() string        // <Data>/lock
 func (p Paths) BackupDir(id string) string
-func (p Paths) StatusFile(id string) string
 func (p Paths) LogFile() string
 type Node struct{ Title, URL, ID, M, By, Suffix string; Children []*Node }   // yaml: title,url,id,m,by,suffix,children
 type Member struct{ Seq int64; Path, ID string; Children []*Node }          // yaml: seq,path,id,children
 type Profile struct{ ID, Label, Browser, Path string }
 type DB struct{ Format int; Profile Profile; Unions map[string]*Member }
 type Config struct{ Format int; Unions map[string]map[string]string }
-type Status struct{ Browser string; Hello, LastRound, LastWrite time.Time; Error string; Skipped map[string]string }
 var ValidID *regexp.Regexp                // ^[a-z0-9][a-z0-9-]*$
 func SplitPath(p string) ([]string, error)
 func WriteAtomic(path string, data []byte, mode os.FileMode) error
@@ -102,8 +98,7 @@ func Backup(p Paths, id string, now time.Time) error
 func Lock(path string) (unlock func(), err error)      // blocking
 func TryLock(path string) (unlock func(), err error)   // ErrLocked if held
 var ErrLocked error
-func LoadStatus(path string) (Status, error)
-func SaveStatus(path string, s Status) error
+func Connected(p Paths, id string, since time.Time) bool   // a host touched profiles/<id>.lock after since
 
 // internal/merge (task 3)
 const DeletedTitle = "_deleted"
@@ -148,7 +143,7 @@ func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error
 const HostName = "com.github.chriscz.mirrormark"
 var Files embed.FS
 func Unpack(dir string, publicKeyDER []byte) error
-func Version() (string, error)
+func Version() (string, error)   // for external_version
 
 // internal/chrome (task 7)
 const ExternalDir = "/usr/share/google-chrome/extensions"
@@ -166,8 +161,6 @@ func Prepare(dataDir string) (Extension, error)
 type File struct{ Path string; Data []byte }
 func SystemFilePaths(id string) []string
 func SystemFiles(e Extension, bin string) []File
-func UserHostManifestPath(userDataDir string) string
-func UserHostManifest(userDataDir string, e Extension, bin string) File
 func FilesCurrent(fs []File) bool
 func WriteFiles(fs []File) error
 func RemoveFiles(paths []string) error
@@ -178,14 +171,14 @@ func Bind(chromeBin, userDataDir, profileDir, extID, dbID string, bound func(sin
 ## Tasks
 
 1. Dev image, Makefile, `bin/dev` and Go skeleton.
-2. YAML database and config files, atomic writes, locks, backups, status files.
+2. YAML database and config files, atomic writes, locks, backups.
 3. Merge engine (`merge.Round`) with the fake browser, test first.
 4. Round planning across member files, with convergence property tests.
-5. Native messaging host and `mirrormark status`.
+5. Native messaging host.
 6. Embedded extension.
-7. `install`, `uninstall` and `install-system-files` for Google Chrome.
+7. `install`, `uninstall` and `unpack` for Google Chrome.
 8. E2E harness (Chrome in the image, Go CDP over a pipe) and the install-and-bind test.
-9. E2E union sync tests: add, rename, move, delete, conflict, first sync, restart catch-up, latency.
+9. E2E union sync tests: edits (add, rename, move) with latency, delete and purge, conflict, first sync, restart catch-up.
 
 Each task is one commit.
 
@@ -194,7 +187,7 @@ Each task is one commit.
 ### Task 1: Dev image, Makefile, `bin/dev` and Go skeleton
 
 **Files:**
-- Create: `Dockerfile`, `bin/dev`, `Makefile`, `.gitignore`, `go.mod`, `cmd/mirrormark/main.go`, `cmd/mirrormark/main_test.go`, `README.md`, `docs/as-built.md`
+- Create: `Dockerfile`, `bin/dev`, `Makefile`, `.gitignore`, `go.mod`, `cmd/mirrormark/main.go`, `cmd/mirrormark/main_test.go`, `README.md`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -409,7 +402,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 ```
 
-- [ ] **Step 7: Write the docs**
+- [ ] **Step 7: Write the README**
 
 `README.md`:
 
@@ -437,23 +430,6 @@ The binary lands in `build/mirrormark`.
 MPL-2.0. See `LICENSE`.
 ```
 
-`docs/as-built.md`:
-
-```markdown
-# mirrormark as built
-
-How the code works today. Each section belongs to one package and changes
-with it. User documentation is in the README.
-
-## Build
-
-`Makefile` is the only build system; `bin/dev run make` runs it in the dev
-image (`Dockerfile`: pinned Ubuntu 24.04 and Go). Go's build and module
-caches live in `.cache/` in the repo so they survive between containers.
-`make` runs `gofmt -l`, `go vet`, `go test` and builds a static binary into
-`build/`.
-```
-
 - [ ] **Step 8: Verify**
 
 Run: `bin/dev run make`
@@ -462,7 +438,7 @@ Expected: gofmt prints nothing, vet passes, `ok github.com/chriscz/mirrormark/cm
 - [ ] **Step 9: Commit**
 
 ```bash
-git add Dockerfile bin/dev Makefile .gitignore go.mod cmd README.md docs/as-built.md
+git add Dockerfile bin/dev Makefile .gitignore go.mod cmd README.md
 git commit -m "build(rfc-0001): add the Docker dev image, Makefile and Go skeleton
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -473,9 +449,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: YAML database and config files
 
 **Files:**
-- Create: `internal/db/paths.go`, `internal/db/types.go`, `internal/db/file.go`, `internal/db/config.go`, `internal/db/lock.go`, `internal/db/status.go`
+- Create: `internal/db/paths.go`, `internal/db/types.go`, `internal/db/file.go`, `internal/db/config.go`, `internal/db/lock.go`
 - Test: `internal/db/paths_test.go`, `internal/db/file_test.go`, `internal/db/config_test.go`, `internal/db/lock_test.go`
-- Modify: `go.mod`, `go.sum` (add `go.yaml.in/yaml/v3 v3.0.5`), `README.md`, `docs/as-built.md`
+- Modify: `go.mod`, `go.sum` (add `go.yaml.in/yaml/v3 v3.0.5`), `README.md`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -696,8 +672,10 @@ package db
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestTryLockIsExclusive(t *testing.T) {
@@ -717,15 +695,23 @@ func TestTryLockIsExclusive(t *testing.T) {
 	unlock2()
 }
 
-func TestStatusRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "s.yaml")
-	want := Status{Browser: "chrome/155", Error: "x", Skipped: map[string]string{"work": "y"}}
-	if err := SaveStatus(path, want); err != nil {
+func TestConnected(t *testing.T) {
+	p := Paths{Data: t.TempDir()}
+	since := time.Now()
+	if Connected(p, "chrome-a", since) {
+		t.Fatal("connected without a lock file")
+	}
+	unlock, err := TryLock(p.ProfileLock("chrome-a"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := LoadStatus(path)
-	if err != nil || got.Browser != want.Browser || got.Skipped["work"] != "y" || !got.Hello.IsZero() {
-		t.Fatalf("got %+v, %v", got, err)
+	defer unlock()
+	later := since.Add(time.Second)
+	if err := os.Chtimes(p.ProfileLock("chrome-a"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if !Connected(p, "chrome-a", since) {
+		t.Fatal("touched lock file not seen")
 	}
 }
 ```
@@ -739,7 +725,7 @@ Expected: FAIL, undefined names.
 
 ```go
 // Package db reads and writes mirrormark's files: the user's config.yaml,
-// one database file per browser profile, backups, locks and status files.
+// one database file per browser profile, backups and locks.
 package db
 
 import (
@@ -751,7 +737,7 @@ import (
 type Paths struct {
 	Config string // config.yaml
 	Data   string // profiles/, backups/, lock, extension/
-	State  string // log and status files
+	State  string // the host's log
 }
 
 // DefaultPaths follows the XDG base directory spec: a variable counts only
@@ -780,7 +766,6 @@ func (p Paths) ProfileFile(id string) string  { return filepath.Join(p.ProfilesD
 func (p Paths) ProfileLock(id string) string  { return filepath.Join(p.ProfilesDir(), id+".lock") }
 func (p Paths) GlobalLock() string            { return filepath.Join(p.Data, "lock") }
 func (p Paths) BackupDir(id string) string    { return filepath.Join(p.Data, "backups", id) }
-func (p Paths) StatusFile(id string) string   { return filepath.Join(p.State, id+".status.yaml") }
 func (p Paths) LogFile() string               { return filepath.Join(p.State, "log") }
 ```
 
@@ -903,7 +888,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	return d.Sync()
 }
 
-func marshal[T *DB | *Config | *Status](header string, v T) ([]byte, error) {
+func marshal[T *DB | *Config](header string, v T) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(header)
 	enc := yaml.NewEncoder(&buf)
@@ -918,7 +903,7 @@ func marshal[T *DB | *Config | *Status](header string, v T) ([]byte, error) {
 }
 
 // unmarshalStrict rejects unknown keys, so a typo in a hand edit is an error.
-func unmarshalStrict[T *DB | *Config | *Status](data []byte, v T) error {
+func unmarshalStrict[T *DB | *Config](data []byte, v T) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	return dec.Decode(v)
@@ -1100,7 +1085,7 @@ func (c *Config) Validate() error {
 }
 ```
 
-- [ ] **Step 8: Write `internal/db/lock.go` and `internal/db/status.go`**
+- [ ] **Step 8: Write `internal/db/lock.go`**
 
 ```go
 package db
@@ -1110,6 +1095,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // ErrLocked means another process holds the lock.
@@ -1139,49 +1125,22 @@ func lock(path string, flags int) (func(), error) {
 	}
 	return func() { f.Close() }, nil
 }
-```
 
-```go
-package db
-
-import (
-	"os"
-	"time"
-)
-
-// Status is what a host last did, for `mirrormark status`, `install` and
-// the popup. It is not polled, so writing it never starts another round.
-type Status struct {
-	Browser   string            `yaml:"browser,omitempty"`
-	Hello     time.Time         `yaml:"hello,omitempty"`
-	LastRound time.Time         `yaml:"last_round,omitempty"`
-	LastWrite time.Time         `yaml:"last_write,omitempty"`
-	Error     string            `yaml:"error,omitempty"`
-	Skipped   map[string]string `yaml:"skipped,omitempty"`
-}
-
-func LoadStatus(path string) (Status, error) {
-	var s Status
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return s, err
-	}
-	return s, unmarshalStrict(data, &s)
-}
-
-func SaveStatus(path string, s Status) error {
-	data, err := marshal("", &s)
-	if err != nil {
-		return err
-	}
-	return WriteAtomic(path, data, 0o600)
+// Connected reports whether a host has said hello for profile id since
+// since. The host touches the profile's lock file on each hello; reading
+// its mtime never takes the lock, so it cannot race the host for it.
+func Connected(p Paths, id string, since time.Time) bool {
+	info, err := os.Stat(p.ProfileLock(id))
+	return err == nil && info.ModTime().After(since)
 }
 ```
+
+Hosts poll only `*.yaml` files, so touching a lock file never starts a round.
 
 - [ ] **Step 9: Run the tests**
 
 Run: `bin/dev run go test ./internal/db/`
-Expected: PASS. If `omitempty` writes a zero `time.Time`, check that yaml v3 calls `IsZero()` (it does for `omitempty`); the status test catches it.
+Expected: PASS.
 
 - [ ] **Step 10: Docs**
 
@@ -1217,27 +1176,6 @@ shows for that folder, such as `Bookmarks bar`. Write `\/` for a slash inside
 a folder name. One profile's folders may not be inside each other.
 ```
 
-Append to `docs/as-built.md`:
-
-```markdown
-## internal/db
-
-- `Paths` resolves the config, data and state directories from XDG
-  variables (absolute values only) or `$HOME`.
-- Database files are YAML with a header comment and `format: 1`. A union
-  record holds `seq`, the config `path` it was made for, the browser `id`
-  of the member folder and its `children`. Nodes carry `title`, `url`
-  (empty for folders), the browser `id`, mirrormark's `m`, `by` and
-  `suffix`.
-- Reads are strict (`KnownFields`), so a misspelt key in a hand edit fails
-  loudly instead of being dropped on the next write.
-- `WriteAtomic`: temp file in the same directory, `fsync`, `rename`,
-  directory `fsync`.
-- `Backup` copies the database once per calendar day and prunes to 30.
-- `Lock`/`TryLock` use `flock(2)` on files under the data directory.
-- `Status` files are written by the host and only read by other commands.
-```
-
 - [ ] **Step 11: Verify**
 
 Run: `bin/dev run make`
@@ -1246,7 +1184,7 @@ Expected: all packages pass, build succeeds.
 - [ ] **Step 12: Commit**
 
 ```bash
-git add go.mod go.sum internal/db README.md docs/as-built.md
+git add go.mod go.sum internal/db README.md
 git commit -m "feat(rfc-0001): read and write the YAML database and config files safely [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1261,7 +1199,7 @@ The heart of the project. Test first: write each test, watch it fail, then make 
 **Files:**
 - Create: `internal/fakebrowser/fakebrowser.go`, `internal/merge/merge.go`, `internal/merge/ops.go`
 - Test: `internal/merge/merge_test.go` (package `merge_test`)
-- Modify: `docs/as-built.md`, `README.md`
+- Modify: `README.md`
 
 **Interfaces:**
 - Consumes: `db.Node`.
@@ -2472,38 +2410,6 @@ Expected: every test PASS. When one fails, fix `merge.go`, not the test, unless 
 
 - [ ] **Step 7: Docs**
 
-Append to `docs/as-built.md`:
-
-```markdown
-## internal/merge
-
-`merge.Round(Input) (Result, error)` is pure. For one union it compares
-base (P's last record), ours (P's browser now) and theirs (the union's
-latest record) by mirrormark id `m`:
-
-1. P's browser nodes get `m` from base by browser id; new ones are linked
-   to identical new nodes in theirs under the same parent (same title and
-   URL), turned into suffixed pairs when only the title matches, or given a
-   fresh `m`.
-2. Each node merges title, URL and parent separately. A bookmark changed
-   differently on both sides becomes two: theirs keeps `m` and is titled
-   `<title> (<their label>)`, P's browser node takes a new `m` and
-   `<title> (<P's label>)`. Folders are never copied; theirs wins.
-3. A node P removed outside `_deleted` becomes a move into `_deleted`. A
-   node P removed inside `_deleted` is purged unless theirs changed it. A
-   node another member purged is removed unless P changed it.
-4. Parents of kept nodes are kept; cycles drop the move from theirs; the
-   wrong-tree guard refuses rounds that would delete most of the folder.
-   A node to be created is linked to an identical new node already in the
-   browser under the same parent, so creates that landed in a failed round
-   are not repeated.
-5. Ops: creates and moves top-down, updates, then removes, each carrying
-   what it expects to find.
-
-`internal/fakebrowser` applies ops with the same checks as the extension
-and is shared by the tests of `merge`, `round` and `host`.
-```
-
 Append to `README.md` (before "Development"):
 
 ```markdown
@@ -2527,7 +2433,7 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add internal/merge internal/fakebrowser README.md docs/as-built.md
+git add internal/merge internal/fakebrowser README.md
 git commit -m "feat(rfc-0001): merge a union three ways into suffixed copies [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -2542,7 +2448,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `internal/round/live.go`, `internal/round/round.go`
 - Test: `internal/round/round_test.go`, `internal/round/property_test.go` (package `round_test`)
-- Modify: `internal/fakebrowser/fakebrowser.go` (add `Tree`), `docs/as-built.md`
+- Modify: `internal/fakebrowser/fakebrowser.go` (add `Tree`)
 
 **Interfaces:**
 - Consumes: `db.Config`, `db.DB`, `db.Member`, `db.SplitPath`, `db.EqualNodes`, `merge.Round`, `merge.Input`, `merge.Op`, `merge.Conflict`, `merge.ErrWrongTree`; `fakebrowser`.
@@ -3324,41 +3230,15 @@ func collect(n *db.Node, into map[string]int) {
 Run: `bin/dev run go test ./internal/round/ -run TestConvergence -count=1`
 Expected: PASS for all 300 seeds. A failing seed prints its number; rerun it alone with `-run 'TestConvergence/<seed>$' -v` and fix the cause in `merge` or `round` (add a unit test in `merge_test.go` that reproduces it first). Do not weaken an invariant to make a seed pass; if an invariant looks wrong, stop and raise it.
 
-- [ ] **Step 9: Docs**
-
-Append to `docs/as-built.md`:
-
-```markdown
-## internal/round
-
-`round.Make` plans one host round from config, this profile's file, the
-other members' files and the browser's live tree:
-
-- A union is skipped (and its record kept) when another member's file is
-  unreadable, the recorded member folder is gone or replaced, or the
-  wrong-tree guard refuses it. Skips are reported, never treated as empty.
-- A config path different from the recorded one makes a new member: no
-  base, so its first round deletes nothing.
-- Missing member folders are created in a round of their own that writes
-  nothing (`EnsureOnly`); the next tree message shows them.
-- Theirs is the member record of the union with the highest `seq`; a
-  changed record gets one above the highest `seq` read.
-- `Plan.Finish` fills in created ids and reports whether the file changes.
-
-`TestConvergence` runs 300 seeded histories of three members with random
-edits, random round order and failing ops, and checks that the members end
-identical, that every live URL survives exactly once, and that rounds stop.
-```
-
-- [ ] **Step 10: Verify**
+- [ ] **Step 9: Verify**
 
 Run: `bin/dev run make`
 Expected: PASS.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add internal/round internal/fakebrowser docs/as-built.md
+git add internal/round internal/fakebrowser
 git commit -m "feat(rfc-0001): plan sync rounds across member database files [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -3366,16 +3246,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: Native messaging host and `mirrormark status`
+### Task 5: Native messaging host
 
 **Files:**
-- Create: `internal/host/protocol.go`, `internal/host/host.go`, `cmd/mirrormark/status.go`
-- Test: `internal/host/host_test.go`, `cmd/mirrormark/status_test.go`
-- Modify: `cmd/mirrormark/main.go`, `README.md`, `docs/as-built.md`
+- Create: `internal/host/protocol.go`, `internal/host/host.go`
+- Test: `internal/host/host_test.go`
+- Modify: `cmd/mirrormark/main.go`, `README.md`
 
 **Interfaces:**
-- Consumes: `db.*` (paths, `LoadConfig`, `LoadDB`, `SaveDB`, `Backup`, `Lock`, `TryLock`, `ErrLocked`, `SaveStatus`, `LoadStatus`, `LoadAll`, `ValidID`); `round.Build`, `round.Make`, `Plan.Finish`, `round.TreeNode`; `merge.Op`, `merge.OpResult`, `merge.NewM`; `fakebrowser` in tests.
-- Produces: `host.Msg`, `host.ReadMsg`, `host.WriteMsg`, `host.Options`, `host.Run`; the `host` subcommand and host-mode detection (Chrome runs the binary with `chrome-extension://<id>/` as its first argument); `mirrormark status`. The status file is written on every `hello` (task 7's `install` waits for it).
+- Consumes: `db.*` (paths, `LoadConfig`, `LoadDB`, `SaveDB`, `Backup`, `Lock`, `TryLock`, `ErrLocked`, `Connected`, `ValidID`); `round.Build`, `round.Make`, `Plan.Finish`, `round.TreeNode`; `merge.Op`, `merge.OpResult`, `merge.NewM`; `fakebrowser` in tests.
+- Produces: `host.Msg`, `host.ReadMsg`, `host.WriteMsg`, `host.Options`, `host.Run`; the `host` subcommand and host-mode detection (Chrome runs the binary with `chrome-extension://<id>/` as its first argument). The host touches `profiles/<id>.lock` on every `hello` (task 7's `install` waits for that).
 
 **Protocol** (JSON, 32-bit native-endian length prefix, as Chrome requires):
 
@@ -3385,7 +3265,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 | ext → host | `tree` | `v`, `nodes` (`round.TreeNode`) |
 | host → ext | `apply` | `v`, `batch`, `ops` (≤ 500) |
 | ext → host | `applied` | `v`, `batch`, `results` (one per op) |
-| either | `error` | `v`, `code` (`unsupported-version`, `bad-db`, `db-missing`, `db-locked`, `config-invalid`, `db-mismatch`, `apply-failed`), `message` |
+| either | `error` | `v`, `code` (`unsupported-version`, `bad-db`, `db-missing`, `db-locked`, `config-invalid`, `db-mismatch`, `union-skipped`), `message` |
 
 - [ ] **Step 1: Write `internal/host/protocol.go`**
 
@@ -3543,7 +3423,10 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, silent
 				e.send(host.Msg{V: 1, Type: "applied", Batch: m.Batch, Results: res})
 				e.sendTree()
 			case "error":
-				e.errs <- m
+				select {
+				case e.errs <- m:
+				default: // warnings can repeat every round; keep the first few
+				}
 			}
 		}
 	}()
@@ -3619,9 +3502,8 @@ func TestTwoHostsSyncAUnion(t *testing.T) {
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("a's database file is still being written")
 	}
-	st, err := db.LoadStatus(p.StatusFile("a"))
-	if err != nil || st.Hello.IsZero() || st.LastWrite.IsZero() || st.Browser != "chrome/test" {
-		t.Fatalf("status %+v, %v", st, err)
+	if !db.Connected(p, "a", time.Time{}) {
+		t.Fatal("a's hello did not touch its lock file")
 	}
 }
 
@@ -3683,10 +3565,6 @@ func TestSilentBrowserWritesNothing(t *testing.T) {
 	if d.Unions["work"] != nil {
 		t.Fatalf("a wrote a record without its browser applying the batch: %+v", d.Unions["work"])
 	}
-	st, _ := db.LoadStatus(p.StatusFile("a"))
-	if st.Error == "" {
-		t.Fatal("no error recorded for the unanswered batch")
-	}
 }
 ```
 
@@ -3738,7 +3616,6 @@ type state struct {
 	fresh  bool // live reflects the browser after our last batch
 	batch  int
 	mtimes map[string]time.Time
-	status db.Status
 }
 
 // Run serves one extension connection until the browser closes it.
@@ -3844,24 +3721,27 @@ func (s *state) hello(m Msg) error {
 	}
 	// Held until the process exits: a copied profile bound to the same
 	// file must not drive it twice.
-	if _, err := db.TryLock(s.o.Paths.ProfileLock(m.DB)); err != nil {
+	lock := s.o.Paths.ProfileLock(m.DB)
+	if _, err := db.TryLock(lock); err != nil {
 		if errors.Is(err, db.ErrLocked) {
 			return s.fail("db-locked", fmt.Sprintf("another browser profile is using %s; was this profile copied?", m.DB))
 		}
 		return s.fail("db-locked", err.Error())
 	}
+	// install and the tests watch this mtime to see that the profile connected.
+	now := time.Now()
+	if err := os.Chtimes(lock, now, now); err != nil {
+		s.o.Log.Warn("cannot touch lock file", "err", err)
+	}
 	s.self = m.DB
-	s.status, _ = db.LoadStatus(s.o.Paths.StatusFile(m.DB))
-	s.status.Browser, s.status.Hello = m.Browser, time.Now()
-	s.saveStatus()
 	s.o.Log.Info("connected", "db", m.DB, "browser", m.Browser)
 	return nil
 }
 
-func (s *state) saveStatus() {
-	if err := db.SaveStatus(s.o.Paths.StatusFile(s.self), s.status); err != nil {
-		s.o.Log.Warn("cannot write status", "err", err)
-	}
+// warn logs a problem and shows it in the extension's popup.
+func (s *state) warn(code, msg string) {
+	s.o.Log.Warn(msg, "code", code)
+	s.send(Msg{Type: "error", Code: code, Message: msg})
 }
 
 // filesChanged reports whether config.yaml or any database file changed
@@ -3893,19 +3773,15 @@ func (s *state) round() {
 	}
 	defer unlock()
 	defer func() { s.mtimes = s.stat() }() // also covers our own write
-	defer s.saveStatus()
-	s.status.LastRound, s.status.Error = time.Now(), ""
 
 	cfg, err := db.LoadConfig(s.o.Paths.ConfigFile())
 	if err != nil {
-		s.status.Error = err.Error()
-		s.send(Msg{Type: "error", Code: "config-invalid", Message: err.Error()})
+		s.warn("config-invalid", err.Error())
 		return
 	}
 	self, err := db.LoadDB(s.o.Paths.ProfileFile(s.self))
 	if err != nil {
-		s.status.Error = err.Error()
-		s.send(Msg{Type: "error", Code: "db-missing", Message: err.Error()})
+		s.warn("db-missing", err.Error())
 		return
 	}
 	others := map[string]*db.DB{}
@@ -3925,14 +3801,14 @@ func (s *state) round() {
 		}
 	}
 	plan := round.Make(round.Input{Config: cfg, Self: self, Others: others, Live: s.live, NewM: merge.NewM})
-	s.status.Skipped = plan.Skipped
+	for _, u := range slices.Sorted(maps.Keys(plan.Skipped)) {
+		s.warn("union-skipped", fmt.Sprintf("not syncing %s: %s", u, plan.Skipped[u]))
+	}
 	for _, c := range plan.Conflicts {
 		s.o.Log.Info("conflict", "folder", c.Folder, "ours", c.Ours, "theirs", c.Theirs)
 	}
 	if len(plan.WrongTree) > 0 {
-		msg := fmt.Sprintf("refusing to move most of %v to _deleted; is this profile bound to the right database?", plan.WrongTree)
-		s.status.Error = msg
-		s.send(Msg{Type: "error", Code: "db-mismatch", Message: msg})
+		s.warn("db-mismatch", fmt.Sprintf("refusing to move most of %v to _deleted; is this profile bound to the right database?", plan.WrongTree))
 	}
 	created := map[string]string{}
 	if len(plan.Ops) > 0 {
@@ -3945,7 +3821,6 @@ func (s *state) round() {
 				err = fmt.Errorf("browser answered %d of %d ops", len(results), len(chunk))
 			}
 			if err != nil {
-				s.status.Error = err.Error()
 				s.o.Log.Warn("batch failed; nothing written", "err", err)
 				return
 			}
@@ -3960,7 +3835,7 @@ func (s *state) round() {
 				}
 			}
 			if failed > 0 {
-				s.status.Error = fmt.Sprintf("%d changes failed in the browser; will retry", failed)
+				s.o.Log.Warn("changes failed in the browser; nothing written, will retry", "failed", failed)
 				return
 			}
 		}
@@ -3970,7 +3845,7 @@ func (s *state) round() {
 	}
 	next, changed, err := plan.Finish(created)
 	if err != nil {
-		s.status.Error = err.Error()
+		s.o.Log.Warn("cannot finish round", "err", err)
 		return
 	}
 	if !changed {
@@ -3980,10 +3855,8 @@ func (s *state) round() {
 		s.o.Log.Warn("backup failed", "err", err)
 	}
 	if err := db.SaveDB(s.o.Paths.ProfileFile(s.self), next); err != nil {
-		s.status.Error = err.Error()
-		return
+		s.o.Log.Warn("cannot write database", "err", err)
 	}
-	s.status.LastWrite = time.Now()
 }
 
 // await waits for the extension's answer to one batch. Trees that arrive
@@ -4021,123 +3894,14 @@ Note on `fresh`: a tree that arrives while waiting is stored but leaves `fresh` 
 Run: `bin/dev run go test ./internal/host/ -v -count=1`
 Expected: PASS.
 
-- [ ] **Step 6: Write the failing status test** `cmd/mirrormark/status_test.go`
+- [ ] **Step 6: Wire up host mode in `main.go`**
 
-```go
-package main
-
-import (
-	"bytes"
-	"strings"
-	"testing"
-	"time"
-
-	"github.com/chriscz/mirrormark/internal/db"
-)
-
-func TestStatusListsProfilesAndErrors(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_DATA_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
-	p, _ := db.DefaultPaths()
-	db.SaveDB(p.ProfileFile("chrome-a"), &db.DB{Format: 1, Profile: db.Profile{ID: "chrome-a", Label: "chrome/a", Browser: "chrome", Path: "/x/Default"},
-		Unions: map[string]*db.Member{"work": {Seq: 2, Path: "toolbar/Work", ID: "5", Children: []*db.Node{{Title: "G", URL: "https://g/", M: "m-1", ID: "6"}}}}})
-	db.SaveStatus(p.StatusFile("chrome-a"), db.Status{Hello: time.Now(), Error: "boom", Skipped: map[string]string{"work": "why"}})
-	var out, errb bytes.Buffer
-	if code := run([]string{"status"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit %d: %s", code, errb.String())
-	}
-	for _, want := range []string{"chrome-a", "chrome/a", "work: toolbar/Work, 1 bookmarks, seq 2", "error: boom", "skipped work: why", p.LogFile()} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("status output lacks %q:\n%s", want, out.String())
-		}
-	}
-}
-```
-
-- [ ] **Step 7: Write `cmd/mirrormark/status.go` and wire up `main.go`**
-
-```go
-package main
-
-import (
-	"fmt"
-	"io"
-	"maps"
-	"slices"
-	"time"
-
-	"github.com/chriscz/mirrormark/internal/db"
-)
-
-func cmdStatus(stdout, stderr io.Writer) int {
-	p, err := db.DefaultPaths()
-	if err != nil {
-		fmt.Fprintln(stderr, "mirrormark:", err)
-		return 1
-	}
-	cfg, err := db.LoadConfig(p.ConfigFile())
-	if err != nil {
-		fmt.Fprintf(stdout, "config: %v\n", err)
-	} else {
-		fmt.Fprintf(stdout, "config: %s (%d unions)\n", p.ConfigFile(), len(cfg.Unions))
-	}
-	fmt.Fprintf(stdout, "log: %s\n", p.LogFile())
-	dbs, errs := db.LoadAll(p)
-	for _, id := range slices.Sorted(maps.Keys(errs)) {
-		fmt.Fprintf(stdout, "\nprofile %s: unreadable: %v\n", id, errs[id])
-	}
-	for _, id := range slices.Sorted(maps.Keys(dbs)) {
-		d := dbs[id]
-		fmt.Fprintf(stdout, "\nprofile %s (%s) %s\n", id, d.Profile.Label, d.Profile.Path)
-		if st, err := db.LoadStatus(p.StatusFile(id)); err == nil {
-			fmt.Fprintf(stdout, "  last connect: %s (%s)\n", when(st.Hello), st.Browser)
-			fmt.Fprintf(stdout, "  last round: %s; last write: %s\n", when(st.LastRound), when(st.LastWrite))
-			if st.Error != "" {
-				fmt.Fprintf(stdout, "  error: %s\n", st.Error)
-			}
-			for _, u := range slices.Sorted(maps.Keys(st.Skipped)) {
-				fmt.Fprintf(stdout, "  skipped %s: %s\n", u, st.Skipped[u])
-			}
-		} else {
-			fmt.Fprintln(stdout, "  never connected")
-		}
-		for _, u := range slices.Sorted(maps.Keys(d.Unions)) {
-			r := d.Unions[u]
-			fmt.Fprintf(stdout, "  %s: %s, %d bookmarks, seq %d\n", u, r.Path, count(r.Children), r.Seq)
-		}
-	}
-	return 0
-}
-
-func when(t time.Time) string {
-	if t.IsZero() {
-		return "never"
-	}
-	return t.Local().Format("2006-01-02 15:04:05")
-}
-
-func count(ns []*db.Node) int {
-	n := 0
-	for _, c := range ns {
-		if c.URL != "" {
-			n++
-		}
-		n += count(c.Children)
-	}
-	return n
-}
-```
-
-In `cmd/mirrormark/main.go`, add host mode and the two subcommands. Chrome runs the binary named in the host manifest with the extension's origin as its only argument, so that argument selects host mode:
+In `cmd/mirrormark/main.go`, add host mode. Chrome runs the binary named in the host manifest with the extension's origin as its only argument, so that argument selects host mode:
 
 ```go
 const usageText = `Usage: mirrormark <command> [options]
 
 Commands:
-  status      Show profiles, unions, last rounds and errors
   host        Run as the native messaging host (Chrome does this)
   help        Show this help
 `
@@ -4151,8 +3915,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdHost(stdin, stdout, stderr)
 	}
 	switch args[0] {
-	case "status":
-		return cmdStatus(stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -4190,53 +3952,29 @@ func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
 
 (Add imports `context`, `log/slog`, `strings`, and the `db` and `host` packages.)
 
-- [ ] **Step 8: Run all tests**
+- [ ] **Step 7: Run all tests**
 
 Run: `bin/dev run make`
 Expected: PASS.
 
-- [ ] **Step 9: Docs**
+- [ ] **Step 8: Docs**
 
 README, before "Development":
 
 ```markdown
-## Checking on it
+## When something is wrong
 
-    mirrormark status
-
-lists each bound profile with its last connection, last round, last write,
-any error, any union it is skipping and why, and the log file
-(`~/.local/state/mirrormark/log`).
+The extension's popup (the mirrormark button in Chrome's toolbar) shows
+which database the profile syncs as and the last error. Everything the
+host does, including skipped unions, conflicts and failed changes, goes to
+`~/.local/state/mirrormark/log`.
 ```
 
-`docs/as-built.md`:
-
-```markdown
-## internal/host
-
-Chrome starts `mirrormark chrome-extension://<id>/` when the extension
-connects. The host reads length-prefixed JSON on stdin and writes it on
-stdout; it logs to the log file because stdout is the protocol.
-
-- `hello` names the database. The host refuses a missing file
-  (`db-missing`) or one another host holds (`db-locked`, via a
-  non-blocking `flock` on `profiles/<id>.lock` kept until exit), and
-  records the connection in `<id>.status.yaml`.
-- A round runs on each `tree` message and, once the latest tree is fresh,
-  whenever `config.yaml` or any database file's mtime changes (checked
-  every second). It holds the global `flock` from reading the files to
-  writing its own, sends ops in batches of at most 500, and waits up to
-  10 s for each `applied`. Any failure writes nothing.
-- After its own batch the host ignores the tree until the extension's
-  post-batch tree arrives, so it never merges against a stale tree.
-- Before the first write of a day it makes a backup.
-```
-
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add internal/host cmd/mirrormark README.md docs/as-built.md
-git commit -m "feat(rfc-0001): sync through a native messaging host and report status [new feature]
+git add internal/host cmd/mirrormark README.md
+git commit -m "feat(rfc-0001): sync through a native messaging host [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -4245,16 +3983,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 6: Embedded extension
 
-Plain JavaScript, no build step: the binary embeds these files as they are. The extension's behaviour is tested end to end in tasks 8 and 9; here Go tests check the embedded files, `Unpack` and the `unpack` and `version` subcommands. Before committing, load it by hand once (Step 8) so a syntax error does not wait for task 8.
+Plain JavaScript, no build step: the binary embeds these files as they are. The extension's behaviour is tested end to end in tasks 8 and 9; here Go tests check the embedded files and `Unpack`. Before committing, load it by hand once (Step 8) so a syntax error does not wait for task 8.
 
 **Files:**
 - Create: `extension/embed.go`, `extension/manifest.json`, `extension/background.js`, `extension/bind.html`, `extension/bind.js`, `extension/popup.html`, `extension/popup.js`
 - Test: `extension/embed_test.go`
-- Modify: `cmd/mirrormark/main.go` (add `version` and `unpack`), `cmd/mirrormark/main_test.go`, `README.md`, `docs/as-built.md`
 
 **Interfaces:**
 - Consumes: the protocol of task 5 (`hello`, `tree`, `apply`, `applied`, `error`; `round.TreeNode` fields; `merge.Op` fields).
-- Produces: `extension.HostName`, `extension.Files`, `extension.Unpack(dir string, publicKeyDER []byte) error` (nil key: no `key` in the manifest), `extension.Version() (string, error)`; `mirrormark version`, `mirrormark unpack DIR`; the pages `bind.html#<db>` and `popup.html` used by tasks 7–9; `chrome.storage.local` keys `db`, `boundAt`, `status`.
+- Produces: `extension.HostName`, `extension.Files`, `extension.Unpack(dir string, publicKeyDER []byte) error`, `extension.Version() (string, error)`; the pages `bind.html#<db>` and `popup.html` used by tasks 7–9; `chrome.storage.local` keys `db`, `boundAt`, `status`.
 
 - [ ] **Step 1: Write the failing test** `extension/embed_test.go`
 
@@ -4439,7 +4176,7 @@ async function onMessage(p, m) {
     for (const op of m.ops) results.push(await applyOp(op)); // one at a time: order matters
     p.postMessage({ v: V, type: "applied", batch: m.batch, results });
     const failed = results.find((r) => !r.ok);
-    await setStatus({ error: failed ? failed.error : null, lastBatch: Date.now() });
+    await setStatus({ error: failed ? failed.error : null });
     backoff = 5000;
     await sendTree();
   } else if (m.type === "error") {
@@ -4549,7 +4286,6 @@ if (!/^[a-z0-9][a-z0-9-]*$/.test(db)) {
   .error { color: #b00020; }
 </style>
 <p id="db"></p>
-<p id="last"></p>
 <p id="error" class="error"></p>
 <script src="popup.js"></script>
 ```
@@ -4564,7 +4300,6 @@ chrome.storage.local.get(["db", "status"]).then(({ db, status }) => {
     return;
   }
   $("db").textContent = `Syncs as ${db}.`;
-  if (status?.lastBatch) $("last").textContent = `Last change applied ${new Date(status.lastBatch).toLocaleString()}.`;
   if (status?.error) $("error").textContent = status.error;
 });
 ```
@@ -4591,7 +4326,7 @@ const HostName = "com.github.chriscz.mirrormark"
 //go:embed manifest.json background.js bind.html bind.js popup.html popup.js
 var Files embed.FS
 
-// Unpack writes the extension to dir. With a public key it adds it to the
+// Unpack writes the extension to dir and adds the public key to the
 // manifest as "key", so Chrome derives the install's extension id from it.
 func Unpack(dir string, publicKeyDER []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -4610,10 +4345,7 @@ func Unpack(dir string, publicKeyDER []byte) error {
 			if err := json.Unmarshal(data, &m); err != nil {
 				return err
 			}
-			if publicKeyDER != nil {
-				key, _ := json.Marshal(base64.StdEncoding.EncodeToString(publicKeyDER))
-				m["key"] = key
-			}
+			m["key"], _ = json.Marshal(base64.StdEncoding.EncodeToString(publicKeyDER))
 			if data, err = json.MarshalIndent(m, "", "  "); err != nil {
 				return err
 			}
@@ -4636,96 +4368,17 @@ func Version() (string, error) {
 }
 ```
 
-- [ ] **Step 7: Add `mirrormark version` and `mirrormark unpack`**
+- [ ] **Step 7: Run the tests, then load the extension once by hand**
 
-In `run` in `cmd/mirrormark/main.go`, add two cases and the usage lines `  version     Print the version` and `  unpack DIR  Write the extension's files to DIR (for Load unpacked)`:
+Run: `bin/dev run make`
+Expected: PASS.
 
-```go
-	case "version":
-		v, err := extension.Version()
-		if err != nil {
-			fmt.Fprintln(stderr, "mirrormark:", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "mirrormark", v)
-		return 0
-	case "unpack":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "Usage: mirrormark unpack DIR")
-			return 2
-		}
-		if err := extension.Unpack(args[1], nil); err != nil {
-			fmt.Fprintln(stderr, "mirrormark:", err)
-			return 1
-		}
-		return 0
-```
+In any Chrome you already use, open `chrome://extensions`, turn on Developer mode, Load unpacked, choose the repo's `extension/` folder (Chrome ignores `embed.go`). Expected: the card shows no errors, the service worker is listed as active or inactive (not "failed"), and the popup says "Not bound". Remove it again. Say in the commit body that this was done.
 
-Tests in `cmd/mirrormark/main_test.go` (add `os` and `path/filepath` imports):
-
-```go
-func TestVersion(t *testing.T) {
-	var out, errb bytes.Buffer
-	if code := run([]string{"version"}, strings.NewReader(""), &out, &errb); code != 0 || !strings.HasPrefix(out.String(), "mirrormark 0.") {
-		t.Fatalf("exit %d, output %q", code, out.String())
-	}
-}
-
-func TestUnpack(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "ext")
-	var out, errb bytes.Buffer
-	if code := run([]string{"unpack", dir}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit %d: %s", code, errb.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, "background.js")); err != nil {
-		t.Fatal(err)
-	}
-}
-```
-
-- [ ] **Step 8: Run the tests, then load the extension once by hand**
-
-Run: `bin/dev run make && bin/dev run build/mirrormark unpack build/ext`
-Expected: PASS, and `build/ext/` holds six files.
-
-In any Chrome you already use, open `chrome://extensions`, turn on Developer mode, Load unpacked, choose `build/ext`. Expected: the card shows no errors, the service worker is listed as active or inactive (not "failed"), and the popup says "Not bound". Remove it again. Say in the commit body that this was done.
-
-- [ ] **Step 9: Docs**
-
-`docs/as-built.md`:
-
-```markdown
-## extension
-
-Manifest V3, plain JavaScript, embedded with `go:embed` and written out by
-`extension.Unpack`, which adds the install's public key as `key`.
-
-- `background.js` connects to the host when the profile is bound
-  (`storage.local.db`), at worker start and on any bookmark event. It sends
-  `hello` and the whole tree, then a new tree 0.5 s after the last bookmark
-  event and after every batch. It applies ops one at a time, checking each
-  node against `expect` first, and resolves `ref`s of nodes it created.
-  It reconnects 5 s after a disconnect, 60 s after a host error.
-- `bind.html#<db>` stores the binding; `install` opens it in the profile.
-- `popup.html` shows the binding, the last applied batch and the last error.
-```
-
-README, in the command list of "Checking on it" (rename the section to "Commands" and keep `status` in it):
-
-```markdown
-## Commands
-
-| Command | What it does |
-| --- | --- |
-| `mirrormark status` | Bound profiles, last connection, round and write, errors, skipped unions, log file |
-| `mirrormark version` | The version, which is also the extension's version |
-| `mirrormark unpack DIR` | Writes the extension's files to DIR, for Load unpacked |
-```
-
-- [ ] **Step 10: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add extension cmd/mirrormark docs/as-built.md
+git add extension
 git commit -m "feat(rfc-0001): embed the Chrome extension in the binary [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -4733,25 +4386,27 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: `install`, `uninstall` and `install-system-files` for Google Chrome
+### Task 7: `install`, `uninstall` and `unpack` for Google Chrome
 
 **Files:**
 - Create: `internal/chrome/profiles.go`, `internal/chrome/key.go`, `internal/chrome/crx.go`, `internal/chrome/files.go`, `internal/chrome/bind.go`, `cmd/mirrormark/install.go`
 - Test: `internal/chrome/chrome_test.go`, `cmd/mirrormark/install_test.go`
-- Modify: `cmd/mirrormark/main.go`, `cmd/mirrormark/status.go` (print the extension id), `README.md`, `docs/as-built.md`
+- Modify: `cmd/mirrormark/main.go`, `README.md`
 
 **Interfaces:**
-- Consumes: `extension.Unpack`, `extension.Version`, `extension.HostName`; `db.DefaultPaths`, `db.LoadAll`, `db.SaveDB`, `db.LoadStatus`, `db.WriteAtomic`, `db.ValidID`; the host writes `Status.Hello` on every `hello` (task 5).
+- Consumes: `extension.Unpack`, `extension.Version`, `extension.HostName`; `db.DefaultPaths`, `db.LoadAll`, `db.SaveDB`, `db.Connected`, `db.WriteAtomic`, `db.ValidID`; the host touches `profiles/<id>.lock` on every `hello` (task 5).
 - Produces: everything under `internal/chrome` in "Interfaces between tasks". CLI output lines that task 8 parses: `Extension ID: <id>`, `Restart Chrome`, `bound: <profile dir> -> <db id>`.
 
 **Flow of `mirrormark install [--user-data-dir DIR] [--profile DIR]...`:**
 
-1. Read profiles from `<DIR>/Local State`; pick by `--profile`, or the only one, or ask on stdin.
+1. Read profiles from `<DIR>/Local State`; take those named by `--profile`, or all of them. Binding only creates a database file, and nothing syncs until `config.yaml` names it, so all is a safe default.
 2. `chrome.Prepare`: key (`extension.pem`, created once, `0600`), unpack to `extension/` with the key, pack `mirrormark.crx`, id and version.
-3. Print `Extension ID: <id>`. Note whether the two system files (or, after an earlier fallback, the user-level host manifest) are already current: that means Chrome has been restarted since and the extension is there.
-4. If the system files are not current, write them; on a permission error run `sudo <self> install-system-files …`; if that fails, write the host manifest into `<DIR>/NativeMessagingHosts/` and print the Load-unpacked fallback.
-5. For each pick, create its database file unless one already points at `<DIR>/<profile>`; create `config.yaml` with a commented example if missing.
-6. If the files were not current in step 3, print the restart message and stop. Otherwise bind each pick with `chrome.Bind` and print `bound: …` or `not bound: …`.
+3. Print `Extension ID: <id>`. Note whether the two system files are already current: that means an earlier run wrote them and asked for the restart, so the extension is there.
+4. If the system files are not current, write them; on a permission error write them to a temporary directory and copy them into place with `sudo install -D -m 0644`, so no mirrormark code runs as root. If that fails, stop with the error.
+5. For each chosen profile, create its database file unless one already points at `<DIR>/<profile>`; create `config.yaml` with a commented example if missing.
+6. If the files were not current in step 3, print the restart message and stop. Otherwise bind each profile with `chrome.Bind`, confirming through `db.Connected`, and print `bound: …` or `not bound: …`.
+
+`mirrormark unpack` runs step 2 alone and prints the folder, for Load unpacked while developing; the key keeps the id the same as the installed one.
 
 - [ ] **Step 1: Write the failing tests** `internal/chrome/chrome_test.go`
 
@@ -4932,6 +4587,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -4949,23 +4606,13 @@ func TestSlug(t *testing.T) {
 
 func TestChoose(t *testing.T) {
 	all := []chrome.Profile{{Dir: "Default", Name: "Personal"}, {Dir: "Profile 1", Name: "Work"}}
-	var out bytes.Buffer
-	got, err := choose(all, nil, strings.NewReader("2\n"), &out)
-	if err != nil || len(got) != 1 || got[0].Dir != "Profile 1" {
-		t.Fatalf("got %+v, %v", got, err)
+	if got, err := choose(all, nil); err != nil || len(got) != 2 {
+		t.Fatalf("default should be every profile: %+v, %v", got, err)
 	}
-	if !strings.Contains(out.String(), "2) Profile 1 (Work)") {
-		t.Fatalf("prompt %q", out.String())
-	}
-	got, _ = choose(all, []string{"Default"}, strings.NewReader(""), &out)
-	if len(got) != 1 || got[0].Dir != "Default" {
+	if got, _ := choose(all, []string{"Profile 1"}); len(got) != 1 || got[0].Dir != "Profile 1" {
 		t.Fatalf("by flag: %+v", got)
 	}
-	got, _ = choose(all[:1], nil, strings.NewReader(""), &out)
-	if len(got) != 1 {
-		t.Fatal("a single profile should be picked without asking")
-	}
-	if _, err := choose(all, []string{"Nope"}, strings.NewReader(""), &out); err == nil {
+	if _, err := choose(all, []string{"Nope"}); err == nil {
 		t.Fatal("unknown profile accepted")
 	}
 }
@@ -4990,16 +4637,20 @@ func TestEnsureDBMakesUniqueIDs(t *testing.T) {
 	}
 }
 
-func TestInstallSystemFilesRejectsBadInput(t *testing.T) {
+func TestUnpackWritesTheKeyedExtension(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", "")
 	var out, errb bytes.Buffer
-	for _, args := range [][]string{
-		{"install-system-files", "--id", "../../etc/x", "--crx", "/a.crx", "--version", "1", "--bin", "/b"},
-		{"install-system-files", "--id", "pjjjaeommfpeolloibnafkcmkindkagl", "--crx", "rel.crx", "--version", "1", "--bin", "/b"},
-		{"install-system-files", "--id", "pjjjaeommfpeolloibnafkcmkindkagl", "--crx", "/a.crx", "--version", "1;x", "--bin", "/b"},
-	} {
-		if code := run(args, strings.NewReader(""), &out, &errb); code == 0 {
-			t.Errorf("%v accepted", args)
-		}
+	if code := run([]string{"unpack"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	p, _ := db.DefaultPaths()
+	manifest, err := os.ReadFile(filepath.Join(p.Data, "extension", "manifest.json"))
+	if err != nil || !bytes.Contains(manifest, []byte(`"key"`)) {
+		t.Fatalf("manifest %s, %v", manifest, err)
+	}
+	if !strings.Contains(out.String(), "Extension ID: ") {
+		t.Fatalf("output %q", out.String())
 	}
 }
 ```
@@ -5309,15 +4960,6 @@ func SystemFiles(e Extension, bin string) []File {
 	return []File{{p[0], jsonFile(externalJSON{CRX: e.CRX, Version: e.Version})}, {p[1], hostManifest(bin, e.ID)}}
 }
 
-func UserHostManifestPath(userDataDir string) string {
-	return filepath.Join(userDataDir, "NativeMessagingHosts", extension.HostName+".json")
-}
-
-// UserHostManifest is the no-root fallback: it reaches only one data directory.
-func UserHostManifest(userDataDir string, e Extension, bin string) File {
-	return File{UserHostManifestPath(userDataDir), hostManifest(bin, e.ID)}
-}
-
 func FilesCurrent(files []File) bool {
 	for _, f := range files {
 		if data, err := os.ReadFile(f.Path); err != nil || !bytes.Equal(data, f.Data) {
@@ -5401,7 +5043,6 @@ func Bind(chromeBin, userDataDir, profileDir, extID, dbID string, bound func(sin
 package main
 
 import (
-	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -5410,7 +5051,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -5442,12 +5082,12 @@ format: 1
 unions: {}
 `
 
-func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("install", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	udd := fl.String("user-data-dir", "", "Chrome's data directory (default ~/.config/google-chrome)")
 	var picks multiFlag
-	fl.Var(&picks, "profile", `profile directory to bind, such as "Profile 1"; repeatable`)
+	fl.Var(&picks, "profile", `profile directory to bind, such as "Profile 1"; repeatable (default: all)`)
 	if fl.Parse(args) != nil {
 		return 2
 	}
@@ -5468,7 +5108,7 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	chosen, err := choose(profiles, picks, stdin, stdout)
+	chosen, err := choose(profiles, picks)
 	if err != nil {
 		return fail(err)
 	}
@@ -5485,19 +5125,12 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	system := chrome.SystemFiles(ext, self)
-	user := chrome.UserHostManifest(*udd, ext, self)
-	// Current files mean Chrome has started since they were written, so the
-	// extension is installed and profiles can be bound now.
-	ready := chrome.FilesCurrent(system) || chrome.FilesCurrent([]chrome.File{user})
-	if !chrome.FilesCurrent(system) {
-		if err := writeSystemFiles(system, ext, self, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "mirrormark: could not install into Chrome as root (%v).\n", err)
-			if err := chrome.WriteFiles([]chrome.File{user}); err != nil {
-				return fail(err)
-			}
-			fmt.Fprintf(stdout, "Instead, in each profile: open chrome://extensions, turn on Developer mode,\n"+
-				"click Load unpacked and choose %s. Then run mirrormark install again.\n", ext.Dir)
-			ready = false
+	// Current files mean an earlier run wrote them and asked for the
+	// restart, so the extension is installed and profiles can be bound now.
+	ready := chrome.FilesCurrent(system)
+	if !ready {
+		if err := writeSystemFiles(system, stdout, stderr); err != nil {
+			return fail(fmt.Errorf("could not install into Chrome as root: %w", err))
 		}
 	}
 	ids := map[string]string{}
@@ -5524,10 +5157,7 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	code := 0
 	for _, c := range chosen {
 		id := ids[c.Dir]
-		bound := func(since time.Time) bool {
-			st, err := db.LoadStatus(p.StatusFile(id))
-			return err == nil && st.Hello.After(since)
-		}
+		bound := func(since time.Time) bool { return db.Connected(p, id, since) }
 		if err := chrome.Bind(bin, *udd, c.Dir, ext.ID, id, bound); err != nil {
 			fmt.Fprintf(stdout, "not bound: %s: %v\n", c.Dir, err)
 			code = 1
@@ -5536,20 +5166,35 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "bound: %s -> %s\n", c.Dir, id)
 	}
 	if code == 0 {
-		fmt.Fprintf(stdout, "Now list the folders to share in %s.\n", p.ConfigFile())
+		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
 	}
 	return code
 }
 
-// writeSystemFiles writes Chrome's two root-owned files, through sudo and a
-// narrow subcommand if this process may not.
-func writeSystemFiles(files []chrome.File, e chrome.Extension, self string, stdout, stderr io.Writer) error {
+// writeSystemFiles writes Chrome's two root-owned files. If this process
+// may not, it stages them in a temporary directory and copies them into
+// place with `sudo install`, so no mirrormark code runs as root.
+func writeSystemFiles(files []chrome.File, stdout, stderr io.Writer) error {
 	err := chrome.WriteFiles(files)
 	if !errors.Is(err, fs.ErrPermission) {
 		return err
 	}
+	tmp, err := os.MkdirTemp("", "mirrormark-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
 	fmt.Fprintf(stdout, "Writing %s and %s needs root; running sudo.\n", files[0].Path, files[1].Path)
-	return sudo(stdout, stderr, self, "install-system-files", "--id", e.ID, "--crx", e.CRX, "--version", e.Version, "--bin", self)
+	for i, f := range files {
+		src := filepath.Join(tmp, strconv.Itoa(i))
+		if err := os.WriteFile(src, f.Data, 0o644); err != nil {
+			return err
+		}
+		if err := sudo(stdout, stderr, "install", "-D", "-m", "0644", src, f.Path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sudo(stdout, stderr io.Writer, args ...string) error {
@@ -5558,40 +5203,18 @@ func sudo(stdout, stderr io.Writer, args ...string) error {
 	return cmd.Run()
 }
 
-func choose(all []chrome.Profile, picks []string, in io.Reader, out io.Writer) ([]chrome.Profile, error) {
-	if len(picks) > 0 {
-		var got []chrome.Profile
-		for _, want := range picks {
-			i := slices.IndexFunc(all, func(p chrome.Profile) bool { return p.Dir == want })
-			if i < 0 {
-				return nil, fmt.Errorf("no Chrome profile directory %q; run without --profile to see the list", want)
-			}
-			got = append(got, all[i])
-		}
-		return got, nil
-	}
-	if len(all) == 1 {
+// choose returns the profiles named in picks, or every profile if none are.
+func choose(all []chrome.Profile, picks []string) ([]chrome.Profile, error) {
+	if len(picks) == 0 {
 		return all, nil
 	}
-	fmt.Fprintln(out, "Chrome profiles:")
-	for i, p := range all {
-		fmt.Fprintf(out, "  %d) %s (%s)\n", i+1, p.Dir, p.Name)
-	}
-	fmt.Fprint(out, "Profiles to bind (numbers separated by spaces): ")
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && line == "" {
-		return nil, errors.New("no profiles chosen")
-	}
 	var got []chrome.Profile
-	for _, f := range strings.Fields(line) {
-		n, err := strconv.Atoi(f)
-		if err != nil || n < 1 || n > len(all) {
-			return nil, fmt.Errorf("%q is not a number from the list", f)
+	for _, want := range picks {
+		i := slices.IndexFunc(all, func(p chrome.Profile) bool { return p.Dir == want })
+		if i < 0 {
+			return nil, fmt.Errorf("no Chrome profile directory %q in %v", want, all)
 		}
-		got = append(got, all[n-1])
-	}
-	if len(got) == 0 {
-		return nil, errors.New("no profiles chosen")
+		got = append(got, all[i])
 	}
 	return got, nil
 }
@@ -5639,50 +5262,24 @@ func slug(s string) string {
 	return b.String()
 }
 
-var (
-	extIDPattern   = regexp.MustCompile(`^[a-p]{32}$`)
-	versionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
-)
-
-// cmdInstallSystemFiles is what install runs under sudo. It writes or
-// removes only the two system files and checks its arguments, so the root
-// step can do nothing else.
-func cmdInstallSystemFiles(args []string, stdout, stderr io.Writer) int {
-	fl := flag.NewFlagSet("install-system-files", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	id := fl.String("id", "", "extension id")
-	crx := fl.String("crx", "", "absolute path of the CRX")
-	version := fl.String("version", "", "extension version")
-	bin := fl.String("bin", "", "absolute path of the mirrormark binary")
-	remove := fl.Bool("remove", false, "remove the files instead")
-	if fl.Parse(args) != nil {
-		return 2
-	}
-	if !extIDPattern.MatchString(*id) {
-		fmt.Fprintln(stderr, "mirrormark: bad --id")
-		return 2
-	}
-	var err error
-	if *remove {
-		err = chrome.RemoveFiles(chrome.SystemFilePaths(*id))
-	} else {
-		if !filepath.IsAbs(*crx) || !filepath.IsAbs(*bin) || !versionPattern.MatchString(*version) {
-			fmt.Fprintln(stderr, "mirrormark: --crx and --bin must be absolute and --version a version number")
-			return 2
+// cmdUnpack writes the extension with the install's key, so a Load
+// unpacked copy has the same id as the installed one.
+func cmdUnpack(stdout, stderr io.Writer) int {
+	p, err := db.DefaultPaths()
+	if err == nil {
+		var ext chrome.Extension
+		if ext, err = chrome.Prepare(p.Data); err == nil {
+			fmt.Fprintf(stdout, "Extension ID: %s\nUnpacked to %s\n", ext.ID, ext.Dir)
+			return 0
 		}
-		err = chrome.WriteFiles(chrome.SystemFiles(chrome.Extension{ID: *id, Version: *version, CRX: *crx}, *bin))
 	}
-	if err != nil {
-		fmt.Fprintln(stderr, "mirrormark:", err)
-		return 1
-	}
-	return 0
+	fmt.Fprintln(stderr, "mirrormark:", err)
+	return 1
 }
 
 func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	udd := fl.String("user-data-dir", "", "Chrome's data directory (default ~/.config/google-chrome)")
 	purge := fl.Bool("purge", false, "also delete the config, databases, backups, key and log")
 	if fl.Parse(args) != nil {
 		return 2
@@ -5695,23 +5292,17 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if *udd == "" {
-		if *udd, err = chrome.DefaultUserDataDir(); err != nil {
-			return fail(err)
-		}
-	}
 	if key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem")); err == nil {
-		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-		err := chrome.RemoveFiles(chrome.SystemFilePaths(id))
+		paths := chrome.SystemFilePaths(chrome.ExtensionID(chrome.PublicKeyDER(key)))
+		err := chrome.RemoveFiles(paths)
 		if errors.Is(err, fs.ErrPermission) {
-			self, _ := os.Executable()
-			err = sudo(stdout, stderr, self, "install-system-files", "--remove", "--id", id)
+			err = sudo(stdout, stderr, append([]string{"rm", "-f", "--"}, paths...)...)
 		}
 		if err != nil {
 			return fail(err)
 		}
 	}
-	if err := chrome.RemoveFiles([]string{chrome.UserHostManifestPath(*udd), filepath.Join(p.Data, "mirrormark.crx")}); err != nil {
+	if err := chrome.RemoveFiles([]string{filepath.Join(p.Data, "mirrormark.crx")}); err != nil {
 		return fail(err)
 	}
 	if err := os.RemoveAll(filepath.Join(p.Data, "extension")); err != nil {
@@ -5732,32 +5323,25 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 }
 ```
 
-- [ ] **Step 8: Wire the subcommands into `main.go` and `status.go`**
+- [ ] **Step 8: Wire the subcommands into `main.go`**
 
 In `run`, add:
 
 ```go
 	case "install":
-		return cmdInstall(args[1:], stdin, stdout, stderr)
+		return cmdInstall(args[1:], stdout, stderr)
 	case "uninstall":
 		return cmdUninstall(args[1:], stdout, stderr)
-	case "install-system-files": // run by install through sudo; not listed in usage
-		return cmdInstallSystemFiles(args[1:], stdout, stderr)
+	case "unpack":
+		return cmdUnpack(stdout, stderr)
 ```
 
 Usage lines:
 
 ```
   install     Install into Google Chrome and bind profiles [--user-data-dir DIR] [--profile DIR]...
-  uninstall   Remove from Google Chrome [--user-data-dir DIR] [--purge]
-```
-
-In `cmdStatus`, after the log line:
-
-```go
-	if key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem")); err == nil {
-		fmt.Fprintf(stdout, "extension id: %s\n", chrome.ExtensionID(chrome.PublicKeyDER(key)))
-	}
+  uninstall   Remove from Google Chrome [--purge]
+  unpack      Write the extension, with this install's key, for Load unpacked
 ```
 
 - [ ] **Step 9: Run the tests**
@@ -5776,13 +5360,14 @@ You need the `mirrormark` binary (`make` builds `build/mirrormark`; copy it
 somewhere stable such as `~/.local/bin`, because Chrome runs it from there).
 
 1. Close Chrome, or keep it open: either works.
-2. Run `mirrormark install`. It lists your Chrome profiles and asks which to
-   bind (`--profile "Profile 1"` skips the question; a single profile is
-   picked for you). It asks for your password once, through `sudo`, to tell
-   Chrome about the extension. This installs it in every profile of every
-   Chrome on this computer; profiles you don't bind ignore it.
+2. Run `mirrormark install`. It binds every Chrome profile, or only those
+   you name with `--profile "Profile 1"` (repeat it for more). A bound
+   profile syncs nothing until `config.yaml` names it. It asks for your
+   password once, through `sudo`, to copy two files that tell Chrome about
+   the extension. This installs it in every profile of every Chrome on this
+   computer; profiles you don't bind ignore it.
 3. Restart Chrome (close every window), then run `mirrormark install` again.
-   It opens a tab in each chosen profile to bind it, and closes it.
+   It opens a tab in each profile to bind it, and closes it.
 4. Edit `~/.config/mirrormark/config.yaml` to share folders (see below).
    Changes appear in the other profiles within a few seconds.
 
@@ -5790,8 +5375,9 @@ Each bound profile gets an id such as `chrome-work` and a label such as
 `chrome/work` (used in conflict copies). Edit the label in
 `~/.local/share/mirrormark/profiles/<id>.yaml` if you like.
 
-Without `sudo`, install prints how to load the extension by hand
-(Developer mode → Load unpacked).
+`mirrormark unpack` writes the extension, with the same id as the installed
+one, to `~/.local/share/mirrormark/extension/` for Load unpacked while
+developing. It still needs `install`'s files to reach the host.
 
 Upgrading: replace the binary and run `mirrormark install` again, then
 restart Chrome when it asks.
@@ -5803,35 +5389,10 @@ Before you add a union, export your bookmarks from Chrome
 (Bookmark manager → Export) so you have a copy.
 ```
 
-`docs/as-built.md`:
-
-```markdown
-## internal/chrome and install
-
-- Profiles come from `<data dir>/Local State` (`profile.info_cache`).
-- The install key (`extension.pem`, RSA 2048, PKCS#8) is made once. The
-  extension id is derived from its public key as Chrome does; the unpacked
-  manifest carries it as `key`.
-- `WriteCRX` writes CRX3 with the standard library: header with the public
-  key, a PKCS#1 v1.5 SHA-256 signature over "CRX3 SignedData", the signed
-  `crx_id` and the zip.
-- System files: `/usr/share/google-chrome/extensions/<id>.json`
-  (`external_crx`, `external_version` = manifest version) and
-  `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`.
-  `install` writes them itself when it may, else through
-  `sudo mirrormark install-system-files`, which validates its arguments and
-  writes or removes only those two files.
-- Install is two passes: files that are already current mean Chrome has
-  restarted since, so the second pass binds. Binding runs
-  `google-chrome [--user-data-dir=D] --profile-directory=P
-  chrome-extension://<id>/bind.html#<db>` and waits up to 4 s for the
-  host's `hello` in the status file, three times.
-```
-
 - [ ] **Step 11: Commit**
 
 ```bash
-git add internal/chrome cmd/mirrormark README.md docs/as-built.md
+git add internal/chrome cmd/mirrormark README.md
 git commit -m "feat(rfc-0001): install, bind and uninstall for Google Chrome on Linux [new feature]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -5847,10 +5408,10 @@ Each test gets its own `$HOME` and two Chrome data directories, `chrome-a` and `
 
 **Files:**
 - Create: `e2e/cdp.go`, `e2e/browser.go`, `e2e/env.go`, `e2e/install_test.go`
-- Modify: `Dockerfile`, `Makefile`, `README.md`, `docs/as-built.md`
+- Modify: `Dockerfile`, `Makefile`, `README.md`
 
 **Interfaces:**
-- Consumes: the CLI output lines of task 7 (`Extension ID: `, `Restart Chrome`, `bound: Default -> <id>`); `db.Paths`, `db.LoadDB`, `db.LoadStatus`, `db.WriteAtomic`, `db.Lock`; `fakebrowser.NodeLines`; the extension's `popup.html` as a page to run `chrome.*` calls in.
+- Consumes: the CLI output lines of task 7 (`Extension ID: `, `Restart Chrome`, `bound: Default -> <id>`); `db.Paths`, `db.LoadDB`, `db.Connected`, `db.WriteAtomic`, `db.Lock`; `fakebrowser.NodeLines`; the extension's `popup.html` as a page to run `chrome.*` calls in.
 - Produces for task 9: `setup(t) *Env` with `A`, `B`, `DBA`, `DBB`, `LabelA`, `LabelB`, `ExtID`, `Paths`; `(*Env).Union(t)`, `(*Env).launch(name)`, `(*Env).mm(t, args...)`; `(*Browser).Lines/Mkdir/Add/Rename/SetURL/Move/Remove/Close/open`; `waitLines(t, b, folder, want, within) time.Duration`; `eventually(t, within, what, ok)`.
 
 - [ ] **Step 1: Add Chrome and Xvfb to the Dockerfile** (after the Go block)
@@ -5890,7 +5451,7 @@ check-e2e: build
 .PHONY: check-e2e
 ```
 
-`make check-e2e RUN=TestLatency` runs one test.
+`make check-e2e RUN=TestEditsPropagate` runs one test.
 
 - [ ] **Step 3: Write `e2e/cdp.go`**
 
@@ -6305,7 +5866,7 @@ func setup(t *testing.T) *Env {
 	e.ExtID = m[1]
 	// Runs before t.TempDir's cleanup: later tests must not see this
 	// test's extension in the shared system directories.
-	t.Cleanup(func() { e.mm(t, "uninstall", "--user-data-dir", e.udd("a")) })
+	t.Cleanup(func() { e.mm(t, "uninstall") })
 
 	e.A, e.B = e.launch("a"), e.launch("b")
 	e.DBA, e.DBB = e.bind("a"), e.bind("b")
@@ -6389,7 +5950,7 @@ func waitLines(t *testing.T, b *Browser, folder string, want []string, within ti
 }
 ```
 
-Note: if Chrome's first run does not write `Local State` with `profile.info_cache` for a fresh data directory, `install` fails with "Chrome lists no profiles". Check this first when you run the test (Step 7); if it happens, make the first launch open a page and wait 2 s before `Close`, and record the finding in `docs/as-built.md`.
+Note: if Chrome's first run does not write `Local State` with `profile.info_cache` for a fresh data directory, `install` fails with "Chrome lists no profiles". Check this first when you run the test (Step 7); if it happens, make the first launch open a page and wait 2 s before `Close`, and say why in a comment there.
 
 - [ ] **Step 6: Write `e2e/install_test.go`**
 
@@ -6419,20 +5980,14 @@ func TestInstallAndBind(t *testing.T) {
 		if got := eval[string](t, c.b, `chrome.storage.local.get("db").then((r) => r.db)`); got != c.id {
 			t.Errorf("%s is bound to %q, want %q", c.b.Name, got, c.id)
 		}
-		st, err := db.LoadStatus(e.Paths.StatusFile(c.id))
-		if err != nil || st.Hello.IsZero() || !strings.HasPrefix(st.Browser, "chrome/155") {
-			t.Errorf("%s status %+v, %v", c.id, st, err)
-		}
 		d, err := db.LoadDB(e.Paths.ProfileFile(c.id))
 		if err != nil || d.Profile.Path != filepath.Join(c.b.UDD, "Default") {
 			t.Errorf("%s database %+v, %v", c.id, d, err)
 		}
 	}
-	out := e.mm(t, "status")
-	for _, want := range []string{e.DBA, e.DBB, "extension id: " + e.ExtID} {
-		if !strings.Contains(out, want) {
-			t.Errorf("status lacks %q", want)
-		}
+	// Installing again keeps the binding.
+	if out := e.mm(t, "install", "--user-data-dir", e.A.UDD); !strings.Contains(out, "bound: Default -> "+e.DBA) {
+		t.Fatalf("second install rebound to another database:\n%s", out)
 	}
 	// A restart keeps the binding: the service worker starts with the
 	// profile and connects again without any page open.
@@ -6440,17 +5995,8 @@ func TestInstallAndBind(t *testing.T) {
 	e.A.Close()
 	e.A = e.launch("a")
 	eventually(t, 15*time.Second, "a hello after restart", func() bool {
-		st, _ := db.LoadStatus(e.Paths.StatusFile(e.DBA))
-		return st.Hello.After(before)
+		return db.Connected(e.Paths, e.DBA, before)
 	})
-}
-
-func TestInstallAgainKeepsBindings(t *testing.T) {
-	e := setup(t)
-	out := e.mm(t, "install", "--user-data-dir", e.A.UDD)
-	if !strings.Contains(out, "bound: Default -> "+e.DBA) {
-		t.Fatalf("second install rebound to another database:\n%s", out)
-	}
 }
 ```
 
@@ -6468,33 +6014,17 @@ README, in "Development":
 
 ```markdown
     bin/dev run make check-e2e                  # end-to-end tests in real Chrome
-    bin/dev run make check-e2e RUN=TestLatency  # one of them
+    bin/dev run make check-e2e RUN=TestEditsPropagate  # one of them
 
 The end-to-end tests start two Google Chrome instances under Xvfb in the
 dev image, install mirrormark into them with `mirrormark install` and
 drive them over the DevTools protocol. They take a few minutes.
 ```
 
-`docs/as-built.md`:
-
-```markdown
-## e2e
-
-Go tests behind the `e2e` build tag. Each test gets its own `$HOME` and two
-Chrome data directories, launched with `--remote-debugging-pipe`: the
-DevTools protocol as NUL-terminated JSON on fds 3 and 4, so no WebSocket
-client. `chrome.*` calls run in the extension's popup page opened as a tab.
-Setup goes through the real install: first run of Chrome, `install`
-(writes the system files, asks for a restart), restart, `install` per data
-directory (binds). The dev image makes the two system directories
-world-writable (sticky) so this needs no `sudo`; every test uninstalls in
-its cleanup.
-```
-
 - [ ] **Step 9: Commit**
 
 ```bash
-git add Dockerfile Makefile e2e README.md docs/as-built.md
+git add Dockerfile Makefile e2e README.md
 git commit -m "test(rfc-0001): install and bind in two Chrome instances end to end
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -6506,10 +6036,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `e2e/sync_test.go`
-- Modify: `docs/as-built.md`, `README.md` (only if a test shows the README is wrong)
+- Modify: `README.md` (only if a test shows the README is wrong)
 
 **Interfaces:**
-- Consumes: everything task 8 produces; `db.Lock`, `db.LoadDB`, `db.LoadStatus`; `fakebrowser.NodeLines`.
+- Consumes: everything task 8 produces; `db.Lock`, `db.LoadDB`; `fakebrowser.NodeLines`.
 - Produces: nothing further.
 
 A bug these tests find in an earlier task is fixed in that task's commit, with a unit test that fails without the fix, so every commit in the stack stays correct on its own: `git commit --fixup=<sha of that task>` and then `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <base>` (no interactive editor needed). A bug outside this plan's work goes into `TASKS.md`.
@@ -6523,6 +6053,7 @@ package e2e
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"testing"
 	"time"
@@ -6536,7 +6067,7 @@ const (
 	lwn = "https://lwn.net/"
 )
 
-// syncTimeout is generous; TestLatency checks the 3-second target.
+// syncTimeout is generous; TestEditsPropagate checks the 3-second target.
 const syncTimeout = 10 * time.Second
 
 // synced puts one bookmark in A's Work and waits for it in B.
@@ -6554,24 +6085,29 @@ func both(t *testing.T, e *Env, want ...string) {
 	waitLines(t, e.B, "Work", want, syncTimeout)
 }
 
-func TestAddPropagates(t *testing.T) {
+// TestEditsPropagate adds, renames, makes a folder and moves, each in one
+// browser, and checks that every edit reaches the other within 3 seconds.
+func TestEditsPropagate(t *testing.T) {
 	e := synced(t)
+	var worst time.Duration
+	reach := func(b *Browser, want ...string) {
+		t.Helper()
+		d := waitLines(t, b, "Work", want, syncTimeout)
+		t.Logf("reached %s after %v", b.Name, d)
+		worst = max(worst, d)
+	}
 	e.B.Add(t, "Work", "News", lwn)
-	both(t, e, "/GitHub "+gh, "/News "+lwn)
-}
-
-func TestRenamePropagates(t *testing.T) {
-	e := synced(t)
+	reach(e.A, "/GitHub "+gh, "/News "+lwn)
 	e.A.Rename(t, "Work/GitHub", "GH")
-	both(t, e, "/GH "+gh)
-}
-
-func TestMovePropagates(t *testing.T) {
-	e := synced(t)
+	reach(e.B, "/GH "+gh, "/News "+lwn)
 	e.A.Mkdir(t, "Work/Dev")
-	waitLines(t, e.B, "Work", []string{"/Dev/", "/GitHub " + gh}, syncTimeout)
-	e.A.Move(t, "Work/GitHub", "Work/Dev")
-	both(t, e, "/Dev/", "/Dev/GitHub "+gh)
+	reach(e.B, "/Dev/", "/GH "+gh, "/News "+lwn)
+	e.A.Move(t, "Work/GH", "Work/Dev")
+	reach(e.B, "/Dev/", "/Dev/GH "+gh, "/News "+lwn)
+	both(t, e, "/Dev/", "/Dev/GH "+gh, "/News "+lwn)
+	if worst > 3*time.Second {
+		t.Fatalf("worst latency %v; the target is 3 s", worst)
+	}
 }
 
 func TestDeleteMovesToDeletedEverywhere(t *testing.T) {
@@ -6630,66 +6166,46 @@ func TestClosedBrowserCatchesUpOnStart(t *testing.T) {
 	// B's host writes B's file in the round that applies News; that write
 	// must come within 3 s of B's extension connecting.
 	eventually(t, 30*time.Second, "B to catch up", func() bool {
-		st, err := db.LoadStatus(e.Paths.StatusFile(e.DBB))
-		return err == nil && st.LastWrite.After(st.Hello)
+		d, err := db.LoadDB(e.Paths.ProfileFile(e.DBB))
+		return err == nil && d.Unions["work"] != nil &&
+			slices.Contains(fakebrowser.NodeLines(d.Unions["work"].Children), "/News "+lwn)
 	})
-	st, _ := db.LoadStatus(e.Paths.StatusFile(e.DBB))
-	if d := st.LastWrite.Sub(st.Hello); d > 3*time.Second {
+	// The host touches the lock file on hello.
+	hello, err := os.Stat(e.Paths.ProfileLock(e.DBB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrote, err := os.Stat(e.Paths.ProfileFile(e.DBB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := wrote.ModTime().Sub(hello.ModTime()); d > 3*time.Second {
 		t.Errorf("B caught up %v after connecting; want at most 3 s", d)
 	}
 	e.B.open(t, e.ExtID)
 	waitLines(t, e.B, "Work", []string{"/GitHub " + gh, "/News " + lwn}, syncTimeout)
 }
 
-func TestLatency(t *testing.T) {
-	e := synced(t)
-	want := []string{"/GitHub " + gh}
-	var worst time.Duration
-	for i := range 3 {
-		title := fmt.Sprintf("L%d", i)
-		url := "https://example.com/" + title
-		e.A.Add(t, "Work", title, url)
-		want = append(want, "/"+title+" "+url)
-		d := waitLines(t, e.B, "Work", slices.Clone(want), syncTimeout)
-		t.Logf("%s reached B after %v", title, d)
-		worst = max(worst, d)
-	}
-	if worst > 3*time.Second {
-		t.Fatalf("worst A-to-B latency %v; the target is 3 s", worst)
-	}
-}
 ```
 
-Note on `TestClosedBrowserCatchesUpOnStart`: `st.LastWrite.After(st.Hello)` also becomes true if B writes for some other reason after connecting; here nothing else changes, so the first write after `hello` is the catch-up round.
+Note on `TestClosedBrowserCatchesUpOnStart`: B's file changes only in the round that applies News, so its mtime is the catch-up write.
 
 - [ ] **Step 2: Run them**
 
 Run: `bin/dev run make check-e2e`
-Expected: all tests in `e2e/` PASS; `TestLatency` logs three latencies under 3 s (expected around 1.5–2 s: 0.5 s quiet time, A's round, up to 1 s until B polls, B's round).
+Expected: all tests in `e2e/` PASS; `TestEditsPropagate` logs four latencies under 3 s (expected around 1.5–2 s: 0.5 s quiet time, A's round, up to 1 s until B polls, B's round).
 
-When a test fails, find the cause with `superpowers:systematic-debugging`: read the host log (`<home>/.local/state/mirrormark/log`), the status files and the database files of the run. Fix the code, and add a unit test in the package at fault that fails without the fix.
+When a test fails, find the cause with `superpowers:systematic-debugging`: read the host log (`<home>/.local/state/mirrormark/log`) and the database files of the run. Fix the code, and add a unit test in the package at fault that fails without the fix.
 
 - [ ] **Step 3: Run the whole suite once more, three times in a row**
 
 Run: `for i in 1 2 3; do bin/dev run make check-e2e || break; done`
 Expected: three clean runs. A test that fails only sometimes is a bug (usually a missing wait or a race in the host); fix it, don't retry it.
 
-- [ ] **Step 4: Docs**
-
-`docs/as-built.md`, under `## e2e`:
-
-```markdown
-`sync_test.go` covers, with two Chrome instances in one union: add,
-rename, move, delete to `_deleted` and purge, conflicting edits (both
-hosts held off by taking the global lock in the test), first sync of
-existing folders, a closed browser catching up on start (within 3 s of its
-`hello`), and A-to-B latency (at most 3 s).
-```
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add e2e docs/as-built.md
+git add e2e
 git commit -m "test(rfc-0001): cover union sync end to end in two Chrome instances
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -6700,7 +6216,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ## After the last task
 
 - Run `bin/dev run make && bin/dev run make check-e2e` on the final stack.
-- Try the no-`sudo` fallback by hand once (rename `sudo` away in a throwaway container, or answer the password prompt wrongly) and record the result in the PR description, as the RFC's rollout asks.
+- The e2e image makes the system directories writable, so the `sudo install` path never runs there. Run `mirrormark install` once where they are root-owned (the developer's machine below is enough) and record that it asked for `sudo` once and wrote both files `0644`.
 - Run once on the developer's own Chrome with two test profiles, and record it in the PR.
 - Keep the RFC true: if the implementation changed anything the RFC says, update it in its own `docs(rfc-0001): ...` commit at the end of the stack. The RFC stays `draft` until the stack is merged; then close it out with `rfc-craft` (`in review`, then `accepted`).
 
@@ -6709,7 +6225,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Google drops old Chrome packages.** The pinned `.deb` URL will stop working some day; the Dockerfile says to bump version and checksum together. A Chrome upgrade can change the undocumented parts this relies on (`Local State`, the external-extensions directory, command-line forwarding of `chrome-extension://` URLs).
 - **`Local State` after a first run.** The tests assume Chrome writes `profile.info_cache` when a fresh data directory closes cleanly. Task 8 Step 5 says what to do if not.
 - **Merge corner cases.** The merge code is new and subtle (deletion as a move, purges, resurrection, cycles, retries). The unit tests pin the RFC's examples and the property test explores histories, but a convergence failure in the property test is the most likely place for implementation time to go. Do not weaken invariants to pass it.
-- **Latency.** The 3-second target leaves about 1 s of slack over the expected 1.5–2 s. A slow CI machine can push `TestLatency` over; if so, measure where the time goes before changing any timing.
+- **Latency.** The 3-second target leaves about 1 s of slack over the expected 1.5–2 s. A slow CI machine can push `TestEditsPropagate` over; if so, measure where the time goes before changing any timing.
 - **One slow browser stalls all.** A round holds the global lock while its browser applies ops (up to 10 s); acceptable for two or three profiles, as the RFC says.
 - **The system host manifest names the installing user's binary.** Other OS users on the same machine get the extension but stay unbound, so it never starts the host for them.
+- **Errors repeat in the log.** A skipped union warns on every round (each file change). Noisy, but the log is the only place besides the popup that says why a union is not syncing.
 - **Tests share the system directories.** Tests run one at a time and uninstall in cleanup; do not add `t.Parallel()` to e2e tests.
