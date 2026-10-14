@@ -124,14 +124,16 @@ func (e *Env) firstInstall(t *testing.T) {
 	}
 	chromeDone := false
 	for _, name := range []string{"a", "b"} {
+		restart := "Restart Firefox"
 		if e.kind(name) == "chrome" {
 			if chromeDone {
 				continue // one install writes the system files for every data directory
 			}
 			chromeDone = true
+			restart = "Restart Chrome"
 		}
 		out := e.mm(t, e.installArgs(name)...)
-		if !strings.Contains(out, "Restart ") {
+		if !strings.Contains(out, restart) {
 			t.Fatalf("first install did not ask for a restart:\n%s", out)
 		}
 		if e.kind(name) == "chrome" {
