@@ -34,53 +34,54 @@
 
 From the Firefox spike (2026-10-15, Docker, Developer Edition 159.0b2): the per-profile XPI and `user.js` install; release 158.0 refusing it; the shared manifest in Firefox and Chrome for Testing 155; the missing bookmark events; the per-user host manifest and Firefox's two host arguments; the port keeping the event page alive; the UUID in `prefs.js`; binding cold and over D-Bus remoting (not headless); Firefox's roots, GUID ids, separators, same-parent move indexes and index clamping; profile roots and the new profile switcher; a standard-library BiDi client in content and chrome scope.
 
-**Not verified, and checked by the task named:** BiDi and D-Bus remoting in one Firefox instance (Task 13); Firefox picking up a replaced XPI (Task 13); uninstall's prefs and XPI removal taking effect (Task 15); which URLs Firefox refuses (Task 15); `remote.prefs.recommended` leaving install's prefs alone (Task 13); the reconnect alarm in an event page (covered by Task 14's closed-browser test only indirectly).
+**Not verified, and checked by the task named:** BiDi and D-Bus remoting in one Firefox instance (Task 11); uninstall's prefs and XPI removal taking effect (Task 13); `remote.prefs.recommended` leaving install's prefs alone (Task 11); the reconnect alarm in an event page (covered by Task 12's closed-browser test only indirectly).
+
+**Not verified, and not tested (accepted risks in the RFC):** Firefox picking up a replaced XPI after an upgrade; which URL schemes Firefox refuses to store.
 
 ## File structure
 
 ```
 extension/
-  manifest.json             + background.scripts, browser_specific_settings.gecko (Task 2)
+  manifest.json             + background.scripts, browser_specific_settings.gecko (Task 1)
   background.js             Firefox portability (Task 1)
-  embed.go                  + GeckoID (Task 2)
+  embed.go                  + GeckoID (Task 1)
 cmd/mirrormark/
-  main.go                   host mode for Firefox's arguments (Task 3)
-  install.go                --browser firefox for install and uninstall (Tasks 5, 9, 10)
-internal/chrome/bind.go     Retry, the bind loop both browsers use (Task 5)
-internal/fakebrowser/       NewFirefox: a Firefox-shaped tree (Task 4)
-internal/round/round.go     menu is Firefox-only (Task 4)
-internal/firefox/           new (Tasks 6–8)
+  main.go                   host mode for Firefox's arguments (Task 2)
+  install.go                --browser firefox for install and uninstall (Tasks 4, 8)
+internal/chrome/bind.go     Retry, the bind loop both browsers use (Task 4)
+internal/fakebrowser/       NewFirefox: a Firefox-shaped tree (Task 3)
+internal/firefox/           new (Tasks 5–7)
   profiles.go               DefaultRoot, Profiles, Dir
   files.go                  XPI, Files, Channel, UUID, ResetPrefs
   bind.go                   Bind
   firefox_test.go
-Dockerfile, Makefile        Developer Edition, D-Bus (Task 11)
+Dockerfile, Makefile        Developer Edition, D-Bus (Task 9)
 e2e/
-  browser.go                driver interface, Chrome driver (Task 12)
-  bidi.go                   WebDriver BiDi client and Firefox driver (Task 13)
-  env.go                    browser kinds per profile (Tasks 12–13)
-  install_test.go           Firefox install, bind and upgrade tests (Task 13)
-  sync_test.go              sync tests per browser pair (Task 14)
-  firefox_test.go           separators, menu, uninstall, URLs (Task 15)
+  browser.go                driver interface, Chrome driver (Task 10)
+  bidi.go                   WebDriver BiDi client and Firefox driver (Task 11)
+  env.go                    browser kinds per profile (Tasks 10–11)
+  install_test.go           Firefox install and bind tests (Task 11)
+  sync_test.go              sync tests per browser pair (Task 12)
+  firefox_test.go           separators, uninstall (Task 13)
 ```
 
 ## Interfaces between tasks
 
 ```go
-// extension (Task 2)
+// extension (Task 1)
 const GeckoID = "mirrormark@chriscz.github.io"
 
-// internal/chrome (Task 5)
+// internal/chrome (Task 4)
 func Retry(bin string, args []string, bound func(since time.Time) bool) (bool, error)
 // existing, reused by firefox: Profile{Dir, Name}, File{Path, Data}, FilesCurrent, WriteFiles, RemoveFiles
 
-// cmd/mirrormark (Task 5)
+// cmd/mirrormark (Task 4)
 func ensureDB(p db.Paths, browser, path string, c chrome.Profile) (string, error)
 
-// internal/fakebrowser (Task 4)
+// internal/fakebrowser (Task 3)
 func NewFirefox() *Browser   // roots root________, menu________, toolbar_____, unfiled_____, mobile______
 
-// internal/firefox (Tasks 6–8)
+// internal/firefox (Tasks 5–7)
 func DefaultRoot() (string, error)
 func Profiles(root string) ([]chrome.Profile, error)   // Dir as profiles.ini gives it, or the scanned directory's name
 func Dir(root string, p chrome.Profile) string
@@ -95,7 +96,7 @@ func UUID(profileDir string) (string, error)            // "" while Firefox has 
 var UUIDWait = 15 * time.Second
 func Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error
 
-// e2e (Tasks 12–13)
+// e2e (Tasks 10–11)
 type driver interface {
 	eval(expr string) (json.RawMessage, error)
 	openPage(url string) error
@@ -111,36 +112,34 @@ func setupPair(t *testing.T, a, b string) *Env      // kinds "chrome" or "firefo
 | # | Commit subject |
 | --- | --- |
 | 1 | `feat(rfc-0001): let the extension run in Firefox` |
-| 2 | `feat(rfc-0001): give the manifest Firefox's background script and id` |
-| 3 | `feat(rfc-0001): run as the host when Firefox starts mirrormark` |
-| 4 | `feat(rfc-0001): sync Firefox-shaped trees and keep menu to Firefox members` |
-| 5 | `refactor(rfc-0001): share the bind loop and database ids between browsers` |
-| 6 | `feat(rfc-0001): list Firefox profiles` |
-| 7 | `feat(rfc-0001): build the XPI and the files a Firefox profile needs` |
-| 8 | `feat(rfc-0001): bind a Firefox profile` |
-| 9 | `feat(rfc-0001): install into Firefox Developer Edition [new feature]` |
-| 10 | `feat(rfc-0001): uninstall from Firefox and restore its signature checks` |
-| 11 | `build(rfc-0001): add Firefox Developer Edition and D-Bus to the dev image` |
-| 12 | `refactor(rfc-0001): put the e2e browser behind a driver` |
-| 13 | `test(rfc-0001): install and bind Firefox profiles end to end` |
-| 14 | `test(rfc-0001): run the sync tests between Firefox and Chrome` |
-| 15 | `test(rfc-0001): cover separators, menu, uninstall and URLs in Firefox` |
+| 2 | `feat(rfc-0001): run as the host when Firefox starts mirrormark` |
+| 3 | `feat(rfc-0001): sync Firefox-shaped trees and allow menu in Firefox paths` |
+| 4 | `refactor(rfc-0001): share the bind loop and database ids between browsers` |
+| 5 | `feat(rfc-0001): list Firefox profiles` |
+| 6 | `feat(rfc-0001): build the XPI and the files a Firefox profile needs` |
+| 7 | `feat(rfc-0001): bind a Firefox profile` |
+| 8 | `feat(rfc-0001): install into and uninstall from Firefox Developer Edition [new feature]` |
+| 9 | `build(rfc-0001): add Firefox Developer Edition and D-Bus to the dev image` |
+| 10 | `refactor(rfc-0001): put the e2e browser behind a driver` |
+| 11 | `test(rfc-0001): install and bind Firefox profiles end to end` |
+| 12 | `test(rfc-0001): run the sync tests between Firefox and Chrome` |
+| 13 | `test(rfc-0001): cover separators and uninstall in Firefox` |
 
-Tasks 1–4 change nothing for a Chrome user. Tasks 5–10 are a working Firefox install, unit-tested. Tasks 11–15 prove it end to end. Any prefix of the stack can land.
+Tasks 1–3 change nothing for a Chrome user. Tasks 4–8 are a working Firefox install, unit-tested; install and uninstall land together so no prefix weakens a profile's add-on checks without the way to restore them. Tasks 9–13 prove it end to end. Any prefix of the stack can land.
 
 ---
 
 ### Task 1: Let the extension run in Firefox
 
 **Files:**
-- Modify: `extension/background.js`
-- Modify: `extension/embed.go` (package comment: mention Firefox)
+- Modify: `extension/background.js`, `extension/manifest.json`
+- Modify: `extension/embed.go` (package comment: mention Firefox; `GeckoID`)
 
 **Interfaces:**
 - Consumes: the protocol as it is.
-- Produces: trees with `root` set for Firefox's four top-level folders, no separators, and indexes counting only non-separators; `hello.browser` = `firefox/<version>` in Firefox.
+- Produces: `extension.GeckoID`; trees with `root` set for Firefox's four top-level folders, no separators, and indexes counting only non-separators; `hello.browser` = `firefox/<version>` in Firefox.
 
-There are no JavaScript unit tests; the Chrome e2e suite is the regression test, and Tasks 13–15 test Firefox.
+There are no JavaScript unit tests; the Chrome e2e suite is the regression test, and Tasks 11–13 test Firefox.
 
 - [ ] **Step 1: Detect the browser once, at the top of `background.js`**
 
@@ -156,7 +155,6 @@ const FIREFOX_ROOTS = {
 };
 const [, BROWSER = "Chrome", VERSION = ""] =
   navigator.userAgent.match(/(Firefox|Chrome)\/([\d.]+)/) ?? [];
-const FIREFOX = BROWSER === "Firefox";
 // Separators exist only in Firefox. The host never sees them: they hold
 // nothing to sync, and Chrome could not hold them.
 const isSeparator = (n) => n.type === "separator";
@@ -226,22 +224,17 @@ Replace `clamp` with:
 ```js
 // realIndex turns the host's index, which counts only siblings that are not
 // separators, into the browser's. An index past the end means the end.
-// For a move within one parent the host means Chrome's reading, the
-// position before the node leaves its old place; Firefox reads it as the
-// final position, so a move down there needs one less. The host never sends
-// such a move, as reordering stays local, but an op should mean the same in
-// both browsers.
-async function realIndex(parentId, index, moving) {
+// The host never moves a node within its own parent (reordering stays
+// local), where Firefox and Chrome read the index differently.
+async function realIndex(parentId, index) {
   if (index === undefined) return undefined;
   const kids = await chrome.bookmarks.getChildren(parentId);
   const shown = kids.filter((k) => !isSeparator(k));
-  let i = index < shown.length ? shown[index].index : kids.length;
-  if (FIREFOX && moving?.parentId === parentId && i > moving.index) i--;
-  return i;
+  return index < shown.length ? shown[index].index : kids.length;
 }
 ```
 
-In `applyOp`, `create` uses `index: await realIndex(parent, op.index)` and `move` uses `index: await realIndex(parent, op.index, n)`.
+In `applyOp`, `create` and `move` use `index: await realIndex(parent, op.index)`.
 
 - [ ] **Step 6: Take a purged folder's separators with it**
 
@@ -260,75 +253,7 @@ In `applyOp`'s `remove` case, before `chrome.bookmarks.remove(op.id)`:
 
 Update the file's header comment: "Chrome and Firefox install it in every bound profile".
 
-- [ ] **Step 7: Verify Chrome is unchanged**
-
-Run: `bin/dev run make && bin/dev run make check-e2e`
-Expected: PASS, every e2e test, and in the host log `browser=chrome/155.0.8059.79`.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add extension/background.js extension/embed.go
-git commit -m "feat(rfc-0001): let the extension run in Firefox" -m "Skip bookmark events Firefox lacks, name its top-level folders by id, hide separators from the host and map indexes around them, read the disconnect reason from the port, and label the hello firefox/<version>. Chrome sees no change." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
----
-
-### Task 2: One manifest for both browsers
-
-**Files:**
-- Modify: `extension/manifest.json`
-- Modify: `extension/embed.go`
-- Test: `extension/embed_test.go`
-
-**Interfaces:**
-- Produces: `extension.GeckoID`.
-
-- [ ] **Step 1: Write the failing test** in `extension/embed_test.go`:
-
-```go
-// Firefox runs background.scripts as an event page and takes its id from
-// browser_specific_settings; Chrome ignores both and runs the service worker.
-func TestManifestServesFirefoxToo(t *testing.T) {
-	raw, err := Files.ReadFile("manifest.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m struct {
-		Background struct {
-			ServiceWorker string   `json:"service_worker"`
-			Scripts       []string `json:"scripts"`
-		} `json:"background"`
-		Specific struct {
-			Gecko struct {
-				ID         string `json:"id"`
-				MinVersion string `json:"strict_min_version"`
-			} `json:"gecko"`
-		} `json:"browser_specific_settings"`
-	}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	if m.Background.ServiceWorker != "background.js" || !slices.Equal(m.Background.Scripts, []string{"background.js"}) {
-		t.Fatalf("background %+v", m.Background)
-	}
-	if m.Specific.Gecko.ID != GeckoID || m.Specific.Gecko.MinVersion != "128.0" {
-		t.Fatalf("gecko %+v", m.Specific.Gecko)
-	}
-}
-```
-
-- [ ] **Step 2: Run it.** `bin/dev run go test ./extension -run TestManifestServesFirefoxToo` → FAIL: `undefined: GeckoID`.
-
-- [ ] **Step 3: Implement.** In `embed.go` beside `HostName`:
-
-```go
-// GeckoID is the extension's id in Firefox. Firefox does not derive ids from
-// a key, so every install shares it.
-const GeckoID = "mirrormark@chriscz.github.io"
-```
-
-In `manifest.json`:
+- [ ] **Step 7: One manifest for both browsers.** Firefox runs `background.scripts` as an event page and takes its id from `browser_specific_settings`; Chrome ignores both and runs the service worker. In `manifest.json`:
 
 ```json
   "background": { "service_worker": "background.js", "scripts": ["background.js"] },
@@ -337,13 +262,31 @@ In `manifest.json`:
   },
 ```
 
-- [ ] **Step 4: Run.** `bin/dev run make && bin/dev run make check-e2e` → PASS (Chrome loads the CRX; `TestInstallAndBind` checks it is enabled).
+In `embed.go` beside `HostName`:
 
-- [ ] **Step 5: Commit** `extension/` with subject `feat(rfc-0001): give the manifest Firefox's background script and id`.
+```go
+// GeckoID is the extension's id in Firefox. Firefox does not derive ids from
+// a key, so every install shares it.
+const GeckoID = "mirrormark@chriscz.github.io"
+```
+
+No unit test pins the manifest: the Chrome e2e suite shows Chrome still loads it, and Task 11 checks the id Firefox gives the add-on.
+
+- [ ] **Step 8: Verify Chrome is unchanged**
+
+Run: `bin/dev run make && bin/dev run make check-e2e`
+Expected: PASS, every e2e test, and in the host log `browser=chrome/155.0.8059.79`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add extension/
+git commit -m "feat(rfc-0001): let the extension run in Firefox" -m "Give the manifest Firefox's background script and gecko id, skip bookmark events Firefox lacks, name its top-level folders by id, hide separators from the host and map indexes around them, read the disconnect reason from the port, and label the hello firefox/<version>. Chrome sees no change." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
 
 ---
 
-### Task 3: Host mode for Firefox's arguments
+### Task 2: Host mode for Firefox's arguments
 
 **Files:**
 - Modify: `cmd/mirrormark/main.go`
@@ -390,12 +333,13 @@ func TestFirefoxArgumentsRunTheHost(t *testing.T) {
 
 ---
 
-### Task 4: Firefox-shaped trees and the `menu` folder
+### Task 3: Firefox-shaped trees and the `menu` folder
 
 **Files:**
-- Modify: `internal/fakebrowser/fakebrowser.go`
-- Modify: `internal/round/round.go`
+- Modify: `internal/fakebrowser/fakebrowser.go`, `README.md`
 - Test: `internal/round/round_test.go`, `internal/round/property_test.go`
+
+`round` needs no change: a path's first segment already matches a top-level folder's `Root`, and a Chrome member with a `menu` path is skipped with "no top-level folder", as for any folder a browser lacks.
 
 **Interfaces:**
 - Produces: `fakebrowser.NewFirefox() *Browser`.
@@ -415,15 +359,6 @@ func TestFirefoxMenuPath(t *testing.T) {
 	apply(t, b, p)
 	if got := b.Lines("menu________"); !slices.Equal(got, []string{"/Work/"}) {
 		t.Fatalf("menu %q", got)
-	}
-}
-
-// Chrome has no menu folder: say so rather than "no top-level folder".
-func TestMenuIsFirefoxOnly(t *testing.T) {
-	b := fakebrowser.New()
-	p := round.Make(round.Input{Config: config(map[string]string{"a": "menu/Work"}), Self: profile("a"), Live: live(t, b), NewM: merge.NewM})
-	if len(p.Ops) != 0 || !strings.Contains(p.Skipped["work"], "only Firefox has") {
-		t.Fatalf("plan %+v", p)
 	}
 }
 ```
@@ -451,7 +386,6 @@ type Browser struct {
 	refs  map[string]string
 	top   *node             // the tree's root, which the extension does not send
 	roots map[string]string // top-level folder id → config keyword
-	guids bool              // Firefox-like 12-character ids
 }
 
 // New returns a browser with Chrome's three top-level folders:
@@ -468,9 +402,10 @@ func New() *Browser {
 }
 
 // NewFirefox returns a browser shaped like Firefox: fixed top-level ids,
-// including the Bookmarks Menu Chrome lacks, and 12-character ids.
+// including the Bookmarks Menu Chrome lacks. The host treats ids as opaque,
+// so new nodes get small integers as in New.
 func NewFirefox() *Browser {
-	b := &Browser{nodes: map[string]*node{}, refs: map[string]string{}, guids: true,
+	b := &Browser{nodes: map[string]*node{}, refs: map[string]string{}, next: 1,
 		roots: map[string]string{"menu________": "menu", "toolbar_____": "toolbar", "unfiled_____": "other", "mobile______": "mobile"}}
 	b.top = b.fixed(nil, "root________", "")
 	for _, r := range [][2]string{{"menu________", "Bookmarks Menu"}, {"toolbar_____", "Bookmarks Toolbar"},
@@ -490,28 +425,17 @@ func (b *Browser) fixed(parent *node, id, title string) *node {
 }
 ```
 
-In `make`, the id becomes `fmt.Sprintf("ff%010d", b.next)` when `b.guids`, else `strconv.Itoa(b.next)`. `Tree()` walks `b.top` and takes `Root` from `b.roots[k.id]`.
+`Tree()` walks `b.top` and takes `Root` from `b.roots[k.id]`.
 
-- [ ] **Step 4: Implement the check** in `round.Make`, right after `segs, err := db.SplitPath(path)` succeeds:
-
-```go
-		// Only Firefox has a Bookmarks Menu. Without this a Chrome member
-		// would report "no top-level folder", which hides why.
-		if segs[0] == "menu" && in.Self.Profile.Browser != "firefox" {
-			skip(fmt.Sprintf("%s starts with menu, which only Firefox has; %s is a %s profile", path, me, in.Self.Profile.Browser))
-			continue
-		}
-```
-
-Update the README's config section: "A path starts with `toolbar`, `other` or `mobile`, or, for a Firefox profile, `menu`, or with the title the browser shows for that folder."
+- [ ] **Step 4: README.** Update the config section: "A path starts with `toolbar`, `other` or `mobile`, or, for a Firefox profile, `menu`, or with the title the browser shows for that folder."
 
 - [ ] **Step 5: Run.** `bin/dev run make` → PASS, including the 300-seed fuzz tests with a Firefox member.
 
-- [ ] **Step 6: Commit** `internal/fakebrowser internal/round README.md`, subject `feat(rfc-0001): sync Firefox-shaped trees and keep menu to Firefox members`.
+- [ ] **Step 6: Commit** `internal/fakebrowser internal/round README.md`, subject `feat(rfc-0001): sync Firefox-shaped trees and allow menu in Firefox paths`.
 
 ---
 
-### Task 5: Share the bind loop and database ids between browsers
+### Task 4: Share the bind loop and database ids between browsers
 
 A refactor; Chrome's behaviour and tests stay the same.
 
@@ -619,7 +543,7 @@ The Chrome caller passes `"chrome", filepath.Join(*udd, c.Dir), c`. Move the exe
 
 ---
 
-### Task 6: List Firefox profiles
+### Task 5: List Firefox profiles
 
 **Files:**
 - Create: `internal/firefox/profiles.go`, `internal/firefox/firefox_test.go`
@@ -800,7 +724,7 @@ func fileExists(p string) bool {
 
 ---
 
-### Task 7: The XPI and a profile's files
+### Task 6: The XPI and a profile's files
 
 **Files:**
 - Create: `internal/firefox/files.go`
@@ -1077,17 +1001,15 @@ func UUID(profileDir string) (string, error) {
 }
 ```
 
-- [ ] **Step 4: Check the defaults `ResetPrefs` writes** against the image's Firefox once Task 11 has added it; until then they come from Firefox's source. After Task 11, run:
-`bin/dev run sh -c 'unzip -p /opt/firefox-devedition/browser/omni.ja defaults/preferences/firefox.js | grep -E "autoDisableScopes|startupScanScopes"; unzip -p /opt/firefox-devedition/omni.ja greprefs.js | grep -E "signatures.required|autoDisableScopes|startupScanScopes"'`
-Expected: `autoDisableScopes` 15 and `signatures.required` true. If not, fix `ResetPrefs` and the RFC in Task 10.
+The defaults `ResetPrefs` writes come from Firefox's source; Task 9 checks them against the image's Firefox.
 
-- [ ] **Step 5: Run.** `bin/dev run make` → PASS.
+- [ ] **Step 4: Run.** `bin/dev run make` → PASS.
 
-- [ ] **Step 6: Commit** subject `feat(rfc-0001): build the XPI and the files a Firefox profile needs`.
+- [ ] **Step 5: Commit** subject `feat(rfc-0001): build the XPI and the files a Firefox profile needs`.
 
 ---
 
-### Task 8: Bind a Firefox profile
+### Task 7: Bind a Firefox profile
 
 **Files:**
 - Create: `internal/firefox/bind.go`
@@ -1205,7 +1127,7 @@ func Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error 
 
 ---
 
-### Task 9: `install --browser firefox`
+### Task 8: `install` and `uninstall --browser firefox`
 
 **Files:**
 - Modify: `cmd/mirrormark/install.go`, `cmd/mirrormark/main.go` (usage)
@@ -1213,7 +1135,9 @@ func Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error 
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: Tasks 5–8.
+- Consumes: Tasks 4–7.
+
+Install and uninstall land in one commit: install turns off the profile's signature checks, and no prefix of the stack should do that without the command that turns them back on.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1445,19 +1369,7 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
   4. Paths may start with `menu` in Firefox profiles. Separators stay where you put them and are never synced.
   Add the Firefox files to the Files table (`<profile>/extensions/mirrormark@chriscz.github.io.xpi`, the three `user.js` lines, `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json`) and change the status line to "Google Chrome and Firefox Developer Edition on Linux".
 
-- [ ] **Step 5: Run.** `bin/dev run make` → PASS.
-
-- [ ] **Step 6: Commit** subject `feat(rfc-0001): install into Firefox Developer Edition [new feature]`.
-
----
-
-### Task 10: `uninstall --browser firefox`
-
-**Files:**
-- Modify: `cmd/mirrormark/install.go`, `README.md`
-- Test: `cmd/mirrormark/install_test.go`
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 5: Write the failing uninstall test**
 
 ```go
 func TestUninstallFromFirefoxRestoresItsChecks(t *testing.T) {
@@ -1491,9 +1403,9 @@ func TestUninstallFromFirefoxRestoresItsChecks(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run.** → FAIL (`-browser` not defined for uninstall).
+- [ ] **Step 6: Run.** → FAIL (`-browser` not defined for uninstall).
 
-- [ ] **Step 3: Implement.** `cmdUninstall` gets the same `--browser` flag. For `firefox` it calls `uninstallFirefox(p, stdout)` instead of the Chrome block, then the shared purge/keep code (move it into `finishUninstall(p, purge, stdout)` used by both):
+- [ ] **Step 7: Implement uninstall.** `cmdUninstall` gets the same `--browser` flag. For `firefox` it calls `uninstallFirefox(p, stdout)` instead of the Chrome block, then the shared purge/keep code (move it into `finishUninstall(p, purge, stdout)` used by both):
 
 ```go
 // uninstallFirefox removes the add-on from every profile a database file
@@ -1546,13 +1458,13 @@ func uninstallFirefox(p db.Paths, stdout io.Writer) error {
 
 README: under Upgrade, uninstall, unpack, one paragraph on `uninstall --browser firefox`: what it removes, that `startupScanScopes` stays at 1 and why.
 
-- [ ] **Step 4: Run.** `bin/dev run make` → PASS.
+- [ ] **Step 8: Run.** `bin/dev run make` → PASS.
 
-- [ ] **Step 5: Commit** subject `feat(rfc-0001): uninstall from Firefox and restore its signature checks`. If Task 7 Step 4 found other defaults, also commit `docs(rfc-0001): …` correcting Section 8.
+- [ ] **Step 9: Commit** subject `feat(rfc-0001): install into and uninstall from Firefox Developer Edition [new feature]`.
 
 ---
 
-### Task 11: Firefox Developer Edition and D-Bus in the dev image
+### Task 9: Firefox Developer Edition and D-Bus in the dev image
 
 **Files:**
 - Modify: `Dockerfile`, `Makefile`, `README.md` (Development)
@@ -1593,7 +1505,9 @@ Run: `bin/dev image build && bin/dev run /opt/firefox-devedition/firefox --versi
 Expected: `Mozilla Firefox 159.0b2`.
 Run: `bin/dev run make check-e2e`
 Expected: every Chrome e2e test passes under `dbus-run-session`.
-Then do Task 7 Step 4's check of the defaults.
+Check the defaults `ResetPrefs` writes against this Firefox:
+`bin/dev run sh -c 'unzip -p /opt/firefox-devedition/browser/omni.ja defaults/preferences/firefox.js | grep -E "autoDisableScopes|startupScanScopes"; unzip -p /opt/firefox-devedition/omni.ja greprefs.js | grep -E "signatures.required|autoDisableScopes|startupScanScopes"'`
+Expected: `autoDisableScopes` 15 and `signatures.required` true. If not, fix `ResetPrefs` in a `fix(rfc-0001)` commit after this one, and Section 8 of the RFC in a `docs(rfc-0001)` commit.
 
 - [ ] **Step 4:** README Development: the e2e tests also start Firefox Developer Edition; `bin/dev image build` after this change.
 
@@ -1601,7 +1515,7 @@ Then do Task 7 Step 4's check of the defaults.
 
 ---
 
-### Task 12: Put the e2e browser behind a driver
+### Task 10: Put the e2e browser behind a driver
 
 A refactor of `e2e/` with no change in what the tests do. Chrome e2e must pass unchanged.
 
@@ -1727,15 +1641,15 @@ Replace every `X.open(t, e.ExtID)` with `e.open(t, X)` in `env.go`, `install_tes
 
 ---
 
-### Task 13: Install and bind Firefox profiles end to end
+### Task 11: Install and bind Firefox profiles end to end
 
 **Files:**
 - Create: `e2e/bidi.go`
 - Modify: `e2e/env.go`, `e2e/browser.go` (prelude), `e2e/install_test.go`
 
 **Interfaces:**
-- Consumes: `firefox.UUID`, `firefox.XPIPath`, `extension.GeckoID`, `extension.Version`.
-- Produces: `setupPair`, `launchFirefox`, `firefoxDriver`, `Env.ShareAt`, `Browser.AddSeparator`, `Browser.Separators`.
+- Consumes: `firefox.UUID`, `extension.GeckoID`.
+- Produces: `setupPair`, `launchFirefox`, `firefoxDriver`, `Browser.AddSeparator`, `Browser.Separators`.
 
 - [ ] **Step 1: BiDi client** `e2e/bidi.go`, adapted from the spike's `bidi/main.go` with typed messages:
 
@@ -1988,12 +1902,12 @@ func launchFirefox(t *testing.T, name, dir string, port int, env []string) *Brow
 }
 ```
 
-The `Browser.Close` from Task 12 works unchanged (`drv.close`, wait for `done`, kill after 20 s).
+The `Browser.Close` from Task 10 works unchanged (`drv.close`, wait for `done`, kill after 20 s).
 
 - [ ] **Step 2: Prelude.** In `browser.go`'s `prelude`, find Firefox's roots by id and skip separators:
 
 ```js
-  roots: { toolbar: ["bookmarks-bar", "toolbar_____"], other: ["other", "unfiled_____"], menu: [null, "menu________"] },
+  roots: { toolbar: ["bookmarks-bar", "toolbar_____"], other: ["other", "unfiled_____"] },
   kids: (n) => (n.children ?? []).filter((c) => c.type !== "separator"),
 ```
 
@@ -2123,8 +2037,6 @@ func (e *Env) firstInstall(t *testing.T) {
 	}
 ```
 
-Add `ShareAt(t, path)`, which `Share` calls with `"toolbar/Work"`.
-
 - [ ] **Step 4: Write the tests** in `install_test.go`:
 
 ```go
@@ -2188,44 +2100,19 @@ func TestFirefoxBindStartsFirefox(t *testing.T) {
 	}
 }
 
-// TestFirefoxPicksUpANewXPI: a profile running an older build gets the new
-// one after install replaces the XPI and Firefox restarts.
-func TestFirefoxPicksUpANewXPI(t *testing.T) {
-	e := newEnv(t)
-	e.kinds = map[string]string{"a": "firefox"}
-	e.prepare(t, "a")
-	e.mm(t, e.installArgs("a")...)
-	setXPIVersion(t, firefox.XPIPath(e.udd("a")), "0.0.1")
-	e.A = e.launch("a")
-	e.open(t, e.A)
-	if v := eval[string](t, e.A, `chrome.runtime.getManifest().version`); v != "0.0.1" {
-		t.Fatalf("old build not installed: %s", v)
-	}
-	e.A.Close()
-	if out := e.mm(t, e.installArgs("a")...); !strings.Contains(out, "Restart Firefox") {
-		t.Fatalf("install did not replace the XPI:\n%s", out)
-	}
-	e.A = e.launch("a")
-	e.open(t, e.A)
-	want, _ := extension.Version()
-	if v := eval[string](t, e.A, `chrome.runtime.getManifest().version`); v != want {
-		t.Fatalf("version %s after upgrade, want %s", v, want)
-	}
-}
 ```
 
-`stopFirefox` follows `stopChrome`: the pid is in `<dir>/lock`, a symlink to `<ip>:+<pid>`, so `strconv.Atoi(target[strings.LastIndexByte(target, '+')+1:])`, SIGTERM, wait with `exited`. `setXPIVersion` rewrites `manifest.json` inside the zip with `archive/zip`, decoding it into `map[string]json.RawMessage` and setting `"version"`.
+`stopFirefox` follows `stopChrome`: the pid is in `<dir>/lock`, a symlink to `<ip>:+<pid>`, so `strconv.Atoi(target[strings.LastIndexByte(target, '+')+1:])`, SIGTERM, wait with `exited`.
 
 - [ ] **Step 5: Run.**
 `bin/dev run make check-e2e RUN='TestFirefox'` → PASS. If binding a running profile fails because the BiDi agent and D-Bus remoting do not mix, record it in the spike doc's "Not verified" list as checked and failing, and change `TestFirefoxInstallAndBind` to close a profile before re-binding; then update Section 8 of the RFC in a `docs(rfc-0001)` commit (binding a running profile is then unverified in e2e, and the manual check covers it).
-If `TestFirefoxPicksUpANewXPI` fails, the upgrade path needs a fix in `install` (for example, also bumping a pref Firefox watches); stop and report, as it changes the RFC.
 Then `bin/dev run make check-e2e` → every Chrome test still passes.
 
 - [ ] **Step 6: Commit** subject `test(rfc-0001): install and bind Firefox profiles end to end`.
 
 ---
 
-### Task 14: Run the sync tests between Firefox and Chrome
+### Task 12: Run the sync tests between Firefox and Chrome
 
 **Files:**
 - Modify: `e2e/sync_test.go`
@@ -2252,11 +2139,11 @@ func forPairs(t *testing.T, test func(t *testing.T, ka, kb string)) {
 
 ---
 
-### Task 15: Separators, `menu`, uninstall and URLs in Firefox
+### Task 13: Separators and uninstall in Firefox
 
 **Files:**
 - Create: `e2e/firefox_test.go`
-- Maybe modify: `TASKS.md`, the RFC (Step 5)
+- Maybe modify: the RFC (Step 2)
 
 - [ ] **Step 1: Write the tests**
 
@@ -2288,15 +2175,6 @@ func TestFirefoxSeparatorsStayPut(t *testing.T) {
 	both(t, e, "/GitHub "+gh, "/News "+lwn, "/_deleted/", "/_deleted/Old/", "/_deleted/Old/Go https://go.dev/")
 	e.B.Remove(t, work+"/_deleted/Old/") // a purge: A must remove a folder holding a separator
 	settled(t, e, nil, "/GitHub "+gh, "/News "+lwn, "/_deleted/")
-}
-
-// TestFirefoxMenuUnion shares a folder under Firefox's Bookmarks Menu.
-func TestFirefoxMenuUnion(t *testing.T) {
-	e := setupPair(t, "firefox", "firefox")
-	e.ShareAt(t, "menu/Work")
-	e.A.Mkdir(t, "menu/Work")
-	e.A.Add(t, "menu/Work", "GitHub", gh)
-	waitLines(t, e.B, "menu/Work", []string{"/GitHub " + gh}, syncTimeout)
 }
 
 // TestFirefoxUninstall: the add-on goes and the profile checks signatures
@@ -2332,40 +2210,20 @@ func TestFirefoxUninstall(t *testing.T) {
 
 - [ ] **Step 2: Run.** `bin/dev run make check-e2e RUN='TestFirefox'` → PASS. If `TestFirefoxUninstall` fails because the add-on stays active, the uninstall design is wrong (Firefox may need `startupScanScopes` or the XPI removal to happen differently); stop and report, as it changes Section 8.
 
-- [ ] **Step 3: Probe URLs.** Write, run once, and keep as a test whatever holds:
+- [ ] **Step 3: Full run.** `bin/dev run make && bin/dev run make check-e2e` → PASS.
 
-```go
-// TestURLsCrossBrowsers adds bookmarks with unusual schemes in Chrome and
-// checks they reach Firefox unchanged.
-func TestURLsCrossBrowsers(t *testing.T) {
-	e := setupPair(t, "firefox", "chrome")
-	e.Union(t)
-	urls := []string{"javascript:void(0)", "data:text/plain,hi", "file:///etc/hosts", "chrome://settings/", "about:blank", "https://example.com/a%20b?q=1#f"}
-	var want []string
-	for i, u := range urls {
-		e.B.Add(t, work, fmt.Sprint(i), u)
-		want = append(want, fmt.Sprintf("/%d %s", i, u))
-	}
-	settled(t, e, nil, want...)
-}
-```
-
-`mm.node` treats a bookmark line's URL by `"://"`, so `Lines` is all this needs. If every URL arrives, keep the test. If Firefox refuses or rewrites some, the profile stalls with `apply-failed`: do not work around it here. Remove those URLs from the test, record the finding (which schemes, the error text, the effect: the Firefox member never completes a round while one is in the union) in `TASKS.md` and in the RFC's risk "URLs Firefox refuses" in a `docs(rfc-0001)` commit, and report it to the user, who decides the fix (for example, the host keeping such bookmarks out of a Firefox member).
-
-- [ ] **Step 4: Full run.** `bin/dev run make && bin/dev run make check-e2e` → PASS.
-
-- [ ] **Step 5: Commit** subject `test(rfc-0001): cover separators, menu, uninstall and URLs in Firefox`, plus any `docs(rfc-0001)` commit from Steps 2–3.
+- [ ] **Step 4: Commit** subject `test(rfc-0001): cover separators and uninstall in Firefox`.
 
 ## After the last task
 
-- Update the spike doc's "Not verified" list with what Tasks 13 and 15 checked, in a `docs(rfc-0001)` commit.
+- Update the spike doc's "Not verified" list with what Tasks 11 and 13 checked, in a `docs(rfc-0001)` commit.
 - Add to `TASKS.md` under "Manual checks still to do": run the README's Firefox steps on a desktop with Firefox Developer Edition, with Firefox open during the first `install`, and check binding a running profile over the desktop's D-Bus.
 - Phase 5 of the RFC is done when that manual check is recorded.
 
 ## Risks
 
-- **BiDi and remoting in one Firefox** were not tried together. Task 13 says what to do if they don't mix.
-- **`remote.prefs.recommended`** may not cover every pref the remote agent sets; if the e2e tests pass only because the agent turned signature checks off, Task 13's install test would not show it. `TestFirefoxPicksUpANewXPI` and a manual run are the cross-checks.
+- **BiDi and remoting in one Firefox** were not tried together. Task 11 says what to do if they don't mix.
+- **`remote.prefs.recommended`** may not cover every pref the remote agent sets; if the e2e tests pass only because the agent turned signature checks off, Task 11's install test would not show it. The manual run is the cross-check.
 - **Test time** roughly triples (three pairs). Run single tests with `RUN=` while developing.
-- **Upgrade and uninstall** depend on Firefox rescanning the profile's `extensions` folder; Tasks 13 and 15 check both and stop the stack if they fail.
-- **Unknown URL behaviour** across browsers may need a host change; Task 15 stops for the user rather than guessing.
+- **Uninstall** depends on Firefox rescanning the profile's `extensions` folder; Task 13 checks it and stops the stack if it fails.
+- **Accepted, untested:** Firefox picking up a replaced XPI after an upgrade, and which URL schemes Firefox refuses. Neither loses a bookmark: an old build keeps running, and a refused URL stalls the Firefox profile with the failing op in the log. Both stay in the RFC's risks; the manual run can try an upgrade.
