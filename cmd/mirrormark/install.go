@@ -119,6 +119,12 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	// restart, so the extension is installed and profiles can be bound now.
 	ready := chrome.FilesCurrent(system)
 	if !ready {
+		// The host manifest's name is fixed, so another install's (another
+		// user's key, say) is in the same place; replacing it cuts that
+		// install off from its host.
+		if data, err := os.ReadFile(system[1].Path); err == nil && !namesExtension(data, ext.ID) {
+			fmt.Fprintf(stderr, "mirrormark: warning: %s lets another extension, not %s, start mirrormark; replacing it. If another install of mirrormark (with another key) uses it, that one stops working.\n", system[1].Path, ext.ID)
+		}
 		if err := writeSystemFiles(system, stdout, stderr); err != nil {
 			return fail(fmt.Errorf("could not copy the files Chrome needs into place (with sudo): %w", err))
 		}
@@ -160,6 +166,12 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from Chrome first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
 	}
 	return code
+}
+
+// namesExtension reports whether a host manifest lets extension id start
+// the host.
+func namesExtension(hostManifest []byte, id string) bool {
+	return bytes.Contains(hostManifest, []byte(`"chrome-extension://`+id+`/"`))
 }
 
 // resolveDir returns dir's absolute path with symlinks resolved, so one
@@ -355,7 +367,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		}
 		// The host manifest's name is fixed; one that names another
 		// extension belongs to another install.
-		if data, err := os.ReadFile(paths[1]); err != nil || !bytes.Contains(data, []byte(`"chrome-extension://`+id+`/"`)) {
+		if data, err := os.ReadFile(paths[1]); err != nil || !namesExtension(data, id) {
 			paths = paths[:1]
 		}
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {

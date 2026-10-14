@@ -59,6 +59,12 @@ The first `install` or `unpack` creates `~/.local/share/mirrormark/extension.pem
 The extension id comes from this key, so keep it: a new key is a new
 extension.
 
+The host manifest has one fixed path for the whole computer and lets one
+extension id start the host. Two installs with different keys, such as two
+users on one computer, replace each other's manifest, and only the last
+one to run `install` reaches its host. `install` warns when it replaces a
+manifest that names another extension.
+
 ### Upgrade, uninstall, unpack
 
 Upgrading: replace the binary and run `mirrormark install` again, then

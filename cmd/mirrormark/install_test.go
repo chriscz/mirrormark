@@ -256,8 +256,8 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "Extension ID: ") || !strings.Contains(out.String(), "Restart Chrome") {
-		t.Fatalf("output:\n%s", out.String())
+	if !strings.Contains(out.String(), "Extension ID: ") || !strings.Contains(out.String(), "Restart Chrome") || errb.Len() != 0 {
+		t.Fatalf("output:\n%s%s", out.String(), errb.String())
 	}
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
 	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
@@ -404,6 +404,28 @@ func TestCommandsRefuseToRunAsRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(p.Data); err == nil || len(*calls) != 0 {
 		t.Fatalf("changed something as root: %v, sudo %v", err, *calls)
+	}
+}
+
+// Two installs with different keys share the host manifest's one name, so
+// each replaces the other's. install goes ahead but says so.
+func TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	other := chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
+	other.Path = filepath.Join(root, other.Path)
+	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--user-data-dir", chromeData(t)}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "warning: "+other.Path+" lets another extension") {
+		t.Fatalf("stderr %q", errb.String())
+	}
+	if chrome.FilesCurrent([]chrome.File{other}) {
+		t.Fatal("the host manifest was not replaced")
 	}
 }
 
