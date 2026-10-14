@@ -92,7 +92,9 @@ extension, even if the extension's files changed (see
 [Development](#development)).
 
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
-needed), the CRX and the unpacked extension. Chrome removes the extension
+needed), the CRX and the unpacked extension. It leaves the host manifest
+alone if another install (a different key) has since replaced it. Chrome
+removes the extension
 from every profile when it next starts. Your bookmarks stay in Chrome, and
 your config, databases, backups, key and log stay where they are; it says
 so. `mirrormark uninstall --purge` deletes them too.
