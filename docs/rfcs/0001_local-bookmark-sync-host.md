@@ -2,7 +2,7 @@
 
 - Status: draft
 - Author(s): Chris Coetzee, Claude
-- Date: 2026-10-14
+- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15)
 - Links: none yet. Repository: `github.com/chriscz/mirrormark` (MPL-2.0).
 
 ## Problem
@@ -13,16 +13,16 @@ People who use more than one browser, such as Chrome for one profile and LibreWo
 
 mirrormark is a WebExtension plus a small Go program. The user has fixed these choices: YAML files are the only database and config; conflicts are merged into suffixed copies such as `GitHub (chrome/personal)` and `GitHub (chrome/work)`, never resolved by picking a winner; deleting a bookmark inside a union moves it to a `_deleted` folder; Google Chrome on Linux comes first and the Firefox family follows; everything builds and tests in a Docker image.
 
-This RFC describes the smallest version that works: two or more Chrome profiles on Linux. What it leaves out is listed under [Later](#later).
+This RFC describes the smallest version that works: two or more Chrome profiles on Linux (Phases 1 to 4), then Firefox Developer Edition profiles joining the same unions (Section 8, Phase 5). What it leaves out is listed under [Later](#later).
 
-**The bookmarks API.** Chrome exposes `bookmarks.getTree`, `get`, `create`, `update`, `move`, `remove` and change events [R5] [R6]. Node ids are stable but local to one profile, so mirrormark keeps its own ids. Chrome names its top-level folders by `folderType` (Chrome 134+).
+**The bookmarks API.** Chrome exposes `bookmarks.getTree`, `get`, `create`, `update`, `move`, `remove` and change events [R5] [R6]. Node ids are stable but local to one profile, so mirrormark keeps its own ids. Chrome names its top-level folders by `folderType` (Chrome 134+). Firefox has the same API under `chrome.*`, with fixed ids for its top-level folders instead of `folderType`, and separators [R5].
 
 **Native messaging** [R1] [R2]. The extension calls `runtime.connectNative(name)`, and the browser starts the program named in a host manifest file, after checking that the extension's id is listed in it. Messages are length-prefixed UTF-8 JSON, at most 1 MB towards the extension. The browser starts one process per connection and kills it when the connection closes. An open connection keeps a Chrome service worker alive [R3].
 
 ## Goals
 
 1. **Unions stay the same.** After sync, every member folder of a union holds the same bookmarks and subfolders with the same titles and URLs.
-2. **Several Chrome profiles on Linux**, in a design the Firefox family can join later.
+2. **Several Chrome profiles on Linux**, and Firefox Developer Edition profiles in the same unions, in a design the rest of the Firefox family can join later.
 3. **Merge, never drop.** When two profiles change the same thing differently, both versions survive as suffixed copies.
 4. **Nothing is lost.** Sync removes a bookmark only after the user removes it from `_deleted`.
 5. **Near-immediate.** A change in one running profile shows in another running profile within a few seconds.
@@ -34,7 +34,7 @@ This RFC describes the smallest version that works: two or more Chrome profiles 
 - **Syncing reorders.** A new bookmark takes its position from its source; moving a bookmark within its folder stays local.
 - **Editing the bookmark lists in database files by hand** (Section 3).
 - **Syncing between computers**, or tabs, history and settings.
-- **Store listings** on the Chrome Web Store.
+- **Store listings** on the Chrome Web Store or addons.mozilla.org, and release Firefox, which needs a signed add-on (Later).
 
 ## Proposal
 
@@ -73,7 +73,7 @@ If another member's file is missing or unreadable, the round skips every union t
 
 ```jsonc
 // extension → host, first message; "db" is set by `mirrormark install` (Section 5)
-{"v": 1, "type": "hello", "db": "chrome-personal", "browser": "chrome/141.0"}
+{"v": 1, "type": "hello", "db": "chrome-personal", "browser": "chrome/141.0"}   // or "firefox/159.0"
 
 // extension → host, at the first bookmark event of a burst; the host starts no round until the next tree
 {"v": 1, "type": "changed"}
@@ -151,7 +151,7 @@ unions:
     chrome-work: other/Reading
 ```
 
-- A path starts with a top-level folder, `toolbar`, `other` or `mobile`, or the title the browser shows, such as `Bookmarks bar`. `\/` escapes a slash in a title. One profile's paths may not nest.
+- A path starts with a top-level folder, `toolbar`, `other` or `mobile`, or the title the browser shows, such as `Bookmarks bar`. A Firefox member may also start with `menu`, Firefox's Bookmarks Menu (Section 8). `\/` escapes a slash in a title. One profile's paths may not nest.
 - The first round creates a missing member folder and records its `path` and `id`. After that the host checks that the path still leads to that id. If the folder disappears or leaves the path, the host stops syncing that member, logs it and sends it to the popup. A missing member folder never means "everything was deleted". To resume, the user restores the folder or points the config at a new path; a path that differs from the recorded one makes the profile a new member (Section 4, First round).
 
 **File safety.**
@@ -230,7 +230,7 @@ This works in Google Chrome 155 on Linux, with Chrome running or not, once the e
 
 ### 6. Installing
 
-The binary embeds the extension (`go:embed`). `mirrormark install`:
+The binary embeds the extension (`go:embed`). `mirrormark install` (for Chrome, the default `--browser chrome`; Firefox is Section 8):
 
 1. lists Chrome's profiles from `~/.config/google-chrome/Local State` (`profile.info_cache`; `--user-data-dir` picks another data directory);
 2. binds every listed profile, or only those named with `--profile "Profile 1"` (a directory, or a name only one profile has; repeatable). Binding a profile only creates its database file; nothing syncs until `config.yaml` names it;
@@ -253,6 +253,54 @@ One Go module, `github.com/chriscz/mirrormark`. Its only third-party dependency 
 
 As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with pinned Go, Google Chrome stable and Xvfb; `bin/dev run make`), with the `Makefile` as the one build system. The end-to-end tests are Go tests that drive Chrome over the DevTools protocol on `--remote-debugging-pipe`, which needs no WebSocket client and no third-party package.
 
+### 8. Firefox Developer Edition
+
+A Firefox profile is a member like a Chrome profile: one host per profile, the same files, protocol and merge, and unions that mix both browsers. What differs is the extension's edges, installing and binding. Each point below was checked in the Firefox spike (`0001_local-bookmark-sync-host.d/firefox-install-spike.md`) on Developer Edition 159.0b2 in Docker unless it says otherwise.
+
+**Only Developer Edition.** Release Firefox (158.0 in the spike) installs only add-ons signed by Mozilla and ignores `xpinstall.signatures.required`; Developer Edition honours it [R13]. `install` reads the profile's Firefox from its `compatibility.ini` (`LastPlatformDir`) and the channel from `<LastPlatformDir>/defaults/pref/channel-prefs.js`, and refuses any profile whose channel is not `aurora` (Developer Edition), saying that release Firefox needs a signed add-on, which is Later. A profile that has never run has no `compatibility.ini`; `install` asks the user to start Firefox in it once. Nightly and ESR also honour the pref [R13] but were not tried, so they are refused too.
+
+**One extension.** `manifest.json` gains `"scripts": ["background.js"]` beside `service_worker`, and `browser_specific_settings.gecko` with the id `mirrormark@chriscz.github.io` and `strict_min_version` 128.0. Firefox runs the script as an MV3 event page; Chrome ignores both keys (no warnings in Chrome for Testing 155). `background.js` changes in five places, none of which changes what it does in Chrome:
+
+- it listens only to the bookmark events that exist (Firefox lacks `onChildrenReordered`, `onImportBegan` and `onImportEnded`, and listening to a missing event stops the script);
+- it names Firefox's top-level folders by id: `toolbar_____` → `toolbar`, `unfiled_____` → `other`, `mobile______` → `mobile`, `menu________` → `menu`;
+- it hides separators (below);
+- it labels itself `firefox/<version>` from the user agent;
+- it reads a disconnect's reason from the port's `error` as well as `runtime.lastError`.
+
+An open native port keeps a Firefox event page alive as it keeps a Chrome service worker alive (160 s checked).
+
+**Separators.** Firefox has separators (`type: "separator"`); Chrome has none. The extension never sends them to the host, and a node's `index` in the tree counts only the siblings that are not separators. When it applies a `create` or `move` with an index, it maps that index to the real one: the position of the index-th sibling that is not a separator, or the end. Order does not sync (Non-goals), so a separator can end up between different neighbours than before; mirrormark never moves, edits or copies one. The one exception: Firefox, like Chrome, refuses to remove a folder that is not empty, and the host removes a folder only once everything it knows inside is gone, so before a `remove` of a folder the extension removes the separators directly inside it. This happens only in a purge, and a separator holds nothing.
+
+**Same-parent moves.** Firefox reads a move's index within the same parent as the final position; Chrome counts it before the node leaves its old place. The merge never sends such a move (reordering stays local), but the extension converts Firefox's meaning to Chrome's anyway, so an op means the same in both.
+
+**The `menu` folder.** Paths may start with `menu` (or `Bookmarks Menu`), but only for Firefox members. A Chrome member whose path starts with `menu` has its union skipped (`union-skipped`, saying the folder exists only in Firefox); the other members go on. Firefox has no account folders, so `syncing` never applies.
+
+**Ids and labels.** A Firefox profile's database id is `firefox-<slug of its name>` and its label `firefox/<slug>`; `browser` in its profile block is `firefox`. Firefox's node ids are 12-character GUIDs rather than small integers.
+
+**The host.** Firefox starts the host with two arguments, the host manifest's path and the extension's id, instead of Chrome's one origin. `mirrormark` runs as the host when its first argument ends in `com.github.chriscz.mirrormark.json`. Nothing else in the host changes; framing and the 1 MB limit towards the extension are the same [R1].
+
+**Installing**, without root. `mirrormark install --browser firefox [--user-data-dir ROOT] [--profile NAME]...`:
+
+1. lists the profiles: `ROOT` is `--user-data-dir`, else `~/.config/mozilla/firefox` if it holds `profiles.ini` (Firefox 147 and later [R15]), else `~/.mozilla/firefox`. It reads `profiles.ini` and adds every `ROOT/*/` that holds a `prefs.js` and is not listed, named by its directory after the first `.`; Firefox's new profile switcher records its profiles only in an SQLite file, which the standard library cannot read;
+2. picks every profile or those named with `--profile` (a directory or a name), and refuses any that is not Developer Edition, as above, before writing anything;
+3. writes, as the user: the native host manifest `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` with `allowed_extensions` naming the gecko id (Firefox does not read a host manifest under `~/.config/mozilla/`); and in each picked profile `extensions/mirrormark@chriscz.github.io.xpi`, packed from the embedded files like the CRX, and three lines appended to `user.js` unless present: `xpinstall.signatures.required` false, `extensions.autoDisableScopes` 0 and `extensions.startupScanScopes` 1. On its next start Firefox installs the add-on enabled with no prompt;
+4. creates each profile's database file, and `config.yaml` if missing, as for Chrome;
+5. if it changed any of those files, asks the user to restart Firefox in those profiles if it is running and to run `install` again; otherwise it binds each profile.
+
+**Binding.** The extension's pages are at `moz-extension://<uuid>/`, with a UUID Firefox picks per profile and keeps in `prefs.js` (`extensions.webextensions.uuids`). Pinning it in `user.js` would replace every add-on's UUID and lose their storage, so `install` reads it. If it is missing, `install` starts that profile's Firefox and waits up to 15 seconds for it to appear. It then runs `<LastPlatformDir>/firefox --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>`, which opens the page in that profile whether Firefox runs there or not (a running one gets it over D-Bus), and confirms the binding through the lock file's mtime with up to 3 tries, as for Chrome (Section 5). `about:blank` is there because `bind.html` closes its tab, and closing the only tab of the only window quits Firefox.
+
+**Uninstalling.** `mirrormark uninstall --browser firefox` removes the XPI from each profile whose database file says `browser: firefox`, sets `xpinstall.signatures.required` back to true and `extensions.autoDisableScopes` back to 15 (their defaults) in its `user.js`, and removes the per-user host manifest if it names the gecko id. It leaves `extensions.startupScanScopes` at 1, which only makes Firefox look in the profile's own `extensions` folder at start, so that it notices the XPI is gone. It keeps the YAML files unless given `--purge`, as for Chrome.
+
+**Decisions taken for the user.** The user was away when Section 8 was written; each of these is the smallest safe choice and awaits sign-off:
+
+- separators are hidden from the host and never touched, except inside a folder being purged, and indexes are mapped around them;
+- same-parent moves, which the merge never sends, are still normalised to Chrome's meaning in the extension;
+- `menu` is allowed in paths of Firefox members only;
+- profiles come from `profiles.ini` plus a scan for `prefs.js`, without reading SQLite;
+- profiles of release (or any channel other than Developer Edition) Firefox are refused, not half-installed;
+- binding reuses `bind.html` and the lock-file confirmation, with the UUID read from `prefs.js`;
+- `uninstall` puts the two safety prefs back.
+
 ## Alternatives considered
 
 **Per-node versions** (the previous draft). Each node carried a version `v` and the profile `by` that made it, and a `purged` list with 90-day expiry recorded real deletions. A three-way merge against each profile's own last file gives the same answers with less state: base tells a removal from a node a profile never had, so no purge list is needed and a long-closed profile no longer brings purged bookmarks back; per-field merging replaces whole-node versions, so a title edit and a URL edit no longer conflict. The global lock already gives the total order the versions stood in for, and `seq` records it.
@@ -268,6 +316,12 @@ As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with p
 **One daemon behind a native-messaging relay.** Each host process relayed to a long-running `mirrormark serve` over a Unix socket. It needed a daemon that outlives the browser's host and both browsers open at once. With the files standing in for the other members, a round needs only its own browser, and a closed browser catches up when it starts.
 
 **A localhost WebSocket server.** Any local program or web page can reach a localhost port, so it needs tokens, `Origin` checks and DNS-rebinding defences. Native messaging lets the browser vouch for the extension.
+
+**Signing the XPI now** through addons.mozilla.org (unlisted, `web-ext sign` [R13]). It would let release Firefox run mirrormark, but needs an account, an API key and a signing step per release, and the question of whose account signs is open. Developer Edition proves the design first; signing is Later.
+
+**Installing into Firefox with `policies.json`.** It works, but it needs root, reaches every profile of every user and marks Firefox as managed. The per-profile XPI needs none of that.
+
+**Pinning the extension's UUID in `user.js`.** It would make bind URLs known in advance, but the pref holds every add-on's UUID, so setting it gives other add-ons new UUIDs and loses their storage.
 
 **Editing the browsers' own bookmark files.** Chrome rewrites `Bookmarks` from memory, so edits made while it runs are lost.
 
@@ -288,6 +342,11 @@ As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with p
 - **Installation depends on undocumented files** (`Local State`, the preferences-file directory) that Chrome may change.
 - **The guard can refuse real changes.** Removing more than half of a union one node at a time, or emptying the member folder, trips it; deleting one folder that holds as much, or moving the bookmarks into `_deleted`, does not. Emptying a `_deleted` that holds more than half of the union node by node trips it too; removing the `_deleted` folder itself does not. A profile that was closed while another one moved most of the union to `_deleted` and purged it sees the guard every round, and must move its database file aside and re-run `install` to become a new member.
 - **No export yet.** Recovering from a bad sync means `_deleted`, the YAML backups read by hand, or the browser's own bookmark export made beforehand; `install` suggests making one.
+- **Unsigned add-ons in Firefox profiles.** `install` sets `xpinstall.signatures.required` to false in each Firefox profile it binds, so that profile accepts any unsigned add-on, not only mirrormark's, and with `extensions.autoDisableScopes` 0 an add-on file dropped into it starts enabled without asking. A program that can write the profile directory could already change the profile in other ways, but the user loses Mozilla's signature check there. The README says so before the user runs `install`; `uninstall` restores both prefs.
+- **Only Developer Edition.** Release Firefox, which most people use, needs a signed XPI. Until then Firefox support reaches only people who run Developer Edition.
+- **Firefox upgrades are unchecked.** An upgrade replaces the XPI in each profile; that Firefox picks up a changed XPI at its next start (with `startupScanScopes` 1) was not checked in the spike. Phase 5's e2e checks it.
+- **Undocumented Firefox files.** `profiles.ini`, `compatibility.ini`, `channel-prefs.js` and the UUID map in `prefs.js` are not documented interfaces. The new profile switcher's profiles are found by scanning for `prefs.js`, and get the directory's name rather than the one Firefox shows.
+- **URLs Firefox refuses.** A Chrome bookmark whose URL Firefox will not store (perhaps `chrome://` or `file:` URLs; not checked) fails its `create` in Firefox every round, which stalls that Firefox profile like any failing write. Phase 5 checks the common schemes.
 - **Same-user programs are trusted.** They can rewrite the YAML files, as they could the browsers' own files.
 
 ## Rollout
@@ -303,13 +362,17 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Exit:** the extension is enabled and bound, and reaches the host with no user action beyond the restart.
 4. **Union sync.** Writes, `_deleted`, purges, the guard. **Tests:** e2e with two Chrome instances in one union covering each example in Section 4, a large folder delete that must not trip the guard, one browser closed while the other changes, and the latency target, measured with a handful of bookmarks. **Exit:** all pass, and a run on the developer's own desktop Chrome with test profiles and real `sudo` is recorded in the PR. That manual run is still to do; it is the one check left.
 
+5. **Firefox Developer Edition** (Section 8). The extension runs in both browsers, the host accepts Firefox's arguments, `install --browser firefox` and `uninstall --browser firefox` work without root, and the dev image carries Firefox Developer Edition 159.0b2 beside Chrome. Chrome's unit and e2e tests pass after every commit.
+   - **Tests:** unit tests for profile listing, the channel check, the files `install` writes, reading the UUID and binding; round tests with a Firefox-shaped tree and the `menu` folder. E2e, driven over WebDriver BiDi by a standard-library Go client: install and bind two Firefox profiles, rebind, restart; edits, delete, restore and purge, a conflict, a first sync and a closed browser's catch-up between two Firefox profiles; edits and a conflict between Firefox and Chrome; separators left alone and a purged folder that holds one; a union under `menu`; uninstall restoring the prefs; an upgraded XPI picked up.
+   - **Exit:** all pass, and the README's Firefox steps are run once by hand on a desktop with Developer Edition.
+
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
 ## Later
 
 Each is its own RFC or stack once the Chrome version works.
 
-- **Firefox family.** Firefox, LibreWolf and others: profiles from `profiles.ini` (`~/.config/mozilla/firefox/` from Firefox 147 [R15], `~/.mozilla/firefox/`, `~/.librewolf/`), a generated Firefox manifest, XPI signing through `web-ext sign` [R13] (LibreWolf's signature checks: conflicting reports [R14]), Firefox's fixed root ids and its separators, tags and keywords, binding a profile, and LibreWolf's host directory [R8]. Open: whose addons.mozilla.org account signs.
+- **Release Firefox and the rest of the family.** A signed XPI through `web-ext sign` [R13] for release Firefox, Nightly and ESR; LibreWolf (`~/.librewolf/`, its host directory [R8], its signature checks: conflicting reports [R14]); reading the new profile switcher's names; tags and keywords. Open: whose addons.mozilla.org account signs.
 - **Chromium and Brave.** Their profile directories, `--load-extension` [R12] and preferences-file directories.
 - **`mirrormark export`** of a database or backup to a bookmarks HTML file both families import.
 - **`mirrormark preview <union>`**, printing what a union would become before a member is added.
@@ -324,11 +387,12 @@ Each is its own RFC or stack once the Chrome version works.
 - Two Chrome profiles in one union match within 3 seconds of the last edit while both run (0.5 s quiet, up to 1 s polling, two rounds), and within 3 seconds of a closed one's extension connecting. Phase 4 measures this with a handful of bookmarks; a union of a few hundred is not measured yet.
 - Each example in Section 4 gives the tree shown, in every member.
 - In the property tests and the Phase 4 e2e, no bookmark goes missing except by purge, and a round with no user changes writes nothing.
+- Two Firefox Developer Edition profiles, and a Firefox and a Chrome profile, in one union meet the same 3-second target, and each example in Section 4 gives the tree shown across the two browsers (Phase 5 e2e).
 - `mirrormark install` takes a fresh Chrome profile on Linux to a bound extension using only the steps it prints, and binds an already bound profile again to the same database (tested in the dev image). A used profile on the developer's desktop Chrome, with real `sudo`, is the manual check that remains.
 
 ## Security, privacy, operational impact
 
-- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary.
+- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary. For Firefox nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks); only the gecko id in the per-user host manifest can start the host.
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes them.
 - **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the host restarts.
 
@@ -337,6 +401,7 @@ Each is its own RFC or stack once the Chrome version works.
 1. **One folder renamed or moved differently on two profiles.** _Resolved as built:_ theirs wins and the conflict is logged (Section 4). The alternative was one folder titled `X (a) / Y (b)`. Still awaiting the user's sign-off.
 2. **Chrome account and local folders.** A signed-in Chrome profile can have two bookmark bars [R6]. _Resolved as built:_ when a path resolves, an account folder (`syncing`) wins over a local one of the same name.
 3. **URL matching.** Should `http`/`https` or a trailing slash count as the same URL? _Resolved as built:_ no; URLs compare exactly.
+4. **Release Firefox.** Whose addons.mozilla.org account signs the XPI, and is an unlisted signed add-on acceptable to the user? Until decided, only Developer Edition is supported.
 
 ## References
 
@@ -366,3 +431,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — after review of the host and extension: a `status` message ends every round and carries its problems, and `error` is only for a host that stops; new codes `db-write-failed` and `db-lock-error`; failed rounds back off to 5 s and 30 s; the poll compares sizes too; the log rotates at 1 MiB and logs a repeated warning once; the extension reconnects on an alarm and waits a second after a new binding.
 - 2026-10-15 — the extension sends `changed` at the first bookmark event of a burst, and the host's poll starts no round until the tree that follows, so no round runs on a tree older than the user's last edit.
 - 2026-10-15 — final fixes: the wrong-tree guard counts a deleted folder once and catches an empty member folder and a wrong binding directly, so deleting a large folder no longer trips it; every warning is logged, without de-duplication; a failed round is retried after a fixed 5 s; `uninstall` keeps a host manifest naming another extension; a reconnect waits while a reconnect alarm is pending; open questions 1 to 3 recorded as built; Rollout and Success criteria say what was tested and that the manual run on desktop Chrome is still to do.
+- 2026-10-15 — Firefox Developer Edition added as Section 8 and Phase 5 after a spike: one manifest for both browsers, per-profile install without root, the UUID read from `prefs.js` for binding, separators hidden from the host, `menu` for Firefox members only, release Firefox refused until signed.
