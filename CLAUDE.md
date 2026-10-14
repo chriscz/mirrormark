@@ -87,7 +87,8 @@ RFCs live in [docs/rfcs/](docs/rfcs/).
 
 <!-- rfc-index:start -->
 
-| #   | Title | Status |
-| --- | ----- | ------ |
+| #    | Title                                                           | Status |
+| ---- | --------------------------------------------------------------- | ------ |
+| 0001 | Sync bookmarks between browser profiles through a local Go host | draft  |
 
 <!-- rfc-index:end -->
