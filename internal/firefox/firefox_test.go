@@ -56,6 +56,54 @@ func TestProfilesWithNoneFails(t *testing.T) {
 	}
 }
 
+func TestProfilesListsAnAbsoluteIniPathOnce(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "ab12.default")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prefs.js"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ini := "[Profile0]\nName=default\nIsRelative=0\nPath=" + root + "/./ab12.default/\n"
+	if err := os.WriteFile(filepath.Join(root, "profiles.ini"), []byte(ini), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Profiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "default" || Dir(root, got[0]) != dir {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestProfilesReportsAnUnreadableIni(t *testing.T) {
+	root := t.TempDir()
+	ini := filepath.Join(root, "profiles.ini")
+	if err := os.WriteFile(ini, []byte("[Profile0]\nName=a\nPath=a\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Profiles(root); err == nil || !strings.Contains(err.Error(), ini) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestProfilesReportsAnUnreadableRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "profiles.ini"), []byte("[Profile0]\nName=a\nPath=a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Searchable but not listable: profiles.ini reads, the scan does not.
+	if err := os.Chmod(root, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(root, 0o700) })
+	if _, err := Profiles(root); err == nil || !strings.Contains(err.Error(), root) {
+		t.Fatalf("err %v", err)
+	}
+}
+
 func TestDefaultRootPrefersTheNewLocation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -13,7 +13,9 @@
 package firefox
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -48,20 +50,27 @@ func DefaultRoot() (string, error) {
 func Profiles(root string) ([]chrome.Profile, error) {
 	var out []chrome.Profile
 	seen := map[string]bool{}
-	if data, err := os.ReadFile(filepath.Join(root, "profiles.ini")); err == nil {
-		for _, s := range iniSections(string(data)) {
-			if !strings.HasPrefix(s["[]"], "Profile") || s["Path"] == "" {
-				continue
-			}
-			p := chrome.Profile{Dir: s["Path"], Name: s["Name"]}
-			if s["IsRelative"] != "0" {
-				p.Dir = filepath.FromSlash(p.Dir)
-			}
-			out = append(out, p)
-			seen[Dir(root, p)] = true
-		}
+	// A missing file or root means no profiles yet; any other error is
+	// reported, not taken for that.
+	data, err := os.ReadFile(filepath.Join(root, "profiles.ini"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
 	}
-	entries, _ := os.ReadDir(root)
+	for _, s := range iniSections(string(data)) {
+		if !strings.HasPrefix(s["[]"], "Profile") || s["Path"] == "" {
+			continue
+		}
+		p := chrome.Profile{Dir: s["Path"], Name: s["Name"]}
+		if s["IsRelative"] != "0" {
+			p.Dir = filepath.FromSlash(p.Dir)
+		}
+		out = append(out, p)
+		seen[Dir(root, p)] = true
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	for _, e := range entries {
 		dir := filepath.Join(root, e.Name())
 		if !e.IsDir() || seen[dir] || !fileExists(filepath.Join(dir, "prefs.js")) {
@@ -80,10 +89,11 @@ func Profiles(root string) ([]chrome.Profile, error) {
 	return out, nil
 }
 
-// Dir is profile p's directory.
+// Dir is profile p's directory, cleaned so that an absolute path in
+// profiles.ini matches the same directory found by the scan.
 func Dir(root string, p chrome.Profile) string {
 	if filepath.IsAbs(p.Dir) {
-		return p.Dir
+		return filepath.Clean(p.Dir)
 	}
 	return filepath.Join(root, p.Dir)
 }
