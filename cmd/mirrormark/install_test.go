@@ -714,6 +714,22 @@ func TestFirefoxUninstallWithNoProfileSaysSo(t *testing.T) {
 	}
 }
 
+// Firefox has no key, so its uninstall does not say it kept one.
+func TestFirefoxUninstallKeepsNoKey(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	firefoxData(t, p, "aurora")
+	var out, errb bytes.Buffer
+	for _, cmd := range []string{"install", "uninstall"} {
+		if code := run([]string{cmd, "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit %d: %s%s", cmd, code, out.String(), errb.String())
+		}
+	}
+	if !strings.Contains(out.String(), "Kept your config") || strings.Contains(out.String(), "key") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
 // A user.js uninstall has nothing to change in is not rewritten.
 func TestFirefoxUninstallLeavesAnUnchangedUserJSAlone(t *testing.T) {
 	skipIfRoot(t)

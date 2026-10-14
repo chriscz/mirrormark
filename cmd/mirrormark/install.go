@@ -544,12 +544,13 @@ func finishUninstall(p db.Paths, browser string, purge bool, stdout, stderr io.W
 		return 1
 	}
 	name := map[string]string{"chrome": "Chrome", "firefox": "Firefox"}[browser]
-	again := "mirrormark uninstall --purge"
+	again, kept := "mirrormark uninstall --purge", "the databases, backups and key"
 	if browser != "chrome" {
 		again = "mirrormark uninstall --browser " + browser + " --purge"
+		kept = "the databases and backups" // only Chrome has a key
 	}
 	if !purge {
-		fmt.Fprintf(stdout, "Kept your config %s, the databases, backups and key in %s, and the log in %s.\n%s deletes %s's databases and backups, and the rest once no other browser's are left.\n", p.ConfigFile(), p.Data, p.State, again, name)
+		fmt.Fprintf(stdout, "Kept your config %s, %s in %s, and the log in %s.\n%s deletes %s's databases and backups, and the rest once no other browser's are left.\n", p.ConfigFile(), kept, p.Data, p.State, again, name)
 		return 0
 	}
 	dbs, errs := db.LoadAll(p)
