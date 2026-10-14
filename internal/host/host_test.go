@@ -283,6 +283,42 @@ func TestChangeReachesOtherProfileQuickly(t *testing.T) {
 	}
 }
 
+// A user who made the member folder a moment ago, while the extension still
+// waits for quiet before sending its tree, must not get a second one from a
+// round the config change starts on the old tree.
+func TestRoundWaitsForTheTreeAfterAChange(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	addProfile(t, p, "b")
+	writeConfig(t, p, "format: 1\nunions: {}\n")
+	a := start(t, p, "a", fakebrowser.New(), extOpts{})
+	eventually(t, "a first round", a.healthy)
+
+	a.mu.Lock()
+	a.b.Add("1", "Work", "")
+	a.mu.Unlock()
+	a.send(host.Msg{V: 1, Type: "changed"})
+	writeConfig(t, p, workUnion)
+	time.Sleep(300 * time.Millisecond) // many polls
+	if applies, _ := a.count(); applies != 0 {
+		t.Fatalf("%d batches sent before the tree that follows the change", applies)
+	}
+
+	a.sendTree()
+	eventually(t, "a round on the new tree", func() bool { _, rounds := a.count(); return rounds > 1 })
+	a.edit(func(br *fakebrowser.Browser) { br.Add(br.Find("1", "Work"), "GitHub", "https://github.com/") })
+	eventually(t, "a to publish", func() bool {
+		d, err := db.LoadDB(p.ProfileFile("a"))
+		return err == nil && d.Unions["work"] != nil && len(d.Unions["work"].Children) == 1
+	})
+	a.mu.Lock()
+	top := a.b.Lines("1")
+	a.mu.Unlock()
+	if want := []string{"/Work/", "/Work/GitHub https://github.com/"}; !slices.Equal(top, want) {
+		t.Fatalf("toolbar %q, want %q", top, want)
+	}
+}
+
 func TestUnknownDatabaseIsRefused(t *testing.T) {
 	e := start(t, paths(t), "nope", fakebrowser.New(), extOpts{})
 	if m := e.firstError(); m.Code != "db-missing" {

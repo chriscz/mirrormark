@@ -3,7 +3,10 @@
 //
 // A round runs when the extension sends a tree (on connect, after a burst of
 // bookmark events and after each batch) and when the poll sees that
-// config.yaml or a database file changed. A round sends the browser its ops
+// config.yaml or a database file changed. The extension sends "changed" at
+// the first bookmark event of a burst, before it waits for quiet to send the
+// tree; until that tree comes the poll starts no round, since one on the old
+// tree could create again what the user just made. A round sends the browser its ops
 // in batches and waits for each; if any op fails or the browser does not
 // answer in time, it writes no file and the next round retries. A round
 // that failed is retried at the poll, not on the tree that follows the

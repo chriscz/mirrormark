@@ -15,6 +15,7 @@ const ROOTS = { "bookmarks-bar": "toolbar", other: "other", mobile: "mobile" };
 let port = null;
 let connecting = null;
 let quiet = null;
+let unsent = false; // bookmark events since the last tree; the host knows
 let rebinding = null; // the timer that connects after a new binding
 let binding = 0; // counts new bindings, so a connect can tell it is stale
 let backoff = MIN_BACKOFF;
@@ -67,6 +68,10 @@ function changed() {
     connect(); // which waits out a pending reconnect
     return;
   }
+  // Tell the host at once, so it runs no round on the tree before this
+  // event while the quiet time runs.
+  if (!unsent) post(port, { v: V, type: "changed" });
+  unsent = true;
   clearTimeout(quiet);
   quiet = setTimeout(sendTree, QUIET_MS);
 }
@@ -136,6 +141,7 @@ function post(p, m) {
 async function sendTree() {
   const p = port;
   if (!p) return;
+  unsent = false; // an event from here on sends "changed" after this tree
   const [root] = await chrome.bookmarks.getTree();
   const nodes = [];
   const walk = (n, parent) =>

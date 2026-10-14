@@ -43,7 +43,7 @@ type state struct {
 	self     string
 	unlock   func() // releases the profile lock; held while Run runs
 	live     *round.Live
-	fresh    bool      // live reflects the browser after our last batch
+	fresh    bool      // live reflects the browser: no batch or edit since
 	retry    bool      // the last round failed; run the next one at the poll
 	failures int       // rounds failed in a row
 	next     time.Time // the earliest retry of a failed round
@@ -215,6 +215,11 @@ func (s *state) handle(m Msg) error {
 		if !s.retry {
 			s.run()
 		}
+	case "changed":
+		// The browser holds edits its next tree will bring. A round on the
+		// tree before them would not see them, and could create again what
+		// the user just made, such as a member folder; wait for that tree.
+		s.fresh = false
 	case "applied":
 		s.o.Log.Info("late applied message ignored", "batch", m.Batch)
 	case "error":
