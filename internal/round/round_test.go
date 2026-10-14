@@ -217,3 +217,18 @@ func TestWrongTreeSkipsTheUnion(t *testing.T) {
 		t.Fatalf("the guard must keep the record: changed %v", changed)
 	}
 }
+
+// A Firefox member's path may start with menu, the Bookmarks Menu.
+func TestFirefoxMenuPath(t *testing.T) {
+	b := fakebrowser.NewFirefox()
+	f := profile("f")
+	f.Profile.Browser = "firefox"
+	p := round.Make(round.Input{Config: config(map[string]string{"f": "menu/Work"}), Self: f, Live: live(t, b), NewM: merge.NewM})
+	if !p.EnsureOnly || len(p.Ops) != 1 || p.Ops[0].Parent != "menu________" {
+		t.Fatalf("plan %+v, want one create in menu________", p)
+	}
+	apply(t, b, p)
+	if got := b.Lines("menu________"); !slices.Equal(got, []string{"/Work/"}) {
+		t.Fatalf("menu %q", got)
+	}
+}

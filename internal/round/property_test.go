@@ -29,8 +29,13 @@ func newHosts() *hosts {
 	for i := range 3 {
 		id := fmt.Sprintf("p%d", i)
 		h.cfg.Unions["work"][id] = "toolbar/U"
-		b := fakebrowser.New()
-		m := &member{b: b, root: b.Add("1", "U", ""), file: profile(id)}
+		b, bar := fakebrowser.New(), "1"
+		file := profile(id)
+		if i == 2 {
+			b, bar = fakebrowser.NewFirefox(), "toolbar_____"
+			file.Profile.Browser = "firefox"
+		}
+		m := &member{b: b, root: b.Add(bar, "U", ""), file: file}
 		// Each member starts with its own bookmarks, and all with one the
 		// same; the first rounds join them. With 30 nodes in the union and
 		// few removes per burst, the wrong-tree guard has no reason to trip.

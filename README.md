@@ -132,8 +132,9 @@ your bookmarks in plain text.
         chrome-personal: other/Reading
         chrome-work: other/Reading
 
-A path starts with `toolbar`, `other` or `mobile`, or with the title Chrome
-shows for that folder, such as `Bookmarks bar`. Write `\/` for a slash inside
+A path starts with `toolbar`, `other` or `mobile`, or, for a Firefox profile,
+`menu`, or with the title the browser shows for that folder, such as
+`Bookmarks bar`. Write `\/` for a slash inside
 a folder name. One profile's folders may not be inside each other.
 
 ## How syncing behaves

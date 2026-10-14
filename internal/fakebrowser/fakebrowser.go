@@ -22,17 +22,44 @@ type Browser struct {
 	nodes map[string]*node
 	next  int
 	refs  map[string]string
+	top   *node             // the tree's root, which the extension does not send
+	roots map[string]string // top-level folder id -> config keyword
 }
 
 // New returns a browser with Chrome's three top-level folders:
 // "1" Bookmarks bar, "2" Other bookmarks, "3" Mobile bookmarks.
 func New() *Browser {
-	b := &Browser{nodes: map[string]*node{}, refs: map[string]string{}}
-	root := b.make(nil, "", "", -1)
-	for _, t := range []string{"Bookmarks bar", "Other bookmarks", "Mobile bookmarks"} {
-		b.make(root, t, "", -1)
+	b := &Browser{nodes: map[string]*node{}, refs: map[string]string{},
+		roots: map[string]string{"1": "toolbar", "2": "other", "3": "mobile"}}
+	b.top = b.fixed(nil, "0", "")
+	for i, t := range []string{"Bookmarks bar", "Other bookmarks", "Mobile bookmarks"} {
+		b.fixed(b.top, strconv.Itoa(i+1), t)
+	}
+	b.next = 4
+	return b
+}
+
+// NewFirefox returns a browser shaped like Firefox: fixed top-level ids,
+// including the Bookmarks Menu Chrome lacks. The host treats ids as opaque,
+// so new nodes get small integers as in New.
+func NewFirefox() *Browser {
+	b := &Browser{nodes: map[string]*node{}, refs: map[string]string{}, next: 1,
+		roots: map[string]string{"menu________": "menu", "toolbar_____": "toolbar", "unfiled_____": "other", "mobile______": "mobile"}}
+	b.top = b.fixed(nil, "root________", "")
+	for _, r := range [][2]string{{"menu________", "Bookmarks Menu"}, {"toolbar_____", "Bookmarks Toolbar"},
+		{"unfiled_____", "Other Bookmarks"}, {"mobile______", "Mobile Bookmarks"}} {
+		b.fixed(b.top, r[0], r[1])
 	}
 	return b
+}
+
+func (b *Browser) fixed(parent *node, id, title string) *node {
+	n := &node{id: id, title: title}
+	b.nodes[id] = n
+	if parent != nil {
+		b.insert(parent, n, -1)
+	}
+	return n
 }
 
 func (b *Browser) make(parent *node, title, url string, index int) *node {
@@ -234,15 +261,14 @@ func (b *Browser) apply(op merge.Op) merge.OpResult {
 
 // Tree returns the whole tree as the extension sends it.
 func (b *Browser) Tree() []round.TreeNode {
-	roots := map[string]string{"1": "toolbar", "2": "other", "3": "mobile"}
 	var out []round.TreeNode
 	var walk func(n *node, parent *string)
 	walk = func(n *node, parent *string) {
 		for i, k := range n.kids {
-			out = append(out, round.TreeNode{ID: k.id, Parent: parent, Index: i, Title: k.title, URL: k.url, Root: roots[k.id]})
+			out = append(out, round.TreeNode{ID: k.id, Parent: parent, Index: i, Title: k.title, URL: k.url, Root: b.roots[k.id]})
 			walk(k, new(k.id))
 		}
 	}
-	walk(b.nodes["0"], nil)
+	walk(b.top, nil)
 	return out
 }
