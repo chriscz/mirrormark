@@ -51,44 +51,48 @@ function changed() {
   quiet = setTimeout(sendTree, QUIET_MS);
 }
 
+// connect opens the port unless one is open or opening. The finally runs
+// after the assignment even when open returns at once; clearing connecting
+// inside open would run first and leave a settled promise behind, and no
+// later connect would open a port.
 function connect() {
-  connecting ??= (async () => {
-    try {
-      if (port) return;
-      const { db } = await chrome.storage.local.get("db");
-      if (!db) return; // not bound: stay dormant
-      clearTimeout(retry);
-      refs.clear();
-      const p = chrome.runtime.connectNative(HOST);
-      const opened = Date.now();
-      let hostError = false;
-      port = p;
-      p.onMessage.addListener((m) => {
-        if (m.type === "error") hostError = true;
-        queue = queue
-          .then(() => onMessage(p, m))
-          .catch((e) => console.warn("mirrormark: handling", m.type, "failed:", e));
-      });
-      p.onDisconnect.addListener(() => {
-        const err = chrome.runtime.lastError?.message;
-        if (port !== p) return; // replaced by a newer connection
-        port = null;
-        // The host's own error says more than "Native host has exited".
-        if (err && !hostError) setStatus({ error: err });
-        if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
-        retry = setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, MAX_BACKOFF);
-      });
-      const version = navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] ?? "";
-      // The hello goes out in the same task that sets port, so no tree can
-      // precede it.
-      p.postMessage({ v: V, type: "hello", db, browser: "chrome/" + version });
-      await sendTree();
-    } finally {
-      connecting = null;
-    }
-  })();
+  connecting ??= open().finally(() => {
+    connecting = null;
+  });
   return connecting;
+}
+
+async function open() {
+  if (port) return;
+  const { db } = await chrome.storage.local.get("db");
+  if (!db) return; // not bound: stay dormant
+  clearTimeout(retry);
+  refs.clear();
+  const p = chrome.runtime.connectNative(HOST);
+  const opened = Date.now();
+  let hostError = false;
+  port = p;
+  p.onMessage.addListener((m) => {
+    if (m.type === "error") hostError = true;
+    queue = queue
+      .then(() => onMessage(p, m))
+      .catch((e) => console.warn("mirrormark: handling", m.type, "failed:", e));
+  });
+  p.onDisconnect.addListener(() => {
+    const err = chrome.runtime.lastError?.message;
+    if (port !== p) return; // replaced by a newer connection
+    port = null;
+    // The host's own error says more than "Native host has exited".
+    if (err && !hostError) setStatus({ error: err });
+    if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
+    retry = setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, MAX_BACKOFF);
+  });
+  const version = navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] ?? "";
+  // The hello goes out in the same task that sets port, so no tree can
+  // precede it.
+  p.postMessage({ v: V, type: "hello", db, browser: "chrome/" + version });
+  await sendTree();
 }
 
 function post(p, m) {
