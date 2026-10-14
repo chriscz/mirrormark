@@ -9,7 +9,9 @@ Status: early. It works with Google Chrome on Linux only.
 ## Install (Google Chrome on Linux)
 
 You need the `mirrormark` binary (`make` builds `build/mirrormark`). Copy it
-somewhere stable such as `~/.local/bin`, because Chrome runs it from there.
+somewhere stable such as `~/.local/bin`, because Chrome runs it from there:
+the host manifest names the path `install` ran it from, with symlinks
+resolved. If you move or rename the binary, run `mirrormark install` again.
 
 1. Run `mirrormark install` as yourself, not with `sudo`. Chrome may be open
    or closed. By default it binds every profile in `~/.config/google-chrome`;
@@ -45,8 +47,12 @@ targets are:
 - `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`,
   which lets only that extension start the `mirrormark` binary.
 
-If `sudo` fails, `install` stops and changes nothing else. When the files
-are already up to date, `install` skips this step.
+Before this step, `install` has written the key, `extension/` and
+`mirrormark.crx` in `~/.local/share/mirrormark/`. If `sudo` fails, `install`
+stops: it makes no database files and no `config.yaml`, but if the second
+file fails, the first stays in place. Run `install` again when `sudo` works;
+it writes both files again. When the files are already up to date,
+`install` skips this step.
 
 ### Ids, labels and the key
 
@@ -68,7 +74,10 @@ manifest that names another extension.
 ### Upgrade, uninstall, unpack
 
 Upgrading: replace the binary and run `mirrormark install` again, then
-restart Chrome if it asks.
+restart Chrome if it asks. If the new build has the same extension version,
+`install` changes neither system file and Chrome keeps its copy of the
+extension, even if the extension's files changed (see
+[Development](#development)).
 
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
 needed), the CRX and the unpacked extension. Chrome removes the extension
@@ -79,7 +88,9 @@ so. `mirrormark uninstall --purge` deletes them too.
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
 Load unpacked in `chrome://extensions` (Developer mode). It still needs
-`install`'s host manifest to reach the host.
+`install`'s host manifest to reach the host. For Load unpacked, give a
+folder of your own, such as `~/mirrormark-extension`: `install` deletes and
+rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 
 ## Files
 
@@ -161,10 +172,11 @@ database file the host cannot write.
 - **You removed mirrormark from a profile.** Chrome remembers a **Remove**
   for good in that profile and does not install it there again, even after
   `uninstall` and `install`. (Turning it off is undone by turning it back
-  on.) To use mirrormark in that profile again, run `mirrormark unpack`,
-  load `~/.local/share/mirrormark/extension/` with Load unpacked in that
+  on.) To use mirrormark in that profile again, run `mirrormark unpack
+  ~/mirrormark-extension`, load that folder with Load unpacked in that
   profile's `chrome://extensions`, and run `mirrormark install --profile
-  "<profile>"`. Run `unpack` again after each upgrade and reload it.
+  "<profile>"`. Run the same `unpack` again after each upgrade and reload
+  it.
 - **`install` stops at a database file it cannot read.** That file may be
   the profile's own, so `install` does not make another. Fix the file or
   move it out of `~/.local/share/mirrormark/profiles/`.
