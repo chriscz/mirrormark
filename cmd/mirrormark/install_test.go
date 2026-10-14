@@ -970,3 +970,65 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// neverRun lists profile name in root's profiles.ini with a directory but
+// no compatibility.ini, like the second profile LibreWolf makes.
+func neverRun(t *testing.T, root, name string) {
+	t.Helper()
+	must(t, os.MkdirAll(filepath.Join(root, "x"+name+"."+name), 0o700))
+	f, err := os.OpenFile(filepath.Join(root, "profiles.ini"), os.O_APPEND|os.O_WRONLY, 0)
+	must(t, err)
+	_, err = fmt.Fprintf(f, "[Profile9]\nName=%s\nIsRelative=1\nPath=x%s.%s\n", name, name, name)
+	must(t, err)
+	must(t, f.Close())
+}
+
+func TestInstallSkipsAProfileThatHasNeverRun(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := firefoxData(t, p, "aurora")
+	neverRun(t, root, "gamma")
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "skipped: gamma: it has never run") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	mustExist(t, "install", p.ProfileFile("firefox-alpha"), filepath.Join(root, "xalpha.alpha", "user.js"))
+	mustBeGone(t, "install", p.ProfileFile("firefox-gamma"), filepath.Join(root, "xgamma.gamma", "user.js"))
+}
+
+func TestInstallRefusesANamedProfileThatHasNeverRun(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := firefoxData(t, p, "aurora")
+	neverRun(t, root, "gamma")
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "firefox", "--profile", "alpha", "--profile", "gamma"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "gamma: it has never run") {
+		t.Fatalf("stderr %q", errb.String())
+	}
+	mustBeGone(t, "refused install", filepath.Join(root, "xalpha.alpha", "user.js"), p.ProfileFile("firefox-alpha"))
+}
+
+func TestInstallStopsWhenNoProfileHasRun(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := firefoxData(t, p, "aurora")
+	for _, n := range []string{"alpha", "beta"} {
+		must(t, os.Remove(filepath.Join(root, "x"+n+"."+n, "compatibility.ini")))
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "never run") {
+		t.Fatalf("stderr %q", errb.String())
+	}
+	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
+		t.Fatalf("made databases %v", dbs)
+	}
+}

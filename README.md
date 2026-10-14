@@ -139,7 +139,9 @@ The binary needs a stable place, as for Chrome.
    `--profile NAME` (repeatable) picks some of them, and
    `--user-data-dir DIR` reads the profiles in `DIR` instead. It refuses,
    before writing anything, if a chosen profile was last run by a Firefox
-   other than Developer Edition.
+   other than Developer Edition. A profile that has never run is skipped with
+   a `skipped:` line, unless you name it with `--profile`; start Firefox in it
+   once, then run `install` again to add it.
 2. Restart Firefox in those profiles if it is running (close every window).
 3. Run `mirrormark install --browser firefox` again. For each profile it
    starts Firefox there if it is not running, opens a tab and prints

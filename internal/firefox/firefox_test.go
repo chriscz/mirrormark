@@ -3,6 +3,7 @@ package firefox
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"io"
 	"maps"
 	"os"
@@ -291,5 +292,12 @@ func TestBindGivesUpWhenThePageNeverConfirms(t *testing.T) {
 	calls, _ := os.ReadFile(log)
 	if err == nil || bytes.Count(calls, []byte("bind.html")) != 3 {
 		t.Fatalf("err %v, calls:\n%s", err, calls)
+	}
+}
+
+func TestCheckSaysWhenAProfileHasNeverRun(t *testing.T) {
+	_, err := Firefox.Check(t.TempDir())
+	if !errors.Is(err, ErrNeverRun) || !strings.Contains(err.Error(), "start Firefox Developer Edition") {
+		t.Fatalf("err %v", err)
 	}
 }

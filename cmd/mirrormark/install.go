@@ -217,18 +217,28 @@ func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, 
 		dir, bin string
 	}
 	var targets []target
-	var refused []string
+	var refused, skipped []string
 	for _, c := range chosen {
 		dir := firefox.Dir(root, c)
 		bin, err := b.Check(dir)
-		if err != nil {
+		switch {
+		case errors.Is(err, firefox.ErrNeverRun) && len(picks) == 0:
+			// The user did not ask for it by name, and it holds nothing yet.
+			skipped = append(skipped, fmt.Sprintf("%s: %v", c.Name, err))
+		case err != nil:
 			refused = append(refused, fmt.Sprintf("%s: %v", c.Name, err))
-			continue
+		default:
+			targets = append(targets, target{c, dir, bin})
 		}
-		targets = append(targets, target{c, dir, bin})
 	}
 	if len(refused) > 0 {
 		return fail(fmt.Errorf("cannot install into these profiles; leave them out with --profile:\n  %s", strings.Join(refused, "\n  ")))
+	}
+	if len(targets) == 0 {
+		return fail(fmt.Errorf("no profile to install into:\n  %s", strings.Join(skipped, "\n  ")))
+	}
+	for _, s := range skipped {
+		fmt.Fprintf(stdout, "skipped: %s, then run install again to add it\n", s)
 	}
 	// The databases come before any write into a profile: uninstall finds
 	// the profiles whose checks to turn back on through them, so a write

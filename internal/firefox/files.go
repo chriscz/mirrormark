@@ -148,13 +148,21 @@ func withPrefs(user []byte) []byte {
 
 var channelRe = regexp.MustCompile(`pref\("app\.update\.channel",\s*"([^"]+)"\)`)
 
+// ErrNeverRun means no browser has run the profile yet, so nothing in it
+// says which browser it belongs to. LibreWolf makes a second profile at its
+// first start that never runs.
+var ErrNeverRun = errors.New("it has never run")
+
 // Check returns the binary of the browser that last ran the profile, from
 // its compatibility.ini, or why b cannot install into the profile: it was
 // last run by another browser, or nothing tells which.
 func (b Browser) Check(profileDir string) (bin string, err error) {
 	data, err := os.ReadFile(filepath.Join(profileDir, "compatibility.ini"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%w; start %s in it once and close it", ErrNeverRun, b.Name)
+	}
 	if err != nil {
-		return "", fmt.Errorf("cannot tell which browser uses %s; start %s in that profile once and close it: %w", profileDir, b.Name, err)
+		return "", fmt.Errorf("cannot tell which browser uses %s: %w", profileDir, err)
 	}
 	var dir string
 	for _, s := range iniSections(string(data)) {
