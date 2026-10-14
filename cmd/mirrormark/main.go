@@ -21,6 +21,11 @@ func main() {
 const usageText = `Usage: mirrormark <command> [options]
 
 Commands:
+  install     Install into Google Chrome and bind its profiles
+              [--user-data-dir DIR] [--profile DIR_OR_NAME]...
+  uninstall   Remove from Google Chrome; keeps your files unless --purge
+  unpack      Write the extension, with this install's key, for Load unpacked
+              [DIR]
   host        Run as the native messaging host (Chrome does this)
   help        Show this help
 `
@@ -40,6 +45,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
+	case "install":
+		return cmdInstall(args[1:], stdout, stderr)
+	case "uninstall":
+		return cmdUninstall(args[1:], stdout, stderr)
+	case "unpack":
+		return cmdUnpack(args[1:], stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "mirrormark: unknown command %q\n", args[0])
 	usage(stderr)
