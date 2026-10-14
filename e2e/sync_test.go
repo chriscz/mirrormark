@@ -239,7 +239,7 @@ func TestClosedBrowserCatchesUpOnStart(t *testing.T) {
 		return slices.Equal(recorded(t, e, e.DBB), []string{"/GH " + gh, "/News " + lwn})
 	})
 	caughtUp(t, e, e.DBB, before)
-	e.B.open(t, e.ExtID)
+	e.open(t, e.B)
 	waitLines(t, e.B, work, []string{"/GH " + gh, "/News " + lwn}, syncTimeout)
 
 	// The other way round, with a delete among the edits.
@@ -251,7 +251,7 @@ func TestClosedBrowserCatchesUpOnStart(t *testing.T) {
 	})
 	before = time.Now()
 	e.A = e.launch("a")
-	e.A.open(t, e.ExtID)
+	e.open(t, e.A)
 	settled(t, e, nil, "/GH "+gh, "/Go https://go.dev/", "/_deleted/", "/_deleted/News "+lwn)
 	caughtUp(t, e, e.DBA, before)
 }

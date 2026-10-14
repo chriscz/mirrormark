@@ -109,7 +109,7 @@ func TestBindStartsChrome(t *testing.T) {
 	stopChrome(t, e.udd("a"))
 
 	e.A = e.launch("a")
-	e.A.open(t, e.ExtID)
+	e.open(t, e.A)
 	if got := eval[string](t, e.A, `chrome.storage.local.get("db").then((r) => r.db)`); got != id {
 		t.Errorf("a is bound to %q, want %q", got, id)
 	}

@@ -34,6 +34,7 @@ type Env struct {
 	Paths          db.Paths
 	env            []string
 	ExtID          string
+	kinds          map[string]string // browser name to "chrome" or "firefox"
 	A, B           *Browser
 	DBA, DBB       string
 	LabelA, LabelB string
@@ -44,6 +45,20 @@ var (
 	boundRe = regexp.MustCompile(`bound: Default -> ([a-z0-9-]+)`)
 )
 
+// kind is the kind of browser the instance called name is.
+func (e *Env) kind(name string) string {
+	if k, ok := e.kinds[name]; ok {
+		return k
+	}
+	return "chrome"
+}
+
+// open loads the popup page of b's extension and attaches the tests to it.
+func (e *Env) open(t *testing.T, b *Browser) {
+	t.Helper()
+	b.open(t, "chrome-extension://"+e.ExtID+"/popup.html")
+}
+
 // setup installs and binds as a user would: Chrome runs once (so its
 // profile list exists), install writes the files and asks for a restart,
 // Chrome restarts, and install runs again for each data directory to bind.
@@ -52,8 +67,8 @@ func setup(t *testing.T) *Env {
 	e.firstInstall(t)
 	e.A, e.B = e.launch("a"), e.launch("b")
 	e.DBA, e.DBB = e.bind("a"), e.bind("b")
-	e.A.open(t, e.ExtID)
-	e.B.open(t, e.ExtID)
+	e.open(t, e.A)
+	e.open(t, e.B)
 	e.LabelA, e.LabelB = e.label(e.DBA), e.label(e.DBB)
 	return e
 }

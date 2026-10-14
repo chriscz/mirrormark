@@ -12,14 +12,94 @@ import (
 	"time"
 )
 
+// driver is how the tests reach one browser: Chrome over the DevTools
+// pipe, Firefox over WebDriver BiDi.
+type driver interface {
+	// eval runs expr, a JavaScript expression that may be a promise, in
+	// the page openPage loaded, and returns its value as JSON.
+	eval(expr string) (json.RawMessage, error)
+	// openPage loads url, an extension page, and makes it eval's page.
+	openPage(url string) error
+	// close asks the browser to quit as a user's quit would, so that it
+	// saves its files.
+	close()
+}
+
 type Browser struct {
-	Name    string
-	UDD     string
-	cmd     *exec.Cmd
+	Name string
+	Kind string // "chrome" or "firefox"
+	UDD  string // Chrome's data directory, or Firefox's profile directory
+	cmd  *exec.Cmd
+	drv  driver
+	done chan struct{}
+}
+
+type target struct {
+	TargetID string `json:"targetId"`
+	Type     string `json:"type"`
+	URL      string `json:"url"`
+}
+
+type createParams struct {
+	URL string `json:"url"`
+}
+
+type attachParams struct {
+	TargetID string `json:"targetId"`
+	Flatten  bool   `json:"flatten"`
+}
+
+type evalParams struct {
+	Expression    string `json:"expression"`
+	AwaitPromise  bool   `json:"awaitPromise"`
+	ReturnByValue bool   `json:"returnByValue"`
+}
+
+type evalResult struct {
+	Result struct {
+		Value json.RawMessage `json:"value"`
+	} `json:"result"`
+	ExceptionDetails *struct {
+		Text      string `json:"text"`
+		Exception struct {
+			Description string `json:"description"`
+		} `json:"exception"`
+	} `json:"exceptionDetails"`
+}
+
+type chromeDriver struct {
 	c       *cdp
 	session string // an extension page; chrome.* calls run there
-	done    chan struct{}
 }
+
+func (d *chromeDriver) eval(expr string) (json.RawMessage, error) {
+	res, err := call[evalParams, evalResult](d.c, d.session, "Runtime.evaluate",
+		evalParams{Expression: expr, AwaitPromise: true, ReturnByValue: true})
+	if err != nil {
+		return nil, err
+	}
+	if x := res.ExceptionDetails; x != nil {
+		return nil, fmt.Errorf("%s %s", x.Text, x.Exception.Description)
+	}
+	return res.Result.Value, nil
+}
+
+func (d *chromeDriver) openPage(url string) error {
+	tg, err := call[createParams, target](d.c, "", "Target.createTarget", createParams{URL: url})
+	if err != nil {
+		return err
+	}
+	at, err := call[attachParams, struct {
+		SessionID string `json:"sessionId"`
+	}](d.c, "", "Target.attachToTarget", attachParams{TargetID: tg.TargetID, Flatten: true})
+	if err != nil {
+		return err
+	}
+	d.session = at.SessionID
+	return nil
+}
+
+func (d *chromeDriver) close() { call[none, none](d.c, "", "Browser.close", none{}) }
 
 func launch(t *testing.T, name, udd string, env []string) *Browser {
 	t.Helper()
@@ -46,7 +126,8 @@ func launch(t *testing.T, name, udd string, env []string) *Browser {
 	}
 	inR.Close()
 	outW.Close()
-	b := &Browser{Name: name, UDD: udd, cmd: cmd, c: newCDP(inW, outR), done: make(chan struct{})}
+	c := newCDP(inW, outR)
+	b := &Browser{Name: name, Kind: "chrome", UDD: udd, cmd: cmd, drv: &chromeDriver{c: c}, done: make(chan struct{})}
 	go func() {
 		cmd.Wait()
 		logf.Close()
@@ -55,7 +136,7 @@ func launch(t *testing.T, name, udd string, env []string) *Browser {
 		close(b.done)
 	}()
 	t.Cleanup(b.Close)
-	if _, err := call[none, none](b.c, "", "Browser.getVersion", none{}); err != nil {
+	if _, err := call[none, none](c, "", "Browser.getVersion", none{}); err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
 	return b
@@ -69,7 +150,7 @@ func (b *Browser) Close() {
 		return
 	default:
 	}
-	call[none, none](b.c, "", "Browser.close", none{})
+	b.drv.close()
 	select {
 	case <-b.done:
 	case <-time.After(20 * time.Second):
@@ -78,49 +159,16 @@ func (b *Browser) Close() {
 	}
 }
 
-type target struct {
-	TargetID string `json:"targetId"`
-	Type     string `json:"type"`
-	URL      string `json:"url"`
-}
-
-// targets lists Chrome's tabs, workers and other targets.
-func (b *Browser) targets(t *testing.T) []target {
+// open loads the extension page url in a tab and makes it the page eval
+// runs in. It retries because on a profile's first start the extension
+// installs after the first tab has loaded.
+func (b *Browser) open(t *testing.T, url string) {
 	t.Helper()
-	r, err := call[none, struct {
-		TargetInfos []target `json:"targetInfos"`
-	}](b.c, "", "Target.getTargets", none{})
-	if err != nil {
-		t.Fatalf("%s: %v", b.Name, err)
-	}
-	return r.TargetInfos
-}
-
-// open loads the extension's popup page in a tab and attaches to it. It
-// retries because on a profile's first start the extension installs after
-// the first tab has loaded.
-func (b *Browser) open(t *testing.T, extID string) {
-	t.Helper()
-	type createParams struct {
-		URL string `json:"url"`
-	}
-	type attachParams struct {
-		TargetID string `json:"targetId"`
-		Flatten  bool   `json:"flatten"`
-	}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		tg, err := call[createParams, target](b.c, "", "Target.createTarget", createParams{URL: "chrome-extension://" + extID + "/popup.html"})
-		if err != nil {
+		if err := b.drv.openPage(url); err != nil {
 			t.Fatal(err)
 		}
-		at, err := call[attachParams, struct {
-			SessionID string `json:"sessionId"`
-		}](b.c, "", "Target.attachToTarget", attachParams{TargetID: tg.TargetID, Flatten: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		b.session = at.SessionID
 		for range 20 {
 			if s, err := evalJS[string](b, "typeof chrome.bookmarks"); err == nil && s == "object" {
 				return
@@ -129,24 +177,6 @@ func (b *Browser) open(t *testing.T, extID string) {
 		}
 	}
 	t.Fatalf("%s: the extension page never loaded", b.Name)
-}
-
-type evalParams struct {
-	Expression    string `json:"expression"`
-	AwaitPromise  bool   `json:"awaitPromise"`
-	ReturnByValue bool   `json:"returnByValue"`
-}
-
-type evalResult struct {
-	Result struct {
-		Value json.RawMessage `json:"value"`
-	} `json:"result"`
-	ExceptionDetails *struct {
-		Text      string `json:"text"`
-		Exception struct {
-			Description string `json:"description"`
-		} `json:"exception"`
-	} `json:"exceptionDetails"`
 }
 
 // prelude: a path starts with a root as config.yaml names it ("toolbar"
@@ -215,16 +245,12 @@ const mm = {
 
 func evalJS[R any](b *Browser, expr string) (R, error) {
 	var out R
-	res, err := call[evalParams, evalResult](b.c, b.session, "Runtime.evaluate", evalParams{
-		Expression: "(async () => {" + prelude + "return await (" + expr + ");})()", AwaitPromise: true, ReturnByValue: true})
+	raw, err := b.drv.eval("(async () => {" + prelude + "return await (" + expr + ");})()")
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("%s: %w", expr, err)
 	}
-	if d := res.ExceptionDetails; d != nil {
-		return out, fmt.Errorf("%s: %s %s", expr, d.Text, d.Exception.Description)
-	}
-	if len(res.Result.Value) > 0 {
-		err = json.Unmarshal(res.Result.Value, &out)
+	if len(raw) > 0 {
+		err = json.Unmarshal(raw, &out)
 	}
 	return out, err
 }
