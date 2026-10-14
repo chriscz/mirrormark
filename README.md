@@ -325,10 +325,14 @@ Besides installing and binding, they share a folder between the two
 instances and check that each kind of edit, a delete, restore and purge, a
 conflict, the first sync of two filled folders and a closed browser's catch-up
 reach both, with no warning in the host's log. Each edit must reach the
-other running Chrome within 3 seconds; the tests log how long each took.
+other running browser within 3 seconds; the tests log how long each took.
 Other tests install into and bind two Firefox Developer Edition profiles,
 from the same image, and drive them over WebDriver BiDi, under Xvfb and a
 D-Bus session, which carries `install`'s bind page to a running Firefox.
+The sync tests run three times: between two Chromes, between two Firefoxes,
+and between a Firefox and a Chrome, as subtests named `chrome-chrome`,
+`firefox-firefox` and `firefox-chrome` (for example
+`RUN=TestEditsPropagate/firefox-chrome`).
 Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;

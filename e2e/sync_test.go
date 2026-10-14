@@ -27,10 +27,20 @@ const syncTimeout = 10 * time.Second
 // target is how soon an edit in one running profile must show in the other.
 const latencyTarget = 3 * time.Second
 
+// pairs are the browsers of profiles a and b each sync test runs with.
+var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox", "chrome"}}
+
+// forPairs runs test once per pair, as a subtest named after it.
+func forPairs(t *testing.T, test func(t *testing.T, ka, kb string)) {
+	for _, p := range pairs {
+		t.Run(p[0]+"-"+p[1], func(t *testing.T) { test(t, p[0], p[1]) })
+	}
+}
+
 // synced shares Work and puts one bookmark in A's, then waits for it in B.
-func synced(t *testing.T) *Env {
+func synced(t *testing.T, ka, kb string) *Env {
 	t.Helper()
-	e := setup(t)
+	e := setupPair(t, ka, kb)
 	e.Union(t)
 	e.A.Add(t, work, "GitHub", gh)
 	waitLines(t, e.B, work, []string{"/GitHub " + gh}, syncTimeout)
@@ -93,58 +103,62 @@ func recorded(t *testing.T, e *Env, id string) []string {
 // TestEditsPropagate makes each kind of edit in one browser and checks that
 // it reaches the other within the target.
 func TestEditsPropagate(t *testing.T) {
-	e := synced(t)
-	e.B.Add(t, work, "News", lwn)
-	latency(t, e.A, "add", "/GitHub "+gh, "/News "+lwn)
-	e.A.Rename(t, work+"/GitHub "+gh, "GH")
-	latency(t, e.B, "rename", "/GH "+gh, "/News "+lwn)
-	e.B.SetURL(t, work+"/GH "+gh, gh+"chriscz")
-	latency(t, e.A, "set URL", "/GH "+gh+"chriscz", "/News "+lwn)
-	e.A.Mkdir(t, work+"/Dev")
-	latency(t, e.B, "new folder", "/Dev/", "/GH "+gh+"chriscz", "/News "+lwn)
-	e.B.Move(t, work+"/GH "+gh+"chriscz", work+"/Dev", 0)
-	latency(t, e.A, "move into a folder", "/Dev/", "/Dev/GH "+gh+"chriscz", "/News "+lwn)
-	e.A.Mkdir(t, work+"/Dev/Go")
-	e.A.Move(t, work+"/News "+lwn, work+"/Dev/Go", -1)
-	latency(t, e.B, "new subfolder and move into it",
-		"/Dev/", "/Dev/GH "+gh+"chriscz", "/Dev/Go/", "/Dev/Go/News "+lwn)
-	e.B.Move(t, work+"/Dev/Go/", work, 0)
-	latency(t, e.A, "folder moved up",
-		"/Dev/", "/Dev/GH "+gh+"chriscz", "/Go/", "/Go/News "+lwn)
-	settled(t, e, nil, "/Dev/", "/Dev/GH "+gh+"chriscz", "/Go/", "/Go/News "+lwn)
+	forPairs(t, func(t *testing.T, ka, kb string) {
+		e := synced(t, ka, kb)
+		e.B.Add(t, work, "News", lwn)
+		latency(t, e.A, "add", "/GitHub "+gh, "/News "+lwn)
+		e.A.Rename(t, work+"/GitHub "+gh, "GH")
+		latency(t, e.B, "rename", "/GH "+gh, "/News "+lwn)
+		e.B.SetURL(t, work+"/GH "+gh, gh+"chriscz")
+		latency(t, e.A, "set URL", "/GH "+gh+"chriscz", "/News "+lwn)
+		e.A.Mkdir(t, work+"/Dev")
+		latency(t, e.B, "new folder", "/Dev/", "/GH "+gh+"chriscz", "/News "+lwn)
+		e.B.Move(t, work+"/GH "+gh+"chriscz", work+"/Dev", 0)
+		latency(t, e.A, "move into a folder", "/Dev/", "/Dev/GH "+gh+"chriscz", "/News "+lwn)
+		e.A.Mkdir(t, work+"/Dev/Go")
+		e.A.Move(t, work+"/News "+lwn, work+"/Dev/Go", -1)
+		latency(t, e.B, "new subfolder and move into it",
+			"/Dev/", "/Dev/GH "+gh+"chriscz", "/Dev/Go/", "/Dev/Go/News "+lwn)
+		e.B.Move(t, work+"/Dev/Go/", work, 0)
+		latency(t, e.A, "folder moved up",
+			"/Dev/", "/Dev/GH "+gh+"chriscz", "/Go/", "/Go/News "+lwn)
+		settled(t, e, nil, "/Dev/", "/Dev/GH "+gh+"chriscz", "/Go/", "/Go/News "+lwn)
+	})
 }
 
 // TestDeleteRestoreAndPurge deletes a bookmark, restores it from _deleted,
 // deletes it again and purges it, each in one browser.
 func TestDeleteRestoreAndPurge(t *testing.T) {
-	e := synced(t)
-	e.A.Add(t, work, "News", lwn)
-	both(t, e, "/GitHub "+gh, "/News "+lwn)
+	forPairs(t, func(t *testing.T, ka, kb string) {
+		e := synced(t, ka, kb)
+		e.A.Add(t, work, "News", lwn)
+		both(t, e, "/GitHub "+gh, "/News "+lwn)
 
-	e.B.Remove(t, work+"/GitHub "+gh)
-	both(t, e, "/_deleted/", "/_deleted/GitHub "+gh, "/News "+lwn)
+		e.B.Remove(t, work+"/GitHub "+gh)
+		both(t, e, "/_deleted/", "/_deleted/GitHub "+gh, "/News "+lwn)
 
-	// Restoring is moving it out of _deleted, in either profile.
-	e.A.Move(t, work+"/_deleted/GitHub "+gh, work, -1)
-	both(t, e, "/_deleted/", "/GitHub "+gh, "/News "+lwn)
+		// Restoring is moving it out of _deleted, in either profile.
+		e.A.Move(t, work+"/_deleted/GitHub "+gh, work, -1)
+		both(t, e, "/_deleted/", "/GitHub "+gh, "/News "+lwn)
 
-	// Deleting a folder takes its contents to _deleted with it.
-	e.A.Mkdir(t, work+"/Old")
-	e.A.Move(t, work+"/News "+lwn, work+"/Old", -1)
-	both(t, e, "/_deleted/", "/GitHub "+gh, "/Old/", "/Old/News "+lwn)
-	e.B.Remove(t, work+"/Old/")
-	both(t, e, "/_deleted/", "/_deleted/Old/", "/_deleted/Old/News "+lwn, "/GitHub "+gh)
+		// Deleting a folder takes its contents to _deleted with it.
+		e.A.Mkdir(t, work+"/Old")
+		e.A.Move(t, work+"/News "+lwn, work+"/Old", -1)
+		both(t, e, "/_deleted/", "/GitHub "+gh, "/Old/", "/Old/News "+lwn)
+		e.B.Remove(t, work+"/Old/")
+		both(t, e, "/_deleted/", "/_deleted/Old/", "/_deleted/Old/News "+lwn, "/GitHub "+gh)
 
-	// Removing from _deleted is the one real deletion.
-	e.A.Remove(t, work+"/_deleted/Old/")
-	settled(t, e, nil, "/_deleted/", "/GitHub "+gh)
+		// Removing from _deleted is the one real deletion.
+		e.A.Remove(t, work+"/_deleted/Old/")
+		settled(t, e, nil, "/_deleted/", "/GitHub "+gh)
+	})
 }
 
 // TestLargeFolderDelete deletes a folder that holds most of the union. It is
 // an ordinary delete, not a broken tree: the folder reaches _deleted in both
 // profiles, and settled checks that the wrong-tree guard did not trip.
 func TestLargeFolderDelete(t *testing.T) {
-	e := synced(t)
+	e := synced(t, "chrome", "chrome")
 	e.A.Mkdir(t, work+"/Big")
 	want := []string{"/Big/", "/GitHub " + gh}
 	for i := range 8 {
@@ -170,21 +184,23 @@ func TestLargeFolderDelete(t *testing.T) {
 // rounds run. Whichever runs first publishes its URL; the second sees the
 // other one changed too and keeps both.
 func TestConflictingEditsMakeSuffixedCopies(t *testing.T) {
-	e := synced(t)
-	unlock, err := db.Lock(e.Paths.GlobalLock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.A.SetURL(t, work+"/GitHub "+gh, gh+"orgs/a")
-	e.B.SetURL(t, work+"/GitHub "+gh, gh+"orgs/b")
-	time.Sleep(1500 * time.Millisecond) // past the extension's 0.5 s quiet time
-	unlock()
-	// A round can start from a tree sent before its browser's edit, and
-	// then finds its update stale; the round is retried and logs it.
-	stale := regexp.MustCompile(`op failed .*err=stale|msg="the browser could not update .*stale`)
-	settled(t, e, stale,
-		fmt.Sprintf("/GitHub (%s) %sorgs/a", e.LabelA, gh),
-		fmt.Sprintf("/GitHub (%s) %sorgs/b", e.LabelB, gh))
+	forPairs(t, func(t *testing.T, ka, kb string) {
+		e := synced(t, ka, kb)
+		unlock, err := db.Lock(e.Paths.GlobalLock())
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.A.SetURL(t, work+"/GitHub "+gh, gh+"orgs/a")
+		e.B.SetURL(t, work+"/GitHub "+gh, gh+"orgs/b")
+		time.Sleep(1500 * time.Millisecond) // past the extension's 0.5 s quiet time
+		unlock()
+		// A round can start from a tree sent before its browser's edit, and
+		// then finds its update stale; the round is retried and logs it.
+		stale := regexp.MustCompile(`op failed .*err=stale|msg="the browser could not update .*stale`)
+		settled(t, e, stale,
+			fmt.Sprintf("/GitHub (%s) %sorgs/a", e.LabelA, gh),
+			fmt.Sprintf("/GitHub (%s) %sorgs/b", e.LabelB, gh))
+	})
 }
 
 // TestFirstSyncUnionsExistingBookmarks starts with different bookmarks in
@@ -192,68 +208,72 @@ func TestConflictingEditsMakeSuffixedCopies(t *testing.T) {
 // user is still editing in A when the config changes, so A's extension holds
 // its tree back, and the host's view of A lacks the folder for a while.
 func TestFirstSyncUnionsExistingBookmarks(t *testing.T) {
-	e := setup(t)
-	e.A.Mkdir(t, work+"/Dev")
-	e.A.Add(t, work, "GitHub", gh)
-	e.A.Add(t, work, "Mail", "https://fastmail.com/")
-	e.A.Add(t, work+"/Dev", "Go", "https://go.dev/")
-	e.B.Mkdir(t, work+"/Dev")
-	e.B.Add(t, work, "GitHub", gh)
-	e.B.Add(t, work, "Mail", "https://gmail.com/")
-	e.B.Add(t, work, "News", lwn)
-	e.B.Add(t, work+"/Dev", "Rust", "https://rust-lang.org/")
-	e.Share(t)
-	// Each edit restarts the extension's 0.5 s wait for quiet, and the host
-	// looks at the config at least once a second.
-	for i := range 8 {
-		title := []string{"Go!", "Go"}[i%2]
-		e.A.Rename(t, work+"/Dev/"+[]string{"Go", "Go!"}[i%2]+" https://go.dev/", title)
-		time.Sleep(200 * time.Millisecond)
-	}
-	settled(t, e, nil,
-		"/Dev/",
-		"/Dev/Go https://go.dev/",
-		"/Dev/Rust https://rust-lang.org/",
-		"/GitHub "+gh,
-		fmt.Sprintf("/Mail (%s) https://fastmail.com/", e.LabelA),
-		fmt.Sprintf("/Mail (%s) https://gmail.com/", e.LabelB),
-		"/News "+lwn)
+	forPairs(t, func(t *testing.T, ka, kb string) {
+		e := setupPair(t, ka, kb)
+		e.A.Mkdir(t, work+"/Dev")
+		e.A.Add(t, work, "GitHub", gh)
+		e.A.Add(t, work, "Mail", "https://fastmail.com/")
+		e.A.Add(t, work+"/Dev", "Go", "https://go.dev/")
+		e.B.Mkdir(t, work+"/Dev")
+		e.B.Add(t, work, "GitHub", gh)
+		e.B.Add(t, work, "Mail", "https://gmail.com/")
+		e.B.Add(t, work, "News", lwn)
+		e.B.Add(t, work+"/Dev", "Rust", "https://rust-lang.org/")
+		e.Share(t)
+		// Each edit restarts the extension's 0.5 s wait for quiet, and the host
+		// looks at the config at least once a second.
+		for i := range 8 {
+			title := []string{"Go!", "Go"}[i%2]
+			e.A.Rename(t, work+"/Dev/"+[]string{"Go", "Go!"}[i%2]+" https://go.dev/", title)
+			time.Sleep(200 * time.Millisecond)
+		}
+		settled(t, e, nil,
+			"/Dev/",
+			"/Dev/Go https://go.dev/",
+			"/Dev/Rust https://rust-lang.org/",
+			"/GitHub "+gh,
+			fmt.Sprintf("/Mail (%s) https://fastmail.com/", e.LabelA),
+			fmt.Sprintf("/Mail (%s) https://gmail.com/", e.LabelB),
+			"/News "+lwn)
+	})
 }
 
 // TestClosedBrowserCatchesUpOnStart edits in one browser while the other
 // is closed, both ways round.
 func TestClosedBrowserCatchesUpOnStart(t *testing.T) {
-	e := synced(t)
+	forPairs(t, func(t *testing.T, ka, kb string) {
+		e := synced(t, ka, kb)
 
-	e.B.Close()
-	e.A.Add(t, work, "News", lwn)
-	e.A.Rename(t, work+"/GitHub "+gh, "GH")
-	eventually(t, syncTimeout, "A to publish its edits", func() bool {
-		return slices.Equal(recorded(t, e, e.DBA), []string{"/GH " + gh, "/News " + lwn})
-	})
-	before := time.Now()
-	e.B = e.launch("b")
-	// B's extension connects as the profile starts, with no page open, and
-	// its host's first round applies A's edits and writes B's file.
-	eventually(t, syncTimeout, "B to catch up", func() bool {
-		return slices.Equal(recorded(t, e, e.DBB), []string{"/GH " + gh, "/News " + lwn})
-	})
-	caughtUp(t, e, e.DBB, before)
-	e.open(t, e.B)
-	waitLines(t, e.B, work, []string{"/GH " + gh, "/News " + lwn}, syncTimeout)
+		e.B.Close()
+		e.A.Add(t, work, "News", lwn)
+		e.A.Rename(t, work+"/GitHub "+gh, "GH")
+		eventually(t, syncTimeout, "A to publish its edits", func() bool {
+			return slices.Equal(recorded(t, e, e.DBA), []string{"/GH " + gh, "/News " + lwn})
+		})
+		before := time.Now()
+		e.B = e.launch("b")
+		// B's extension connects as the profile starts, with no page open, and
+		// its host's first round applies A's edits and writes B's file.
+		eventually(t, syncTimeout, "B to catch up", func() bool {
+			return slices.Equal(recorded(t, e, e.DBB), []string{"/GH " + gh, "/News " + lwn})
+		})
+		caughtUp(t, e, e.DBB, before)
+		e.open(t, e.B)
+		waitLines(t, e.B, work, []string{"/GH " + gh, "/News " + lwn}, syncTimeout)
 
-	// The other way round, with a delete among the edits.
-	e.A.Close()
-	e.B.Remove(t, work+"/News "+lwn)
-	e.B.Add(t, work, "Go", "https://go.dev/")
-	eventually(t, syncTimeout, "B to publish its edits", func() bool {
-		return len(recorded(t, e, e.DBB)) == 4
+		// The other way round, with a delete among the edits.
+		e.A.Close()
+		e.B.Remove(t, work+"/News "+lwn)
+		e.B.Add(t, work, "Go", "https://go.dev/")
+		eventually(t, syncTimeout, "B to publish its edits", func() bool {
+			return len(recorded(t, e, e.DBB)) == 4
+		})
+		before = time.Now()
+		e.A = e.launch("a")
+		e.open(t, e.A)
+		settled(t, e, nil, "/GH "+gh, "/Go https://go.dev/", "/_deleted/", "/_deleted/News "+lwn)
+		caughtUp(t, e, e.DBA, before)
 	})
-	before = time.Now()
-	e.A = e.launch("a")
-	e.open(t, e.A)
-	settled(t, e, nil, "/GH "+gh, "/Go https://go.dev/", "/_deleted/", "/_deleted/News "+lwn)
-	caughtUp(t, e, e.DBA, before)
 }
 
 // caughtUp checks that the profile's host wrote its file within the target
