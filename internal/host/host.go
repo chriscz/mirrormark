@@ -49,9 +49,7 @@ type state struct {
 	next     time.Time // the earliest retry of a failed round
 	batch    int
 	files    map[string]stamp
-	problems []Problem      // what the current round warned about
-	logged   map[string]int // warnings logged since the last round, with repeats
-	quiet    map[string]int // warnings the last round logged, not to repeat
+	problems []Problem // what the current round warned about
 }
 
 // stamp is what the poll compares: a file rewritten within the clock's
@@ -108,11 +106,8 @@ func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
 			}
 		}
 	}()
-	s := &state{o: o, msgs: msgs, out: w, files: map[string]stamp{}, logged: map[string]int{}, quiet: map[string]int{}}
+	s := &state{o: o, msgs: msgs, out: w, files: map[string]stamp{}}
 	defer func() {
-		// Twice: the second reports the warnings still repeating.
-		s.flushWarnings()
-		s.flushWarnings()
 		if s.unlock != nil {
 			s.unlock()
 		}
@@ -149,7 +144,7 @@ func (s *state) send(m Msg) error {
 	m.V = Version
 	err := WriteMsg(s.out, m)
 	if err != nil {
-		s.logWarn("send failed", "type", m.Type, "err", err)
+		s.o.Log.Warn("send failed", "type", m.Type, "err", err)
 	}
 	return err
 }
@@ -164,31 +159,8 @@ func (s *state) fail(code, msg string) error {
 // warn logs a problem the host goes on after; the round's status message
 // carries it to the extension's popup.
 func (s *state) warn(code, msg string) {
-	s.logWarn(msg, "code", code)
+	s.o.Log.Warn(msg, "code", code)
 	s.problems = append(s.problems, Problem{Code: code, Message: msg})
-}
-
-// logWarn logs a warning unless the last round logged the same one. While a
-// problem lasts every round repeats its warnings; the log gets each once,
-// and how often it repeated when it stops.
-func (s *state) logWarn(msg string, args ...any) {
-	key := fmt.Sprint(append([]any{msg}, args...)...)
-	if n, ok := s.quiet[key]; ok {
-		s.logged[key] = n + 1
-		return
-	}
-	s.logged[key] = 0
-	s.o.Log.Warn(msg, args...)
-}
-
-// flushWarnings ends a round for logWarn.
-func (s *state) flushWarnings() {
-	for _, key := range slices.Sorted(maps.Keys(s.quiet)) {
-		if _, still := s.logged[key]; !still && s.quiet[key] > 0 {
-			s.o.Log.Info("warning stopped repeating", "warning", key, "repeats", s.quiet[key])
-		}
-	}
-	s.quiet, s.logged = s.logged, map[string]int{}
 }
 
 func (s *state) handle(m Msg) error {
@@ -205,7 +177,7 @@ func (s *state) handle(m Msg) error {
 		}
 		live, err := round.Build(m.Nodes)
 		if err != nil {
-			s.logWarn("bad tree", "err", err)
+			s.o.Log.Warn("bad tree", "err", err)
 			return nil
 		}
 		s.live, s.fresh = live, true
@@ -223,7 +195,7 @@ func (s *state) handle(m Msg) error {
 	case "applied":
 		s.o.Log.Info("late applied message ignored", "batch", m.Batch)
 	case "error":
-		s.logWarn("extension error", "code", m.Code, "message", m.Message)
+		s.o.Log.Warn("extension error", "code", m.Code, "message", m.Message)
 	}
 	return nil
 }
@@ -252,7 +224,7 @@ func (s *state) hello(m Msg) error {
 	// install and the tests watch this mtime to see that the profile connected.
 	now := time.Now()
 	if err := os.Chtimes(lock, now, now); err != nil {
-		s.logWarn("cannot touch lock file", "err", err)
+		s.o.Log.Warn("cannot touch lock file", "err", err)
 	}
 	s.self = m.DB
 	s.o.Log.Info("connected", "db", m.DB, "browser", m.Browser)
@@ -295,7 +267,6 @@ func (s *state) run() {
 		s.failures = 0
 	}
 	s.send(Msg{Type: "status", Problems: s.problems})
-	s.flushWarnings()
 }
 
 // round runs one sync round under the global lock. It returns an error if
@@ -334,7 +305,7 @@ func (s *state) round() error {
 			if d, err := db.LoadDB(s.o.Paths.ProfileFile(id)); err == nil {
 				others[id] = d
 			} else {
-				s.logWarn("cannot read member", "id", id, "err", err)
+				s.o.Log.Warn("cannot read member", "id", id, "err", err)
 			}
 		}
 	}
@@ -360,14 +331,14 @@ func (s *state) round() error {
 	}
 	next, changed, err := plan.Finish(created)
 	if err != nil {
-		s.logWarn("cannot finish round", "err", err)
+		s.o.Log.Warn("cannot finish round", "err", err)
 		return nil
 	}
 	if !changed {
 		return nil
 	}
 	if err := db.Backup(s.o.Paths, s.self, time.Now()); err != nil {
-		s.logWarn("backup failed", "err", err)
+		s.o.Log.Warn("backup failed", "err", err)
 	}
 	// The browser already has this round's changes. The next round finds
 	// them on both sides of the merge, so retrying it is safe.
@@ -410,7 +381,7 @@ func (s *state) apply(ops []merge.Op) (map[string]string, error) {
 			if !r.OK {
 				// The browser stops at the first failure and answers the
 				// rest "not run", so the first failure is the cause.
-				s.logWarn("op failed", "op", op.Op, "id", op.ID, "ref", op.Ref, "err", r.Error)
+				s.o.Log.Warn("op failed", "op", op.Op, "id", op.ID, "ref", op.Ref, "err", r.Error)
 				return nil, fmt.Errorf("the browser could not %s %s: %s", op.Op, describe(op), r.Error)
 			}
 			if op.Op == "create" {
@@ -474,7 +445,7 @@ func (s *state) await(batch int) ([]merge.OpResult, error) {
 					s.live = live
 				}
 			case "error":
-				s.logWarn("extension error", "code", m.Code, "message", m.Message)
+				s.o.Log.Warn("extension error", "code", m.Code, "message", m.Message)
 			}
 		case <-t.C:
 			return nil, fmt.Errorf("the browser did not apply changes within %v", s.o.Timeout)

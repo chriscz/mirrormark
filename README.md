@@ -162,8 +162,7 @@ which database the profile syncs as, why the host stopped if it did, and
 every problem the last round found, such as a skipped union. A problem
 stays in the popup until a round no longer finds it. Everything the host
 does, including skipped unions, conflicts and failed changes, goes to
-`~/.local/state/mirrormark/log`; a warning that repeats every round is
-logged once, then how often it repeated when it stops.
+`~/.local/state/mirrormark/log`, every time it happens.
 
 A change the browser refuses stops that profile from saving its round. The
 host retries at the next poll three times, then every 5 seconds three

@@ -396,7 +396,7 @@ func TestSilentBrowserWritesNothing(t *testing.T) {
 
 // An op that fails every time writes no file and shows in the popup. It is
 // retried at the poll, not as fast as the browser answers, and after three
-// failures in a row only every few seconds. The log gets its warnings once.
+// failures in a row only every few seconds. Each failure is logged.
 // A round that succeeds clears the popup and the back-off.
 func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	p := paths(t)
@@ -437,17 +437,14 @@ func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	if d.Unions["work"] != nil {
 		t.Fatalf("a wrote a record although an op failed: %+v", d.Unions["work"])
 	}
-	if n := strings.Count(log.String(), "msg=\"op failed\""); n != 1 {
-		t.Fatalf("op failed logged %d times:\n%s", n, log)
+	if n := strings.Count(log.String(), "msg=\"op failed\""); n != 3 {
+		t.Fatalf("op failed logged %d times, want once per try:\n%s", n, log)
 	}
 
 	// A changed file starts a round despite the back-off; this one succeeds.
 	failing.Store(false)
 	writeConfig(t, p, workUnion+"\n")
 	eventually(t, "a clean round", a.healthy)
-	if !strings.Contains(log.String(), "warning stopped repeating") {
-		t.Fatalf("the log does not say how often the warning repeated:\n%s", log)
-	}
 
 	// The back-off starts over: three quick tries again.
 	failing.Store(true)
