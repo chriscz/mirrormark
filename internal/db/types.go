@@ -28,6 +28,8 @@ type Member struct {
 	Children []*Node `yaml:"children,omitempty"`
 }
 
+// Profile identifies the browser profile a database file belongs to. ID
+// matches the file name; Label is what suffixes and "by" fields show.
 type Profile struct {
 	ID      string `yaml:"id"`
 	Label   string `yaml:"label"`

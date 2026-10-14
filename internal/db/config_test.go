@@ -55,3 +55,28 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 }
+
+func TestLoadConfigEmptyFileIsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, nil, 0o600)
+	c, err := LoadConfig(path)
+	if err != nil || c.Format != 1 || len(c.Unions) != 0 {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+}
+
+func TestConfigNestingRespectsEscapedSlash(t *testing.T) {
+	load := func(text string) error {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		os.WriteFile(path, []byte(text), 0o600)
+		_, err := LoadConfig(path)
+		return err
+	}
+	// "A/B" is one folder title, not folder B inside A.
+	if err := load("format: 1\nunions:\n  a:\n    chrome-a: toolbar/A\n  b:\n    chrome-a: 'toolbar/A\\/B'\n"); err != nil {
+		t.Fatalf("sibling folders rejected: %v", err)
+	}
+	if err := load("format: 1\nunions:\n  a:\n    chrome-a: 'toolbar/A\\/B'\n  b:\n    chrome-a: 'toolbar/A\\/B/C'\n"); err == nil {
+		t.Fatal("nested folders accepted")
+	}
+}

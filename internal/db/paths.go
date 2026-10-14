@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 )
 
-// Paths holds mirrormark's three directories.
+// Paths holds mirrormark's three directories. Its methods build the paths of
+// the files inside them; they do not touch the file system.
 type Paths struct {
 	Config string // config.yaml
 	Data   string // profiles/, backups/, lock, extension/
@@ -34,10 +35,23 @@ func DefaultPaths() (Paths, error) {
 	}, nil
 }
 
-func (p Paths) ConfigFile() string           { return filepath.Join(p.Config, "config.yaml") }
-func (p Paths) ProfilesDir() string          { return filepath.Join(p.Data, "profiles") }
+// ConfigFile is the user's config.yaml.
+func (p Paths) ConfigFile() string { return filepath.Join(p.Config, "config.yaml") }
+
+// ProfilesDir holds one database file and one lock file per profile.
+func (p Paths) ProfilesDir() string { return filepath.Join(p.Data, "profiles") }
+
+// ProfileFile is profile id's database file.
 func (p Paths) ProfileFile(id string) string { return filepath.Join(p.ProfilesDir(), id+".yaml") }
+
+// ProfileLock is profile id's lock file; its mtime is the last hello.
 func (p Paths) ProfileLock(id string) string { return filepath.Join(p.ProfilesDir(), id+".lock") }
-func (p Paths) GlobalLock() string           { return filepath.Join(p.Data, "lock") }
-func (p Paths) BackupDir(id string) string   { return filepath.Join(p.Data, "backups", id) }
-func (p Paths) LogFile() string              { return filepath.Join(p.State, "log") }
+
+// GlobalLock serialises rounds across all profiles.
+func (p Paths) GlobalLock() string { return filepath.Join(p.Data, "lock") }
+
+// BackupDir holds profile id's daily backups.
+func (p Paths) BackupDir(id string) string { return filepath.Join(p.Data, "backups", id) }
+
+// LogFile is the host's log.
+func (p Paths) LogFile() string { return filepath.Join(p.State, "log") }

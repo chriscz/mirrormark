@@ -44,3 +44,20 @@ func TestConnected(t *testing.T) {
 		t.Fatal("touched lock file not seen")
 	}
 }
+
+func TestConnectedFalseForOldMtime(t *testing.T) {
+	p := Paths{Data: t.TempDir()}
+	unlock, err := TryLock(p.ProfileLock("chrome-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	since := time.Now()
+	earlier := since.Add(-time.Hour)
+	if err := os.Chtimes(p.ProfileLock("chrome-a"), earlier, earlier); err != nil {
+		t.Fatal(err)
+	}
+	if Connected(p, "chrome-a", since) {
+		t.Fatal("stale lock file counted as connected")
+	}
+}

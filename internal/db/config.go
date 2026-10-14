@@ -40,11 +40,12 @@ func SplitPath(p string) ([]string, error) {
 	return segs, nil
 }
 
-// LoadConfig reads and validates config.yaml. A missing file is an empty
-// config, so a fresh install syncs nothing until the user adds a union.
+// LoadConfig reads and validates config.yaml. A missing or zero-byte file is
+// an empty config, so a fresh install syncs nothing until the user adds a
+// union.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) || err == nil && len(data) == 0 {
 		return &Config{Format: 1}, nil
 	}
 	if err != nil {
@@ -60,6 +61,9 @@ func LoadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
+// Validate rejects a format other than 1, an empty union name, an invalid
+// profile id, a folder path SplitPath rejects, and two folders of one
+// profile where one is inside or equal to the other.
 func (c *Config) Validate() error {
 	if c.Format != 1 {
 		return fmt.Errorf("unsupported format %d", c.Format)
