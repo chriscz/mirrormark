@@ -118,9 +118,16 @@ func TestConfigExampleIsAValidEmptyConfig(t *testing.T) {
 	}
 }
 
-// testHome gives the test its own home and mirrormark paths.
+// testHome gives the test its own home and mirrormark paths, and a
+// google-chrome first on PATH that fails, so no unit test starts the real
+// Chrome; fakeChromeOnPath goes before it.
 func testHome(t *testing.T) db.Paths {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, "bin")
+	os.Mkdir(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "google-chrome"), []byte("#!/bin/sh\necho 'unit tests must not start Chrome' >&2\nexit 1\n"), 0o755)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(v, "")
 	}

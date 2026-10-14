@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
+	"slices"
 	"testing"
 	"time"
 )
@@ -149,28 +149,56 @@ type evalResult struct {
 	} `json:"exceptionDetails"`
 }
 
-// prelude: paths are below the bookmarks bar, such as "Work/Dev/GitHub".
+// prelude: a path starts with a root as config.yaml names it ("toolbar"
+// or "other") and goes on through folders, such as "toolbar/Work/Dev". A
+// node is named the way Lines prints it, below its path: "toolbar/Work/Dev/"
+// is a folder, "toolbar/Work/GitHub https://github.com/" a bookmark: what
+// follows the last space is a URL if it holds "://". Each
+// step must match exactly one node, so two same-titled folders, or two
+// identical bookmarks, are an error rather than a guess.
 const prelude = `
 const mm = {
-  async folder(path) {
-    const [root] = await chrome.bookmarks.getTree();
-    let n = root.children.find((c) => c.folderType === "bookmarks-bar");
-    for (const seg of path.split("/").filter(Boolean)) {
-      n = (n.children ?? []).find((c) => !c.url && c.title === seg);
-      if (!n) return null;
+  roots: { toolbar: "bookmarks-bar", other: "other" },
+  one(parent, what, ok) {
+    const found = (parent.children ?? []).filter(ok);
+    if (found.length !== 1) {
+      const there = (parent.children ?? []).map((c) => c.title + (c.url ? " " + c.url : "/"));
+      throw new Error(found.length + " nodes match " + what + " among " + JSON.stringify(there));
+    }
+    return found[0];
+  },
+  async folder(path, create) {
+    const [root, ...segs] = path.split("/").filter(Boolean);
+    const [tree] = await chrome.bookmarks.getTree();
+    let n = mm.one(tree, root, (c) => c.folderType === mm.roots[root]);
+    for (const seg of segs) {
+      if (create && !(n.children ?? []).some((c) => !c.url && c.title === seg)) {
+        await chrome.bookmarks.create({ parentId: n.id, title: seg });
+        [n] = await chrome.bookmarks.getSubTree(n.id);
+      }
+      n = mm.one(n, path, (c) => !c.url && c.title === seg);
     }
     return n;
   },
-  async node(path) {
+  async node(ref) {
+    const sp = ref.lastIndexOf(" ");
+    const path = ref.slice(0, sp), url = ref.slice(sp + 1);
+    if (sp < 0 || !url.includes("://")) {
+      if (!ref.endsWith("/")) throw new Error(ref + " is neither a folder/ nor a bookmark URL");
+      return mm.folder(ref);
+    }
     const i = path.lastIndexOf("/");
-    const f = await mm.folder(path.slice(0, Math.max(i, 0)));
-    const n = f?.children?.find((c) => c.title === path.slice(i + 1));
-    if (!n) throw new Error("nothing at " + path);
-    return n;
+    const f = await mm.folder(path.slice(0, i));
+    return mm.one(f, ref, (c) => c.url === url && c.title === path.slice(i + 1));
   },
   async lines(path) {
-    const f = await mm.folder(path);
-    if (!f) return null;
+    let f;
+    try {
+      f = await mm.folder(path);
+    } catch (e) {
+      if (e.message.startsWith("0 nodes")) return null;
+      throw e;
+    }
     const out = [];
     const walk = (n, p) => {
       for (const c of n.children ?? []) {
@@ -180,7 +208,7 @@ const mm = {
       }
     };
     walk(f, "");
-    return out.sort();
+    return out;
   },
 };
 `
@@ -216,34 +244,53 @@ func q(s string) string {
 	return string(b)
 }
 
-// Lines lists folder (below the bar) as sorted "path url" lines; nil if
-// the folder does not exist.
-func (b *Browser) Lines(t *testing.T, folder string) []string {
-	return eval[[]string](t, b, "mm.lines("+q(folder)+")")
+// Lines lists the folder at path as "path url" lines for bookmarks and
+// "path/" for folders, relative to it and sorted; nil if the folder does
+// not exist. Sorted here, not in JavaScript, whose
+// sort orders UTF-16 units where Go orders bytes.
+func (b *Browser) Lines(t *testing.T, path string) []string {
+	t.Helper()
+	lines := eval[[]string](t, b, "mm.lines("+q(path)+")")
+	slices.Sort(lines)
+	return lines
 }
 
-func (b *Browser) Mkdir(t *testing.T, p string) {
-	eval[string](t, b, fmt.Sprintf("mm.folder(%s).then((f) => chrome.bookmarks.create({parentId: f.id, title: %s})).then(() => '')",
-		q(path.Dir("/"+p)), q(path.Base(p))))
+// Mkdir makes the folder at path and any missing parents.
+func (b *Browser) Mkdir(t *testing.T, path string) {
+	t.Helper()
+	eval[string](t, b, "mm.folder("+q(path)+", true).then(() => '')")
 }
 
-func (b *Browser) Add(t *testing.T, folder, title, url string) {
+// Add puts a bookmark at the end of the folder at path.
+func (b *Browser) Add(t *testing.T, path, title, url string) {
+	t.Helper()
 	eval[string](t, b, fmt.Sprintf("mm.folder(%s).then((f) => chrome.bookmarks.create({parentId: f.id, title: %s, url: %s})).then(() => '')",
-		q(folder), q(title), q(url)))
+		q(path), q(title), q(url)))
 }
 
-func (b *Browser) Rename(t *testing.T, p, title string) {
-	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => chrome.bookmarks.update(n.id, {title: %s})).then(() => '')", q(p), q(title)))
+func (b *Browser) Rename(t *testing.T, ref, title string) {
+	t.Helper()
+	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => chrome.bookmarks.update(n.id, {title: %s})).then(() => '')", q(ref), q(title)))
 }
 
-func (b *Browser) SetURL(t *testing.T, p, url string) {
-	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => chrome.bookmarks.update(n.id, {url: %s})).then(() => '')", q(p), q(url)))
+func (b *Browser) SetURL(t *testing.T, ref, url string) {
+	t.Helper()
+	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => chrome.bookmarks.update(n.id, {url: %s})).then(() => '')", q(ref), q(url)))
 }
 
-func (b *Browser) Move(t *testing.T, p, folder string) {
-	eval[string](t, b, fmt.Sprintf("Promise.all([mm.node(%s), mm.folder(%s)]).then(([n, f]) => chrome.bookmarks.move(n.id, {parentId: f.id})).then(() => '')", q(p), q(folder)))
+// Move moves the node ref names into the folder at path, to index, or to
+// the end if index is negative.
+func (b *Browser) Move(t *testing.T, ref, path string, index int) {
+	t.Helper()
+	dest := "{parentId: f.id}"
+	if index >= 0 {
+		dest = fmt.Sprintf("{parentId: f.id, index: %d}", index)
+	}
+	eval[string](t, b, fmt.Sprintf("Promise.all([mm.node(%s), mm.folder(%s)]).then(([n, f]) => chrome.bookmarks.move(n.id, %s)).then(() => '')", q(ref), q(path), dest))
 }
 
-func (b *Browser) Remove(t *testing.T, p string) {
-	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => n.url ? chrome.bookmarks.remove(n.id) : chrome.bookmarks.removeTree(n.id)).then(() => '')", q(p)))
+// Remove removes the node ref names, with everything inside it.
+func (b *Browser) Remove(t *testing.T, ref string) {
+	t.Helper()
+	eval[string](t, b, fmt.Sprintf("mm.node(%s).then((n) => n.url ? chrome.bookmarks.remove(n.id) : chrome.bookmarks.removeTree(n.id)).then(() => '')", q(ref)))
 }

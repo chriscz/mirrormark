@@ -83,15 +83,17 @@ func (e *Env) firstInstall(t *testing.T) {
 	t.Helper()
 	e.launch("a").Close()
 	e.launch("b").Close()
+	// Registered before install runs, so an install that fails part-way
+	// leaves nothing behind either, and run before t.TempDir's cleanup:
+	// later tests must not see this test's extension in the shared system
+	// directories.
+	t.Cleanup(func() { e.mm(t, "uninstall") })
 	out := e.mm(t, "install", "--user-data-dir", e.udd("a"))
 	m := extIDRe.FindStringSubmatch(out)
 	if m == nil || !strings.Contains(out, "Restart Chrome") {
 		t.Fatalf("first install did not ask for a restart:\n%s", out)
 	}
 	e.ExtID = m[1]
-	// Runs before t.TempDir's cleanup: later tests must not see this
-	// test's extension in the shared system directories.
-	t.Cleanup(func() { e.mm(t, "uninstall") })
 }
 
 func (e *Env) udd(name string) string      { return filepath.Join(e.Home, "chrome-"+name) }
@@ -137,7 +139,7 @@ func (e *Env) Union(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, 10*time.Second, "member folders", func() bool {
-		return e.A.Lines(t, "Work") != nil && e.B.Lines(t, "Work") != nil
+		return e.A.Lines(t, "toolbar/Work") != nil && e.B.Lines(t, "toolbar/Work") != nil
 	})
 }
 
@@ -152,18 +154,19 @@ func eventually(t *testing.T, within time.Duration, what string, ok func() bool)
 	}
 }
 
-// waitLines waits until folder in b holds want and returns how long it took.
-func waitLines(t *testing.T, b *Browser, folder string, want []string, within time.Duration) time.Duration {
+// waitLines waits until the folder at path in b holds want and returns how
+// long it took.
+func waitLines(t *testing.T, b *Browser, path string, want []string, within time.Duration) time.Duration {
 	t.Helper()
-	slices.Sort(want)
+	want = slices.Sorted(slices.Values(want))
 	start := time.Now()
 	var got []string
 	for time.Since(start) < within {
-		if got = b.Lines(t, folder); slices.Equal(got, want) {
+		if got = b.Lines(t, path); slices.Equal(got, want) {
 			return time.Since(start)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("%s/%s after %v:\n got %q\nwant %q", b.Name, folder, within, got, want)
+	t.Fatalf("%s: %s after %v:\n got %q\nwant %q", b.Name, path, within, got, want)
 	return 0
 }

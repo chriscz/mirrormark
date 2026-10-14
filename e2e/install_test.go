@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,14 +58,24 @@ func TestInstallAndBind(t *testing.T) {
 
 	// Installing again in a bound profile keeps its database, and the
 	// extension lets go of the old host and connects to a new one.
-	eval[bool](t, e.A, `chrome.storage.local.remove("status").then(() => true)`)
+	old := hostPIDs(t, e, e.DBA)
+	if len(old) != 1 {
+		t.Fatalf("want one host for a before binding again, got pids %v", old)
+	}
 	if out := e.mm(t, "install", "--user-data-dir", e.A.UDD); !strings.Contains(out, "bound: Default -> "+e.DBA) {
 		t.Fatalf("second install rebound to another database:\n%s", out)
 	}
-	roundDone(t, e.A, "a round after binding again")
+	// The host logs its hello only once it holds the database's lock, so a
+	// second hello means the old host let go of it.
+	eventually(t, 10*time.Second, "a new host for a", func() bool { return len(hostPIDs(t, e, e.DBA)) == 2 })
+	eventually(t, 10*time.Second, "the old host to exit", func() bool { return exited(old[0]) })
+	// With the old host gone, a status after an edit comes from the new one.
+	eval[bool](t, e.A, `chrome.storage.local.remove("status").then(() => true)`)
+	e.A.Add(t, "other", "Example", "https://example.com/")
+	roundDone(t, e.A, "a round in the new host")
 	log := hostLog(t, e)
-	if n := strings.Count(log, "msg=connected pid="); n != 3 {
-		t.Errorf("want 3 hellos in the host log (a, b, a again), got %d", n)
+	if n := strings.Count(log, "msg=connected pid="); n < 3 {
+		t.Errorf("want at least 3 hellos in the host log (a, b, a again), got %d", n)
 	}
 	if strings.Contains(log, "level=WARN") || strings.Contains(log, "level=ERROR") {
 		t.Errorf("the host warned while binding")
@@ -91,7 +102,9 @@ func TestBindStartsChrome(t *testing.T) {
 	t.Cleanup(func() { stopChrome(t, e.udd("a")) })
 	start := time.Now()
 	id := e.bind("a")
-	// Not asserted: whether the first tab loses the race is up to Chrome.
+	// Logged, not asserted: whether the first tab loses the race to the
+	// extension is up to Chrome, and no test can make it lose. The unit
+	// tests of Bind cover the retry itself.
 	t.Logf("bound in %v; retried: %v", time.Since(start).Round(time.Millisecond), time.Since(start) > chrome.BindWait)
 	stopChrome(t, e.udd("a"))
 
@@ -129,9 +142,7 @@ func (e *Env) noSandbox(t *testing.T) {
 // stopChrome quits a Chrome the test did not start, as a user's quit
 // would: SIGTERM makes Chrome save its files and exit. Its SingletonLock
 // names its pid. Chrome leaves the lock behind on SIGTERM, and the next
-// start takes it over, so stopChrome waits for the process instead. The
-// process is not this test's child; until something reaps it, it lingers
-// as a zombie, which has exited all the same.
+// start takes it over, so stopChrome waits for the process instead.
 func stopChrome(t *testing.T, udd string) {
 	t.Helper()
 	lock := filepath.Join(udd, "SingletonLock")
@@ -143,21 +154,41 @@ func stopChrome(t *testing.T, udd string) {
 	if err != nil {
 		t.Fatalf("%s: %v", lock, err)
 	}
-	exited := func() bool {
-		if syscall.Kill(pid, 0) != nil {
-			return true
-		}
-		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		// The state follows the parenthesised command name.
-		return err != nil || strings.HasPrefix(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " Z")
-	}
-	if exited() {
+	if exited(pid) {
 		return
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		t.Fatalf("stop Chrome %d: %v", pid, err)
 	}
-	eventually(t, 20*time.Second, "Chrome to exit", exited)
+	eventually(t, 20*time.Second, "Chrome to exit", func() bool { return exited(pid) })
+}
+
+// exited reports whether process pid has exited. One that is not this
+// test's child lingers as a zombie until something reaps it, which has
+// exited all the same.
+func exited(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return true
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	// The state follows the parenthesised command name.
+	return err != nil || strings.HasPrefix(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " Z")
+}
+
+var connectedRe = regexp.MustCompile(`msg=connected pid=(\d+) db=(\S+)`)
+
+// hostPIDs lists the pids of the hosts that said hello for database id, in
+// the order of the log.
+func hostPIDs(t *testing.T, e *Env, id string) []int {
+	t.Helper()
+	var pids []int
+	for _, m := range connectedRe.FindAllStringSubmatch(hostLog(t, e), -1) {
+		if m[2] == id {
+			pid, _ := strconv.Atoi(m[1])
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func hostLog(t *testing.T, e *Env) string {
