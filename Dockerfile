@@ -2,8 +2,11 @@
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
 ENV DEBIAN_FRONTEND=noninteractive
+# gcc and libc6-dev only for go test -race, which needs cgo; the binary
+# itself builds with CGO_ENABLED=0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git make \
+      gcc=4:13.2.0-7ubuntu1 libc6-dev=2.39-0ubuntu8.9 \
  && rm -rf /var/lib/apt/lists/*
 
 ARG GO_VERSION=1.27.2

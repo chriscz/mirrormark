@@ -24,6 +24,12 @@ check-tests:
 	$(GO) test -count=1 ./...
 .PHONY: check-tests
 
+# Not part of check: the race detector makes the fuzz tests about four times
+# slower. Run it before sending a change that touches goroutines.
+check-race:
+	CGO_ENABLED=1 $(GO) test -race -count=1 ./...
+.PHONY: check-race
+
 clean:
 	rm -rf build
 .PHONY: clean

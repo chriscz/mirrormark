@@ -71,8 +71,9 @@ the error each time until it goes through.
 Everything builds and tests in a Docker image; nothing is installed on your
 machine except Docker.
 
-    bin/dev run make          # format check, vet, unit tests, build
-    bin/dev shell             # a shell in the dev container
+    bin/dev run make             # format check, vet, unit tests, build
+    bin/dev run make check-race  # the unit tests under the race detector
+    bin/dev shell                # a shell in the dev container
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
 run more with, for example,
