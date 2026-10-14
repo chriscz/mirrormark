@@ -94,10 +94,12 @@ extension, even if the extension's files changed (see
 
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
 needed), the CRX and the unpacked extension. It leaves the host manifest
-alone if another install (a different key) has since replaced it. Chrome
-removes the extension from every profile when it next starts. Your
-bookmarks stay in Chrome, and your config, databases, backups, key and log
-stay where they are; it says so. `mirrormark uninstall --purge` also
+alone if another install (a different key) has since replaced it. While
+Brave still uses them, the shared files and the key stay (see [Install
+(Brave on Linux)](#install-brave-on-linux)). Chrome removes the extension
+from every profile when it next starts. Your bookmarks stay in Chrome, and
+your config, databases, backups, key and log stay where they are; it says
+so. `mirrormark uninstall --purge` also
 deletes Chrome's databases, their backups and the key. It deletes the
 config and log too, unless another browser's database is left: its
 profiles still sync through them, and its `uninstall` needs those

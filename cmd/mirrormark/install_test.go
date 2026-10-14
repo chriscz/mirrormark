@@ -1134,7 +1134,7 @@ func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
 			if code := run([]string{"uninstall", "--browser", c.stays.Config}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx)
+			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"))
 		})
 	}
 }
@@ -1185,4 +1185,72 @@ func TestBravePurgeKeepsTheKeyWhileChromesDatabasesAreLeft(t *testing.T) {
 		}
 	}
 	mustExist(t, "brave purge", filepath.Join(p.Data, "extension.pem"), p.ProfileFile("chrome-personal"))
+}
+
+// A data directory left behind (say by removing Brave's package) is not an
+// installed Brave: install writes nothing into a browser it cannot start.
+func TestInstallRefusesABrowserThatIsNotInstalled(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := fakeSystem(t)
+	udd := chromeData(t)
+	t.Setenv("PATH", t.TempDir()) // no brave-browser, not even testHome's guard
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "Brave is not installed (no brave-browser on PATH)") || len(*calls) != 0 {
+		t.Fatalf("stderr %q, sudo calls %q", errb.String(), *calls)
+	}
+	mustBeGone(t, "brave not installed", filepath.Join(root, "opt", "brave.com"), filepath.Join(root, chrome.HostManifestPath()), p.Data)
+}
+
+// When uninstall cannot tell whether another browser's external file is
+// there, it keeps the files that browser may still need.
+func TestUninstallKeepsTheSharedFilesWhenItCannotTell(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	installChromium(t, "chrome", "brave")
+	id := installedID(t, p)
+	must(t, os.Chmod(filepath.Dir(filepath.Join(root, chrome.Chrome.ExternalFile(id))), 0))
+	var out, errb bytes.Buffer
+	if code := run([]string{"uninstall", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustBeGone(t, "uninstall", filepath.Join(root, chrome.Brave.ExternalFile(id)))
+	mustExist(t, "uninstall", filepath.Join(root, chrome.HostManifestPath()), filepath.Join(p.Data, "mirrormark.crx"),
+		filepath.Join(p.Data, "extension"), filepath.Join(root, chrome.Chrome.ExternalFile(id)))
+	if !strings.Contains(errb.String(), "cannot tell whether Chrome still uses mirrormark") {
+		t.Fatalf("stderr:\n%s", errb.String())
+	}
+}
+
+// Uninstalling a browser mirrormark was never installed in says so, and
+// leaves the other browser's install alone.
+func TestUninstallFromABrowserNeverInstalledSaysSo(t *testing.T) {
+	skipIfRoot(t)
+	for _, chromeInstalled := range []bool{false, true} {
+		t.Run(fmt.Sprint("chrome installed ", chromeInstalled), func(t *testing.T) {
+			p := testHome(t)
+			root, _ := fakeSystem(t)
+			fakeChromeOnPath(t, p)
+			if chromeInstalled {
+				installChromium(t, "chrome")
+			}
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			if strings.Contains(out.String(), "Brave removes mirrormark") || !strings.Contains(out.String(), "mirrormark is not installed in Brave") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+			if chromeInstalled {
+				id := installedID(t, p)
+				mustExist(t, "uninstall", filepath.Join(root, chrome.Chrome.ExternalFile(id)), filepath.Join(root, chrome.HostManifestPath()),
+					filepath.Join(p.Data, "mirrormark.crx"), filepath.Join(p.Data, "extension"))
+			}
+		})
+	}
 }

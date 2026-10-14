@@ -102,6 +102,12 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	// A data directory can outlive the browser's package; writing the
+	// system files for a browser that is gone would create its directories.
+	bin, err := exec.LookPath(cb.Bin)
+	if err != nil {
+		return fail(fmt.Errorf("%s is not installed (no %s on PATH)", cb.Name, cb.Bin))
+	}
 	profiles, err := cb.Profiles(*udd)
 	if err != nil {
 		return fail(err)
@@ -151,10 +157,6 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if !ready {
 		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
 		return 0
-	}
-	bin, err := exec.LookPath(cb.Bin)
-	if err != nil {
-		return fail(err)
 	}
 	fmt.Fprintln(stdout, "Opening a tab in each profile to bind it.")
 	code := 0
@@ -490,7 +492,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave or firefox, not %q\n", *browser)
 		return 2
 	}
-	if refuseRoot("uninstall", "; it uses sudo only to remove two files", stderr) {
+	if refuseRoot("uninstall", "; it uses sudo only to remove the files it put in root's directories", stderr) {
 		return 1
 	}
 	fail := func(err error) int {
@@ -512,11 +514,15 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	key, err := chrome.LoadKey(keyFile)
 	host := filepath.Join(sysroot, chrome.HostManifestPath())
 	var users []string // other Chromium browsers that still have the extension
+	installed := hasDatabase(p, cb.Config)
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-		users = chromiumUsers(cb, id)
+		users = chromiumUsers(cb, id, stderr)
 		paths := []string{filepath.Join(sysroot, cb.ExternalFile(id))}
+		if _, err := os.Stat(paths[0]); !errors.Is(err, fs.ErrNotExist) {
+			installed = true
+		}
 		// The host manifest serves every Chromium browser, so it goes with
 		// the last one's external file. Its name is fixed; one that names
 		// another extension belongs to another install.
@@ -540,7 +546,11 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
+	if installed {
+		fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
+	} else {
+		fmt.Fprintf(stdout, "mirrormark is not installed in %s: no %s file and no %s database.\n", cb.Name, cb.Name, cb.Name)
+	}
 	if len(users) > 0 {
 		fmt.Fprintf(stdout, "Kept the CRX and the host manifest, which %s still uses.\n", strings.Join(users, " and "))
 	}
@@ -549,13 +559,12 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 
 // finishUninstall deals with mirrormark's own files once browser's install
 // is undone. Without purge it says where they are. With purge it deletes
-// browser's databases, with their backups and lock files, and the key if
-// browser is Chromium-based and no other Chromium browser still needs it.
-// keyInUse says another Chromium browser still has the extension
-// installed; the key that fixes its id stays then. The config, the log and the rest of the data
-// directory are shared: they go only with the last database, since another
-// browser's profiles still sync through them, and that browser's uninstall
-// needs its databases to find its profiles.
+// browser's databases, with their backups and lock files, and a Chromium
+// browser's key unless keyInUse (another Chromium browser still has the
+// extension) or another Chromium browser's database is left. The config,
+// the log and the rest of the data directory go only with the last
+// database: another browser's profiles still sync through them, and its
+// uninstall needs its databases to find its profiles.
 func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
@@ -688,18 +697,39 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 
 // chromiumUsers names the Chromium browsers other than b whose external
 // extension file for id is in place: they still use the CRX and the host
-// manifest b shares with them.
-func chromiumUsers(b chrome.Browser, id string) []string {
+// manifest b shares with them. A browser whose file it cannot check counts
+// as one, so a shared file goes only when it is known to be unused.
+func chromiumUsers(b chrome.Browser, id string, stderr io.Writer) []string {
 	var out []string
 	for _, o := range chrome.Browsers {
 		if o.Config == b.Config {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(sysroot, o.ExternalFile(id))); err == nil {
-			out = append(out, o.Name)
+		_, err := os.Stat(filepath.Join(sysroot, o.ExternalFile(id)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
+		if err != nil {
+			fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether %s still uses mirrormark, so keeping the files it shares: %v\n", o.Name, err)
+		}
+		out = append(out, o.Name)
 	}
 	return out
+}
+
+// hasDatabase reports whether a database names a profile of browser. A
+// database it cannot read might, so it counts.
+func hasDatabase(p db.Paths, browser string) bool {
+	dbs, errs := db.LoadAll(p)
+	if len(errs) > 0 {
+		return true
+	}
+	for _, d := range dbs {
+		if d.Profile.Browser == browser {
+			return true
+		}
+	}
+	return false
 }
 
 // removeSystemFiles removes the browsers' root-owned files, with `sudo rm` if
