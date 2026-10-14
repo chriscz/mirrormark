@@ -43,6 +43,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -159,8 +160,10 @@ func Round(in Input) (Result, error) {
 	if in.HasBase && len(m.base) > 5 && 2*m.deletions > len(m.base) {
 		return Result{}, ErrWrongTree
 	}
-	m.resurrect()
-	m.breakCycles()
+	// Undoing a move can put a node back under a parent the merge dropped,
+	// so parents are kept again until neither step changes anything.
+	for m.resurrect(); m.breakCycles(); m.resurrect() {
+	}
 	kids := map[string][]string{}
 	for _, k := range slices.Sorted(maps.Keys(m.out)) {
 		p := m.out[k].parent
@@ -168,7 +171,20 @@ func Round(in Input) (Result, error) {
 	}
 	m.dedupe(kids)
 	tree := m.build("", kids)
+	if n := count(tree); n != len(m.out) {
+		// A node that hangs from nothing would not be in the tree, so its
+		// browser node would be removed. Refuse rather than lose it.
+		return Result{}, fmt.Errorf("merge: %d nodes do not reach the member folder", len(m.out)-n)
+	}
 	return Result{Tree: tree, Ops: m.ops(tree), Conflicts: m.conflicts}, nil
+}
+
+func count(ns []*db.Node) int {
+	n := len(ns)
+	for _, c := range ns {
+		n += count(c.Children)
+	}
+	return n
 }
 
 func clone(ns []*db.Node) []*db.Node {
@@ -452,8 +468,11 @@ func (m *merger) resurrect() {
 }
 
 // breakCycles undoes, in each cycle, a move that came from theirs. A cycle
-// needs one move from each side (A moves X into Y, B moves Y into X).
-func (m *merger) breakCycles() {
+// needs one move from each side (A moves X into Y, B moves Y into X). It
+// reports whether it changed anything; an undone move can need a parent
+// that resurrect has to bring back.
+func (m *merger) breakCycles() bool {
+	changed := false
 	for found := true; found; {
 		found = false
 		for _, k := range slices.Sorted(maps.Keys(m.out)) {
@@ -461,12 +480,17 @@ func (m *merger) breakCycles() {
 			p := k
 			for p != "" && !seen[p] {
 				seen[p] = true
-				p = m.out[p].parent
+				n, ok := m.out[p]
+				if !ok { // a missing parent, left for resurrect
+					p = ""
+					break
+				}
+				p = n.parent
 			}
 			if p == "" {
 				continue
 			}
-			found = true
+			found, changed = true, true
 			c := p
 			for !m.out[c].theirsMoved {
 				c = m.out[c].parent
@@ -481,6 +505,7 @@ func (m *merger) breakCycles() {
 			break
 		}
 	}
+	return changed
 }
 
 // dedupe links each node this round would create to an identical unlinked

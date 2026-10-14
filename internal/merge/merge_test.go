@@ -472,3 +472,23 @@ func TestOurPurgeKeepsAFolderTheyAddedTo(t *testing.T) {
 	}))
 	f.want("/_deleted/", "/_deleted/Dev/", "/_deleted/Dev/Rust https://rust-lang.org/")
 }
+
+// Undoing their move of Y can put Y back under A, which their purge dropped:
+// A must come back too, or X and Y hang from nothing.
+func TestCycleUndoKeepsAParentTheyPurged(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
+		a := b.Add(b.Add(root, "_deleted", ""), "A", "")
+		b.Add(b.Add(a, "Y", ""), "y1", "https://y1/")
+		b.Add(b.Add(root, "X", ""), "x1", "https://x1/")
+	})
+	y := f.b.Find(f.b.Find(f.b.Find(f.root, "_deleted"), "A"), "Y")
+	f.b.Move(f.b.Find(f.root, "X"), y)                // ours: X into Y
+	f.round(f.theirs(func(ns []*db.Node) []*db.Node { // theirs: Y into X, then purge A
+		d, x := ns[0], ns[1]
+		x.Children = append(x.Children, d.Children[0].Children[0])
+		d.Children = nil
+		return ns
+	}))
+	f.want("/_deleted/", "/_deleted/A/", "/_deleted/A/Y/", "/_deleted/A/Y/y1 https://y1/",
+		"/_deleted/A/Y/X/", "/_deleted/A/Y/X/x1 https://x1/")
+}
