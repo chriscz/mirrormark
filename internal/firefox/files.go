@@ -3,6 +3,7 @@ package firefox
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,8 +156,13 @@ var ErrNeverRun = errors.New("it has never run")
 
 // Check returns the binary of the browser that last ran the profile, from
 // its compatibility.ini, or why b cannot install into the profile: it was
-// last run by another browser, or nothing tells which.
+// last run by another browser, or nothing tells which. b's Channel and
+// AppName, whichever are set, must both match; with neither set, nothing
+// would tell b's profiles from another browser's, so it refuses them all.
 func (b Browser) Check(profileDir string) (bin string, err error) {
+	if b.Channel == "" && b.AppName == "" {
+		return "", fmt.Errorf("nothing tells %s's profiles from other browsers'", cmp.Or(b.Name, "this browser"))
+	}
 	data, err := os.ReadFile(filepath.Join(profileDir, "compatibility.ini"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("%w; start %s in it once and close it", ErrNeverRun, b.Name)
@@ -176,17 +182,41 @@ func (b Browser) Check(profileDir string) (bin string, err error) {
 	if b.Channel != "" {
 		prefs, err := os.ReadFile(filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
 		if err != nil {
-			return "", fmt.Errorf("cannot read the update channel of the Firefox in %s: %w", dir, err)
+			return "", fmt.Errorf("cannot read the update channel of the browser in %s: %w", dir, err)
 		}
 		m := channelRe.FindSubmatch(prefs)
 		if m == nil {
 			return "", fmt.Errorf("no update channel in %s", filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
 		}
 		if string(m[1]) != b.Channel {
-			return "", fmt.Errorf("its Firefox is on the %s channel, which installs only add-ons Mozilla signed; mirrormark works only in Firefox Developer Edition for now", m[1])
+			return "", fmt.Errorf("it was last run by a browser on the %s channel from %s, not %s; Firefox on that channel installs only add-ons Mozilla signed. mirrormark works in %s", m[1], dir, b.Name, supported())
+		}
+	}
+	if b.AppName != "" {
+		ini, err := os.ReadFile(filepath.Join(dir, "application.ini"))
+		if err != nil {
+			return "", fmt.Errorf("cannot tell which browser is in %s: %w", dir, err)
+		}
+		var name string
+		for _, s := range iniSections(string(ini)) {
+			if s["[]"] == "App" {
+				name = s["Name"]
+			}
+		}
+		if name != b.AppName {
+			return "", fmt.Errorf("it was last run by %s from %s, not %s. mirrormark works in %s", cmp.Or(name, "a browser that does not name itself"), dir, b.AppName, supported())
 		}
 	}
 	return filepath.Join(dir, b.Bin), nil
+}
+
+// supported says which browsers install takes, and with which --browser.
+func supported() string {
+	var s []string
+	for _, b := range Browsers {
+		s = append(s, b.Name+" with --browser "+b.Config)
+	}
+	return strings.Join(s, ", and in ")
 }
 
 var uuidsRe = regexp.MustCompile(`user_pref\("extensions\.webextensions\.uuids",\s*("(?:[^"\\]|\\.)*")\);`)

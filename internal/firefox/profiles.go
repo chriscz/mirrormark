@@ -1,11 +1,12 @@
-// Package firefox installs mirrormark into Firefox-family browsers on
-// Linux, Firefox Developer Edition first, one profile at a time and without root: it lists the profiles,
-// writes the XPI and three user.js prefs into each, writes the per-user
-// native host manifest, and binds each profile by opening bind.html in it.
+// Package firefox installs mirrormark into Gecko browsers on Linux,
+// Firefox Developer Edition and LibreWolf, one profile at a time and
+// without root: it lists the profiles, writes the XPI and three user.js
+// prefs into each, writes the per-user native host manifest they share,
+// and binds each profile by opening bind.html in it.
 //
-// Release Firefox installs only add-ons Mozilla signed, so only Developer
-// Edition, which honours xpinstall.signatures.required, is supported. That
-// pref lets the profile take any unsigned add-on; uninstall restores it.
+// Release Firefox installs only add-ons Mozilla signed, so only browsers
+// that honour xpinstall.signatures.required are supported. That pref lets
+// the profile take any unsigned add-on; uninstall restores it.
 //
 // Firefox picks the extension's moz-extension:// UUID per profile and keeps
 // it in prefs.js. Setting it there would replace every add-on's UUID and
@@ -44,8 +45,14 @@ type Browser struct {
 var Firefox = Browser{Config: "firefox", Name: "Firefox Developer Edition", XDGRoot: "mozilla/firefox",
 	HomeRoot: ".mozilla/firefox", Bin: "firefox", Channel: "aurora"}
 
+// LibreWolf is built without MOZ_REQUIRE_SIGNING, so it honours
+// xpinstall.signatures.required like Developer Edition. Its channel says
+// release, so its application.ini tells it from release Firefox.
+var LibreWolf = Browser{Config: "librewolf", Name: "LibreWolf", XDGRoot: "librewolf/librewolf",
+	HomeRoot: ".librewolf", Bin: "librewolf", AppName: "LibreWolf"}
+
 // Browsers are the Gecko browsers install knows.
-var Browsers = []Browser{Firefox}
+var Browsers = []Browser{Firefox, LibreWolf}
 
 // Lookup returns the browser whose Config is config.
 func Lookup(config string) (Browser, bool) {

@@ -4,8 +4,8 @@ mirrormark keeps chosen bookmark folders the same across browser profiles on
 one computer. It is a browser extension plus one Go program, and it stores
 everything in YAML files you can read. No server, no account, no network.
 
-Status: early. It works with Google Chrome, Brave and Firefox Developer
-Edition on Linux.
+Status: early. It works with Google Chrome, Brave, Firefox Developer
+Edition and LibreWolf on Linux.
 
 ## Install (Google Chrome on Linux)
 
@@ -203,6 +203,32 @@ and your config, databases, backups and log stay where they are.
 the config and log too unless a Chrome profile's database is left.
 Installing again turns the two lines back, without adding new ones.
 
+## Install (LibreWolf on Linux)
+
+LibreWolf installs as Firefox Developer Edition does (see [Install (Firefox
+Developer Edition on Linux)](#install-firefox-developer-edition-on-linux)),
+with `--browser librewolf`, and the same three prefs in each profile's
+`user.js`; read "Before you start" there first.
+
+1. Run `mirrormark install --browser librewolf`. It takes the profiles in
+   `$XDG_CONFIG_HOME/librewolf/librewolf` (`~/.config/librewolf/librewolf`)
+   when that holds a `profiles.ini`, else in `~/.librewolf`. LibreWolf makes
+   a second profile, `default`, that it never uses; `install` skips it.
+2. Restart LibreWolf in those profiles if it is running, then run
+   `mirrormark install --browser librewolf` again to bind them. Profile ids
+   start with `librewolf-`, labels with `librewolf/`.
+
+The host manifest goes in `~/.mozilla/native-messaging-hosts/`, which
+LibreWolf reads after `~/.librewolf/native-messaging-hosts/`; a mirrormark
+manifest of your own there takes precedence. `mirrormark uninstall --browser
+librewolf` works as for Firefox, and keeps the host manifest while a
+Developer Edition profile still has mirrormark, and the other way round.
+
+Only LibreWolf's official Linux tarball has been tried. LibreWolf from its
+Debian/Ubuntu repository, Flatpak, AppImage or the AUR is untested. If you
+set LibreWolf to clear more than its defaults when it closes, the profile may
+lose its binding at each restart; the popup then says it is not bound.
+
 ## Files
 
 | File | What it is |
@@ -212,9 +238,9 @@ Installing again turns the two lines back, without adding new ones.
 | `~/.local/share/mirrormark/backups/<id>/` | One copy of each database a day, the newest 30. For reading only. |
 | `~/.local/share/mirrormark/extension.pem` | The key that fixes the extension id (mode 0600). |
 | `~/.local/share/mirrormark/mirrormark.crx`, `extension/` | The packed and unpacked extension, written by `install`. |
-| `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Firefox profile, written by `install --browser firefox`. |
-| `<profile>/user.js` | The three prefs `install --browser firefox` sets in each Firefox profile (see [Before you start](#install-firefox-developer-edition-on-linux)); `uninstall --browser firefox` sets two of them back. |
-| `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the Firefox add-on start the `mirrormark` binary. |
+| `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Developer Edition or LibreWolf profile, written by `install --browser firefox` or `librewolf`. |
+| `<profile>/user.js` | The three prefs `install --browser firefox` or `librewolf` sets in each profile (see [Before you start](#install-firefox-developer-edition-on-linux)); `uninstall` sets two of them back. |
+| `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the add-on in Developer Edition and LibreWolf start the `mirrormark` binary. |
 | `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.

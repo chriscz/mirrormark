@@ -64,8 +64,8 @@ unions: {}
 func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("install", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	browser := fl.String("browser", "chrome", "chrome, brave or firefox")
-	udd := fl.String("user-data-dir", "", "the browser's data directory (default ~/.config/google-chrome for Chrome, ~/.config/BraveSoftware/Brave-Browser for Brave), or Firefox's profiles directory")
+	browser := fl.String("browser", "chrome", "chrome, brave, firefox or librewolf")
+	udd := fl.String("user-data-dir", "", "the browser's data directory (default ~/.config/google-chrome for Chrome, ~/.config/BraveSoftware/Brave-Browser for Brave), or the profiles directory of Firefox Developer Edition or LibreWolf")
 	var picks multiFlag
 	fl.Var(&picks, "profile", `profile to bind, by directory such as "Profile 1" or by name; repeatable (default: every profile)`)
 	if fl.Parse(args) != nil {
@@ -91,7 +91,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	cb, ok := chrome.Lookup(*browser)
 	if !ok {
-		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave or firefox, not %q\n", *browser)
+		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave, firefox or librewolf, not %q\n", *browser)
 		return 2
 	}
 	if *udd == "" {
@@ -482,14 +482,14 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	purge := fl.Bool("purge", false, "also delete this browser's databases and backups (and the key with the last Chromium browser's), and the config and log with the last browser's")
-	browser := fl.String("browser", "chrome", "chrome, brave or firefox")
+	browser := fl.String("browser", "chrome", "chrome, brave, firefox or librewolf")
 	if fl.Parse(args) != nil {
 		return 2
 	}
 	_, isChromium := chrome.Lookup(*browser)
 	fb, isGecko := firefox.Lookup(*browser)
 	if !isChromium && !isGecko {
-		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave or firefox, not %q\n", *browser)
+		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave, firefox or librewolf, not %q\n", *browser)
 		return 2
 	}
 	if refuseRoot("uninstall", "; it uses sudo only to remove the files it put in root's directories", stderr) {
@@ -504,7 +504,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	if isGecko {
-		if err := uninstallFirefox(p, fb, stdout); err != nil {
+		if err := uninstallFirefox(p, fb, stdout, stderr); err != nil {
 			return fail(err)
 		}
 		return finishUninstall(p, fb.Config, fb.Name, *purge, false, stdout, stderr)
@@ -641,18 +641,34 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 
 // uninstallFirefox removes the add-on from every profile a database file
 // names as b's, puts back the two prefs that weakened its add-on
-// checks, and removes the host manifest if it is this one's. It writes
-// user.js first, so if that fails the add-on is still there and running
-// uninstall again finishes the job.
-func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
+// checks, and removes the host manifest if it is this one's and no other
+// Gecko browser's profile still holds the add-on. It writes user.js first,
+// so if that fails the add-on is still there and running uninstall again
+// finishes the job.
+func uninstallFirefox(p db.Paths, b firefox.Browser, stdout, stderr io.Writer) error {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
 		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a %s profile", err, b.Name)
 	}
 	var files []chrome.File
-	var gone []string // XPIs, and the host manifest if it is this one's
+	var gone []string  // XPIs, and the host manifest if it is this one's
+	var users []string // other Gecko browsers whose profiles still hold the add-on
 	for _, d := range dbs {
 		if d.Profile.Browser != b.Config {
+			o, ok := firefox.Lookup(d.Profile.Browser)
+			if !ok || slices.Contains(users, o.Name) {
+				continue
+			}
+			// A profile whose add-on it cannot check counts as holding
+			// it, so the host manifest goes only when it is known unused.
+			_, err := os.Stat(firefox.XPIPath(d.Profile.Path))
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether %s still uses mirrormark, so keeping the host manifest it shares: %v\n", o.Name, err)
+			}
+			users = append(users, o.Name)
 			continue
 		}
 		gone = append(gone, firefox.XPIPath(d.Profile.Path))
@@ -676,9 +692,13 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 		}
 	}
 	found := len(gone) > 0
-	if host, err := firefox.HostManifestPath(); err != nil {
+	// Every Gecko browser reads the one host manifest; it goes with the
+	// last whose profiles still hold the add-on.
+	host, err := firefox.HostManifestPath()
+	if err != nil {
 		return err
-	} else if data, err := os.ReadFile(host); err == nil && bytes.Contains(data, []byte(`"`+extension.GeckoID+`"`)) {
+	}
+	if data, err := os.ReadFile(host); err == nil && len(users) == 0 && bytes.Contains(data, []byte(`"`+extension.GeckoID+`"`)) {
 		gone = append(gone, host)
 	}
 	if err := chrome.WriteFiles(files); err != nil {
@@ -689,9 +709,12 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 	}
 	if !found {
 		fmt.Fprintf(stdout, "No %s profile was found in mirrormark's databases in %s, so no user.js was changed. If a profile still has mirrormark, check its user.js for xpinstall.signatures.required and extensions.autoDisableScopes, and set them back to true and 15.\n", b.Name, p.ProfilesDir())
-		return nil
+	} else {
+		fmt.Fprintf(stdout, "%s removes mirrormark from each profile when it next starts, and checks add-on signatures there again. Your bookmarks stay in %s.\n", b.Name, b.Name)
 	}
-	fmt.Fprintf(stdout, "%s removes mirrormark from each profile when it next starts, and checks add-on signatures there again. Your bookmarks stay in %s.\n", b.Name, b.Name)
+	if len(users) > 0 {
+		fmt.Fprintf(stdout, "Kept the host manifest %s, which %s's profiles still use.\n", host, strings.Join(users, "'s and "))
+	}
 	return nil
 }
 

@@ -536,17 +536,18 @@ func TestEnsureDBNamesFirefoxProfiles(t *testing.T) {
 	}
 }
 
-// firefoxData makes a profiles root with two Developer Edition profiles,
-// alpha and beta, whose Firefox is a fake that logs its calls and, given a
-// bind URL, touches the lock file of the database it names. channel is that
-// Firefox's update channel.
-func firefoxData(t *testing.T, p db.Paths, channel string) (root, calls string) {
-	root = filepath.Join(os.Getenv("HOME"), ".config", "mozilla", "firefox")
+// geckoData makes a profiles root with two profiles, alpha and beta, last
+// run by a fake browser in a directory of its own: its binary is called
+// bin, its application.ini names app and its channel-prefs.js says
+// channel. The fake logs its calls to calls and, given a bind URL, touches
+// the lock file of the database it names.
+func geckoData(t *testing.T, p db.Paths, root, bin, app, channel string) (calls string) {
 	ff := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(ff, "defaults", "pref"), 0o755))
 	must(t, os.WriteFile(filepath.Join(ff, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "`+channel+`");`), 0o644))
+	must(t, os.WriteFile(filepath.Join(ff, "application.ini"), []byte("[App]\nName="+app+"\n"), 0o644))
 	calls = filepath.Join(ff, "calls")
-	must(t, os.WriteFile(filepath.Join(ff, "firefox"), []byte("#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> "+calls+"\n"+
+	must(t, os.WriteFile(filepath.Join(ff, bin), []byte("#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> "+calls+"\n"+
 		"case \"$url\" in *bind.html*) touch -d \"@$(date +%s.%N)\" \""+p.ProfilesDir()+"/${url##*#}.lock\";; esac\n"), 0o755))
 	ini := "[General]\nVersion=2\n"
 	for i, n := range []string{"alpha", "beta"} {
@@ -560,7 +561,20 @@ func firefoxData(t *testing.T, p db.Paths, channel string) (root, calls string) 
 	old := chrome.BindWait
 	chrome.BindWait = 500 * time.Millisecond
 	t.Cleanup(func() { chrome.BindWait = old })
-	return root, calls
+	return calls
+}
+
+// firefoxData makes Developer Edition's (or, with another channel, another
+// Firefox's) profiles root with alpha and beta.
+func firefoxData(t *testing.T, p db.Paths, channel string) (root, calls string) {
+	root = filepath.Join(os.Getenv("HOME"), ".config", "mozilla", "firefox")
+	return root, geckoData(t, p, root, "firefox", "Firefox", channel)
+}
+
+// librewolfData makes LibreWolf's profiles root with alpha and beta.
+func librewolfData(t *testing.T, p db.Paths) (root, calls string) {
+	root = filepath.Join(os.Getenv("HOME"), ".config", "librewolf", "librewolf")
+	return root, geckoData(t, p, root, "librewolf", "LibreWolf", "release")
 }
 
 func TestInstallIntoFirefoxThenBind(t *testing.T) {
@@ -645,7 +659,7 @@ func TestInstallWithOneReleaseProfileWritesNothing(t *testing.T) {
 	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(errb.String(), "beta: its Firefox is on the release channel") || strings.Contains(errb.String(), "alpha") {
+	if !strings.Contains(errb.String(), "beta: it was last run by a browser on the release channel") || strings.Contains(errb.String(), "alpha") {
 		t.Fatalf("stderr %q", errb.String())
 	}
 	for _, n := range []string{"alpha", "beta"} {
@@ -1252,5 +1266,140 @@ func TestUninstallFromABrowserNeverInstalledSaysSo(t *testing.T) {
 					filepath.Join(p.Data, "mirrormark.crx"), filepath.Join(p.Data, "extension"))
 			}
 		})
+	}
+}
+
+func TestInstallIntoLibreWolfThenBind(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := librewolfData(t, p)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "librewolf"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "Restart LibreWolf") || !strings.Contains(out.String(), "unsigned") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	for _, n := range []string{"alpha", "beta"} {
+		dir := filepath.Join(root, "x"+n+"."+n)
+		mustExist(t, "install", firefox.XPIPath(dir))
+		if user, _ := os.ReadFile(filepath.Join(dir, "user.js")); string(user) != strings.Join(firefox.Prefs, "\n")+"\n" {
+			t.Fatalf("user.js %q", user)
+		}
+		d, err := db.LoadDB(p.ProfileFile("librewolf-" + n))
+		if err != nil || d.Profile.Path != dir || d.Profile.Browser != "librewolf" || d.Profile.Label != "librewolf/"+n {
+			t.Fatalf("%s: %+v %v", n, d, err)
+		}
+	}
+	host, _ := firefox.HostManifestPath()
+	mustExist(t, "install", host)
+
+	for _, n := range []string{"alpha", "beta"} {
+		must(t, os.WriteFile(filepath.Join(root, "x"+n+"."+n, "prefs.js"), []byte(`user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4`+n[:1]+`\"}");`+"\n"), 0o600))
+	}
+	out.Reset()
+	if code := run([]string{"install", "--browser", "librewolf", "--profile", "beta"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "bound: beta -> librewolf-beta\n") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#librewolf-beta")) {
+		t.Fatalf("calls:\n%s", c)
+	}
+}
+
+// Each Gecko browser takes only its own profiles, and writes nothing when
+// it refuses.
+func TestEachGeckoBrowserTakesOnlyItsOwnProfiles(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	lwRoot, _ := librewolfData(t, p)
+	ffRoot, _ := firefoxData(t, p, "aurora")
+	for _, c := range []struct{ browser, root, want string }{
+		{"librewolf", ffRoot, "not LibreWolf"},
+		{"firefox", lwRoot, "--browser librewolf"},
+	} {
+		var out, errb bytes.Buffer
+		if code := run([]string{"install", "--browser", c.browser, "--user-data-dir", c.root}, strings.NewReader(""), &out, &errb); code != 1 {
+			t.Fatalf("%s: exit %d: %s%s", c.browser, code, out.String(), errb.String())
+		}
+		if !strings.Contains(errb.String(), c.want) {
+			t.Fatalf("%s: stderr %q", c.browser, errb.String())
+		}
+	}
+	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
+		t.Fatalf("made databases %v", dbs)
+	}
+	host, _ := firefox.HostManifestPath()
+	mustBeGone(t, "refused install", host, filepath.Join(ffRoot, "xalpha.alpha", "user.js"), filepath.Join(lwRoot, "xalpha.alpha", "user.js"))
+}
+
+// installGecko installs mirrormark into Developer Edition's and LibreWolf's
+// profiles.
+func installGecko(t *testing.T) (p db.Paths, ffRoot, lwRoot string) {
+	skipIfRoot(t)
+	p = testHome(t)
+	lwRoot, _ = librewolfData(t, p)
+	ffRoot, _ = firefoxData(t, p, "aurora")
+	var out, errb bytes.Buffer
+	for _, b := range []string{"firefox", "librewolf"} {
+		if code := run([]string{"install", "--browser", b}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("install %s: exit %d: %s%s", b, code, out.String(), errb.String())
+		}
+	}
+	return p, ffRoot, lwRoot
+}
+
+// Developer Edition and LibreWolf read one host manifest: it goes with the
+// last browser whose profiles still hold the add-on.
+func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
+	for _, c := range []struct{ first, firstName, last string }{
+		{"librewolf", "Firefox Developer Edition", "firefox"},
+		{"firefox", "LibreWolf", "librewolf"},
+	} {
+		t.Run(c.first+" first", func(t *testing.T) {
+			_, ffRoot, lwRoot := installGecko(t)
+			roots := map[string]string{"firefox": ffRoot, "librewolf": lwRoot}
+			host, _ := firefox.HostManifestPath()
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", c.first}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, c.first+" uninstall", firefox.XPIPath(filepath.Join(roots[c.first], "xalpha.alpha")))
+			mustExist(t, c.first+" uninstall", host, firefox.XPIPath(filepath.Join(roots[c.last], "xalpha.alpha")))
+			if user, _ := os.ReadFile(filepath.Join(roots[c.last], "xalpha.alpha", "user.js")); !bytes.Contains(user, []byte(firefox.Prefs[0])) {
+				t.Fatalf("%s's user.js was reset: %q", c.last, user)
+			}
+			if !strings.Contains(out.String(), c.firstName+"'s profiles still use") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+			out.Reset()
+			if code := run([]string{"uninstall", "--browser", c.last}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, c.last+" uninstall", host)
+			if strings.Contains(out.String(), "still use") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// When uninstall cannot tell whether another Gecko browser's profile still
+// holds the add-on, it keeps the host manifest and says why.
+func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
+	_, ffRoot, _ := installGecko(t)
+	ext := filepath.Join(ffRoot, "xalpha.alpha", "extensions")
+	must(t, os.RemoveAll(ext))
+	must(t, os.WriteFile(ext, nil, 0o600)) // the XPI's path now cannot be checked
+	var out, errb bytes.Buffer
+	if code := run([]string{"uninstall", "--browser", "librewolf"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	host, _ := firefox.HostManifestPath()
+	mustExist(t, "uninstall", host)
+	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "Firefox Developer Edition") {
+		t.Fatalf("stderr %q", errb.String())
 	}
 }
