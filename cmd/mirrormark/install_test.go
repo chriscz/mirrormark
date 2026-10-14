@@ -48,12 +48,12 @@ func TestChoose(t *testing.T) {
 
 func TestEnsureDBMakesUniqueIDs(t *testing.T) {
 	p := db.Paths{Data: t.TempDir()}
-	a, err := ensureDB(p, "/u/a", chrome.Profile{Dir: "Default", Name: "Person 1"})
+	a, err := ensureDB(p, "chrome", "/u/a/Default", chrome.Profile{Dir: "Default", Name: "Person 1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := ensureDB(p, "/u/b", chrome.Profile{Dir: "Default", Name: "Person 1"})
-	again, _ := ensureDB(p, "/u/a", chrome.Profile{Dir: "Default", Name: "Person 1"})
+	b, _ := ensureDB(p, "chrome", "/u/b/Default", chrome.Profile{Dir: "Default", Name: "Person 1"})
+	again, _ := ensureDB(p, "chrome", "/u/a/Default", chrome.Profile{Dir: "Default", Name: "Person 1"})
 	if a != "chrome-person-1" || b != "chrome-person-1-2" || again != a {
 		t.Fatalf("ids %s %s %s", a, b, again)
 	}
@@ -65,7 +65,7 @@ func TestEnsureDBMakesUniqueIDs(t *testing.T) {
 		t.Fatalf("files %v", dbs)
 	}
 	// A name with no letters or digits falls back to the directory.
-	if c, _ := ensureDB(p, "/u/a", chrome.Profile{Dir: "Profile 3", Name: "☺"}); c != "chrome-profile-3" {
+	if c, _ := ensureDB(p, "chrome", "/u/a/Profile 3", chrome.Profile{Dir: "Profile 3", Name: "☺"}); c != "chrome-profile-3" {
 		t.Fatalf("id %s", c)
 	}
 }
@@ -76,7 +76,7 @@ func TestEnsureDBStopsAtAnUnreadableDatabase(t *testing.T) {
 	p := db.Paths{Data: t.TempDir()}
 	os.MkdirAll(p.ProfilesDir(), 0o700)
 	os.WriteFile(p.ProfileFile("chrome-x"), []byte("not: [yaml"), 0o600)
-	if _, err := ensureDB(p, "/u/a", chrome.Profile{Dir: "Default", Name: "X"}); err == nil {
+	if _, err := ensureDB(p, "chrome", "/u/a/Default", chrome.Profile{Dir: "Default", Name: "X"}); err == nil {
 		t.Fatal("no error")
 	}
 	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
@@ -96,7 +96,7 @@ func TestEnsureDBStopsWhenItCannotCheckAnID(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(p.ProfilesDir(), 0o700) })
 	done := make(chan error, 1)
 	go func() {
-		_, err := ensureDB(p, "/u/a", chrome.Profile{Dir: "Default", Name: "X"})
+		_, err := ensureDB(p, "chrome", "/u/a/Default", chrome.Profile{Dir: "Default", Name: "X"})
 		done <- err
 	}()
 	select {
@@ -516,5 +516,14 @@ func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	}
 	if len(*sudoCalls) != 1 {
 		t.Fatalf("sudo for nothing: %v", *sudoCalls)
+	}
+}
+
+func TestEnsureDBNamesFirefoxProfiles(t *testing.T) {
+	p := db.Paths{Data: t.TempDir()}
+	id, err := ensureDB(p, "firefox", "/h/.config/mozilla/firefox/x.dev-edition-default", chrome.Profile{Dir: "x.dev-edition-default", Name: "dev-edition-default"})
+	d, _ := db.LoadDB(p.ProfileFile(id))
+	if err != nil || id != "firefox-dev-edition-default" || d.Profile.Label != "firefox/dev-edition-default" || d.Profile.Browser != "firefox" {
+		t.Fatalf("%s %+v %v", id, d, err)
 	}
 }

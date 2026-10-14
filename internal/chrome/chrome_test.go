@@ -280,6 +280,21 @@ func shortBindWait(t *testing.T) {
 	t.Cleanup(func() { BindWait = old })
 }
 
+func TestRetryStopsWhenBound(t *testing.T) {
+	shortBindWait(t)
+	fake, log := fakeChrome(t)
+	ok, err := Retry(fake, []string{"x", "y"}, func(time.Time) bool {
+		data, _ := os.ReadFile(log)
+		return bytes.Count(data, []byte("\n")) >= 2
+	})
+	if err != nil || !ok {
+		t.Fatalf("ok %v, err %v", ok, err)
+	}
+	if data, _ := os.ReadFile(log); string(data) != "x y\nx y\n" {
+		t.Fatalf("calls:\n%s", data)
+	}
+}
+
 func TestBindRetriesUntilConfirmed(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)

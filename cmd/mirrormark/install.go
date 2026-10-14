@@ -104,10 +104,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	fmt.Fprintf(stdout, "Extension ID: %s\n", ext.ID)
-	self, err := os.Executable()
-	if err == nil {
-		self, err = filepath.EvalSymlinks(self)
-	}
+	self, err := selfPath()
 	if err != nil {
 		return fail(err)
 	}
@@ -131,16 +128,14 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	ids := map[string]string{}
 	for _, c := range chosen {
-		id, err := ensureDB(p, *udd, c)
+		id, err := ensureDB(p, "chrome", filepath.Join(*udd, c.Dir), c)
 		if err != nil {
 			return fail(err)
 		}
 		ids[c.Dir] = id
 	}
-	if _, err := os.Stat(p.ConfigFile()); errors.Is(err, fs.ErrNotExist) {
-		if err := db.WriteAtomic(p.ConfigFile(), []byte(configExample), 0o600); err != nil {
-			return fail(err)
-		}
+	if err := ensureConfig(p); err != nil {
+		return fail(err)
 	}
 	if !ready {
 		fmt.Fprintln(stdout, "Restart Chrome (close every window), then run mirrormark install again to bind the profiles.")
@@ -166,6 +161,23 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from Chrome first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
 	}
 	return code
+}
+
+// selfPath returns the path of this executable with symlinks resolved.
+func selfPath() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(self)
+}
+
+// ensureConfig writes the example config unless one exists.
+func ensureConfig(p db.Paths) error {
+	if _, err := os.Stat(p.ConfigFile()); errors.Is(err, fs.ErrNotExist) {
+		return db.WriteAtomic(p.ConfigFile(), []byte(configExample), 0o600)
+	}
+	return nil
 }
 
 // namesExtension reports whether a host manifest lets extension id start
@@ -233,10 +245,10 @@ func choose(all []chrome.Profile, picks []string) ([]chrome.Profile, error) {
 				}
 			}
 			if len(named) > 1 {
-				return nil, fmt.Errorf("more than one Chrome profile is named %q; name its directory instead: %s", want, listProfiles(all))
+				return nil, fmt.Errorf("more than one profile is named %q; name its directory instead: %s", want, listProfiles(all))
 			}
 			if len(named) == 0 {
-				return nil, fmt.Errorf("no Chrome profile %q; the profiles are %s", want, listProfiles(all))
+				return nil, fmt.Errorf("no profile %q; the profiles are %s", want, listProfiles(all))
 			}
 			i = named[0]
 		}
@@ -255,12 +267,11 @@ func listProfiles(all []chrome.Profile) string {
 	return strings.Join(s, ", ")
 }
 
-// ensureDB returns the database id of a profile, creating its file first
+// ensureDB returns the database id of the browser profile at path, creating its file first
 // if none points at the profile yet. It stops if any database file cannot
 // be read: that file may be this profile's, and a second one would make
 // the profile a new member without the user knowing.
-func ensureDB(p db.Paths, udd string, c chrome.Profile) (string, error) {
-	path := filepath.Join(udd, c.Dir)
+func ensureDB(p db.Paths, browser, path string, c chrome.Profile) (string, error) {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
 		return "", fmt.Errorf("%w; fix the file or move it out of %s, then run install again", err, p.ProfilesDir())
@@ -274,7 +285,7 @@ func ensureDB(p db.Paths, udd string, c chrome.Profile) (string, error) {
 	if base == "" {
 		base = slug(c.Dir)
 	}
-	id, label := "chrome-"+base, "chrome/"+base
+	id, label := browser+"-"+base, browser+"/"+base
 	for n := 2; ; n++ {
 		_, err := os.Stat(p.ProfileFile(id))
 		if errors.Is(err, fs.ErrNotExist) {
@@ -283,9 +294,9 @@ func ensureDB(p db.Paths, udd string, c chrome.Profile) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		id, label = fmt.Sprintf("chrome-%s-%d", base, n), fmt.Sprintf("chrome/%s-%d", base, n)
+		id, label = fmt.Sprintf("%s-%s-%d", browser, base, n), fmt.Sprintf("%s/%s-%d", browser, base, n)
 	}
-	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: label, Browser: "chrome", Path: path}}
+	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: label, Browser: browser, Path: path}}
 	return id, db.SaveDB(p.ProfileFile(id), d)
 }
 
