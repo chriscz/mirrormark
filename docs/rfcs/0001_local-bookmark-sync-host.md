@@ -75,6 +75,9 @@ If another member's file is missing or unreadable, the round skips every union t
 // extension → host, first message; "db" is set by `mirrormark install` (Section 5)
 {"v": 1, "type": "hello", "db": "chrome-personal", "browser": "chrome/141.0"}
 
+// extension → host, at the first bookmark event of a burst; the host starts no round until the next tree
+{"v": 1, "type": "changed"}
+
 // extension → host, after hello, after a burst of bookmark events (0.5 s quiet), after each batch
 {"v": 1, "type": "tree", "nodes": [
   {"id": "1", "parent": null, "root": "toolbar"},
@@ -97,6 +100,7 @@ If another member's file is missing or unreadable, the round skips every union t
 ```
 
 - **Whole trees.** The extension always sends its whole tree, and the host compares it with the database file, so a missed event is fixed by the next tree.
+- **No rounds on an old tree.** While the extension waits for quiet, the host's copy of the tree lacks the user's latest edits, and a round that a file change starts then could create again what the user just made, such as the member folder. So the extension sends `changed` at once, and the host's poll waits for the tree that follows.
 - **No blind writes.** `update`, `move` and `remove` carry what the host expects to find. The extension reads the node first and fails the op as `stale` if it differs, so an edit the user makes during a batch survives and the next round sees it as a change. Ops run one at a time, as MDN advises when order matters [R5], and the extension stops at the first op that fails and answers the rest `not run`: each op assumes the ones before it landed. A `remove` takes one bookmark or one empty folder (`bookmarks.remove`, never `removeTree`), and the host removes a folder's contents before the folder, so a folder that still holds something fails to go instead of taking it along.
 - **Problems.** The popup shows the last `status` message's problems, so a skipped union or an invalid config stays visible until a round no longer finds it. The host's `error` codes are `unsupported-version`, `bad-db`, `db-missing`, `db-locked` and `db-lock-error` (the lock file cannot be locked at all); the `status` codes are `config-invalid`, `db-missing`, `union-skipped`, `db-mismatch`, `apply-failed`, `db-write-failed` and `db-lock-error`.
 - **Versions.** A message with a different `v` gets `error` `unsupported-version`, and the popup says to restart Chrome. This only happens between upgrading the binary and Chrome loading the new extension.
