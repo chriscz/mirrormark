@@ -186,11 +186,14 @@ func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 // fakeChromeOnPath puts a google-chrome on PATH that does what the
 // extension's hello does: touch the lock file of the database the bind URL
 // names, unless $FAKE_NO_HELLO names that database. It logs each call.
+// It sets the time from the clock rather than letting touch take the
+// kernel's file time, which lags the clock by up to a tick and so can fall
+// before the moment Bind started waiting.
 func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls")
 	script := "#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> " + log + "\n" +
-		"[ \"${url##*#}\" = \"$FAKE_NO_HELLO\" ] || touch \"" + p.ProfilesDir() + "/${url##*#}.lock\"\n"
+		"[ \"${url##*#}\" = \"$FAKE_NO_HELLO\" ] || touch -d \"@$(date +%s.%N)\" \"" + p.ProfilesDir() + "/${url##*#}.lock\"\n"
 	os.WriteFile(filepath.Join(dir, "google-chrome"), []byte(script), 0o755)
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	old := chrome.BindWait
