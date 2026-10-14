@@ -5,14 +5,18 @@
 const HOST = "com.github.chriscz.mirrormark";
 const V = 1;
 const QUIET_MS = 500; // send a tree after this long without bookmark events
-const MIN_BACKOFF = 5000;
+const REBIND_MS = 1000; // time for the old host to let go of the database
+// Reconnects wait for an alarm, which Chrome fires no sooner than 30 s.
+const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
+const RECONNECT = "reconnect"; // the alarm's name
 const ROOTS = { "bookmarks-bar": "toolbar", other: "other", mobile: "mobile" };
 
 let port = null;
 let connecting = null;
 let quiet = null;
-let retry = null;
+let rebinding = null; // the timer that connects after a new binding
+let binding = 0; // counts new bindings, so a connect can tell it is stale
 let backoff = MIN_BACKOFF;
 let queue = Promise.resolve();
 const refs = new Map(); // create ref -> new bookmark id, for later ops' parents
@@ -22,6 +26,13 @@ const refs = new Map(); // create ref -> new bookmark id, for later ops' parents
 // start when a profile opens. An open native port keeps the worker alive.
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
+// The worker stops about 30 s after its port closes, and its timers with
+// it, so a reconnect waits for an alarm, which starts the worker again.
+chrome.alarms.onAlarm.addListener(async (a) => {
+  if (a.name !== RECONNECT) return;
+  await chrome.alarms.clear(RECONNECT);
+  connect();
+});
 for (const e of [
   chrome.bookmarks.onCreated,
   chrome.bookmarks.onRemoved,
@@ -34,17 +45,26 @@ for (const e of [
 }
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !(changes.db || changes.boundAt)) return;
-  // A new binding: reconnect so the host sees a fresh hello.
+  // A new binding: reconnect so the host sees a fresh hello. The old host
+  // holds the database's lock until it sees the port close; connecting at
+  // once would meet db-locked and the long back-off, so wait a moment.
+  binding++;
   if (port) port.disconnect();
   port = null;
   backoff = MIN_BACKOFF;
-  connect();
+  clearTimeout(rebinding);
+  rebinding = setTimeout(async () => {
+    await chrome.alarms.clear(RECONNECT);
+    await connecting; // a connect begun before the binding gives up
+    rebinding = null;
+    connect();
+  }, REBIND_MS);
 });
 connect();
 
 function changed() {
   if (!port) {
-    connect();
+    connect(); // which waits out a pending reconnect
     return;
   }
   clearTimeout(quiet);
@@ -63,17 +83,27 @@ function connect() {
 }
 
 async function open() {
-  if (port) return;
+  if (port || rebinding) return;
+  // After a failed connection the alarm sets the pace, not bookmark events
+  // or a restarted worker.
+  if (await chrome.alarms.get(RECONNECT)) return;
+  const bound = binding;
   const { db } = await chrome.storage.local.get("db");
   if (!db) return; // not bound: stay dormant
-  clearTimeout(retry);
+  if (bound !== binding || port || rebinding) return; // rebound meanwhile
   refs.clear();
   const p = chrome.runtime.connectNative(HOST);
   const opened = Date.now();
   let hostError = false;
   port = p;
   p.onMessage.addListener((m) => {
-    if (m.type === "error") hostError = true;
+    if (m.type === "error") {
+      // The host stops after an error; don't restart it every 30 s. Set
+      // here, not in the queue, so the disconnect that follows already
+      // waits the longer time.
+      hostError = true;
+      backoff = MAX_BACKOFF;
+    }
     queue = queue
       .then(() => onMessage(p, m))
       .catch((e) => console.warn("mirrormark: handling", m.type, "failed:", e));
@@ -85,7 +115,7 @@ async function open() {
     // The host's own error says more than "Native host has exited".
     if (err && !hostError) setStatus({ error: err });
     if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
-    retry = setTimeout(connect, backoff);
+    chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
   });
   const version = navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] ?? "";
@@ -126,6 +156,12 @@ async function sendTree() {
 }
 
 async function onMessage(p, m) {
+  if (m.type === "error") {
+    // Why the host stopped; shown even if the port has closed since.
+    await setStatus({ error: `${m.code}: ${m.message}`, problems: [] });
+    return;
+  }
+  if (p !== port) return; // from a connection since closed
   if (m.type === "apply") {
     // One at a time, in order: each op assumes the ones before it landed.
     // After the first failure the rest are not run.
@@ -146,10 +182,6 @@ async function onMessage(p, m) {
     // The end of a round: the host runs, and these are all that is wrong.
     backoff = MIN_BACKOFF;
     await setStatus({ error: null, problems: m.problems ?? [] });
-  } else if (m.type === "error") {
-    // The host exits after some errors; don't restart it every few seconds.
-    backoff = MAX_BACKOFF;
-    await setStatus({ error: `${m.code}: ${m.message}` });
   }
 }
 
@@ -203,8 +235,9 @@ async function applyOp(op) {
       case "remove": {
         const [n] = await chrome.bookmarks.get(op.id);
         if (!matches(n, op.expect)) return { ok: false, error: "stale" };
-        // Never removeTree: a folder that is not empty still holds something
-        // the host means to keep, and Chrome then refuses the remove.
+        // Never remove a whole subtree: a folder that is not empty still
+        // holds something the host means to keep, and Chrome then refuses
+        // the remove.
         await chrome.bookmarks.remove(op.id);
         return { ok: true };
       }

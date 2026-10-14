@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Keeps bookmark folders the same across browser profiles through YAML files on this computer.",
   "minimum_chrome_version": "134",
-  "permissions": ["bookmarks", "nativeMessaging", "storage"],
+  "permissions": ["alarms", "bookmarks", "nativeMessaging", "storage"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "mirrormark", "default_popup": "popup.html" }
 }

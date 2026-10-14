@@ -41,7 +41,7 @@ func TestUnpackWritesFilesAndKey(t *testing.T) {
 	if m.Key != base64.StdEncoding.EncodeToString(pub) {
 		t.Fatalf("key %q", m.Key)
 	}
-	if strings.Join(m.Permissions, ",") != "bookmarks,nativeMessaging,storage" {
+	if strings.Join(m.Permissions, ",") != "alarms,bookmarks,nativeMessaging,storage" {
 		t.Fatalf("permissions %v", m.Permissions)
 	}
 	if m.HostPermissions != nil || m.WebAccessibleResources != nil {
@@ -67,11 +67,13 @@ func TestBackgroundSpeaksHostVersion(t *testing.T) {
 }
 
 // A non-empty folder must survive a remove: Chrome refuses bookmarks.remove
-// on one, while removeTree would take what the host means to keep.
+// on one, while removeTree would take what the host means to keep. Any
+// mention of it fails, so neither bookmarks["removeTree"] nor an alias
+// slips past.
 func TestBackgroundNeverRemovesTrees(t *testing.T) {
 	js, _ := Files.ReadFile("background.js")
-	if strings.Contains(string(js), "removeTree(") {
-		t.Fatal("background.js calls removeTree")
+	if strings.Contains(strings.ToLower(string(js)), "removetree") {
+		t.Fatal("background.js mentions removeTree")
 	}
 }
 
