@@ -31,12 +31,13 @@ check-race:
 	CGO_ENABLED=1 $(GO) test -race -count=1 ./...
 .PHONY: check-race
 
-# Not part of check: needs Chrome and Xvfb from the dev image and takes
-# minutes. Each test starts two Chrome instances, and the tests share
-# Chrome's system directories, so none may call t.Parallel.
+# Not part of check: needs Chrome, Firefox Developer Edition, Xvfb and
+# D-Bus from the dev image and takes minutes. Each test starts two browser
+# instances, and the tests share Chrome's system directories, so none may
+# call t.Parallel.
 check-e2e: build
-	MIRRORMARK_BIN=$(abspath $(BIN)) xvfb-run -a -s "-screen 0 1280x800x24" \
-		$(GO) test -tags e2e -count=1 -timeout 30m -v ./e2e/ $(if $(RUN),-run '$(RUN)')
+	MIRRORMARK_BIN=$(abspath $(BIN)) dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" \
+		$(GO) test -tags e2e -count=1 -timeout 60m -v ./e2e/ $(if $(RUN),-run '$(RUN)')
 .PHONY: check-e2e
 
 clean:

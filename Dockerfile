@@ -27,6 +27,23 @@ RUN curl -fsSLo /tmp/chrome.deb "https://dl.google.com/linux/chrome/deb/pool/mai
  && apt-get install -y --no-install-recommends /tmp/chrome.deb xvfb xauth \
  && rm -rf /var/lib/apt/lists/* /tmp/chrome.deb
 
+# Firefox Developer Edition for the Firefox end-to-end tests: release
+# Firefox refuses unsigned add-ons. D-Bus carries a second firefox
+# invocation's URL to the running one, which binding a running profile
+# needs. Mozilla keeps old releases on its CDN; bump version and checksum
+# together.
+ARG FIREFOX_DEV_VERSION=159.0b2
+ARG FIREFOX_DEV_SHA256=710dfa80e9edcad6c31f5aa0b3dffb4164b14a60be09316621de3894d8944b40
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends xz-utils unzip libgtk-3-0t64 libasound2t64 \
+      libx11-xcb1 libdbus-glib-1-2 libxtst6 libpci3 dbus dbus-x11 \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSLo /tmp/ff.tar.xz "https://download-installer.cdn.mozilla.net/pub/devedition/releases/${FIREFOX_DEV_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_DEV_VERSION}.tar.xz" \
+ && echo "${FIREFOX_DEV_SHA256}  /tmp/ff.tar.xz" | sha256sum -c - \
+ && mkdir -p /opt/firefox-devedition \
+ && tar -C /opt/firefox-devedition --strip-components=1 -xJf /tmp/ff.tar.xz \
+ && rm /tmp/ff.tar.xz
+
 # `mirrormark install` writes into these root-owned directories. The tests
 # run as your UID without sudo, so in this image only, anyone may write
 # them; the sticky bit stops users removing each other's files.

@@ -313,7 +313,7 @@ machine except Docker.
 
     bin/dev run make             # format check, vet, unit tests, build
     bin/dev run make check-race  # the unit tests under the race detector
-    bin/dev run make check-e2e   # end-to-end tests in real Chrome
+    bin/dev run make check-e2e   # end-to-end tests in real browsers
     bin/dev run make check-e2e RUN=TestInstallAndBind  # one of them
     bin/dev shell                # a shell in the dev container
 
@@ -326,7 +326,8 @@ instances and check that each kind of edit, a delete, restore and purge, a
 conflict, the first sync of two filled folders and a closed browser's catch-up
 reach both, with no warning in the host's log. Each edit must reach the
 other running Chrome within 3 seconds; the tests log how long each took.
-Run `bin/dev image build` first after the `Dockerfile` changes.
+The tests also start Firefox Developer Edition, with D-Bus, from the same
+image. Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
 run more with, for example,
