@@ -80,6 +80,11 @@ run more with, for example,
 
 The binary lands in `build/mirrormark`.
 
+The Chrome extension in `extension/` is plain JavaScript with no build step;
+the binary embeds it. Its version is written only in
+`extension/manifest.json`. Raise it in every release that changes the
+extension: Chrome installs a new copy only when the version changes.
+
 ## Licence
 
 MPL-2.0. See `LICENSE`.

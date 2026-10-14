@@ -1,0 +1,72 @@
+// Package extension holds the Chrome extension's files, embedded in the
+// binary so one file installs everything. The extension is plain JavaScript
+// with no build step: these files are what Chrome loads.
+//
+// The extension stays dormant until bind.html#<database id> stores the
+// profile's binding in chrome.storage.local. It then connects to the native
+// host, says hello, and sends the whole bookmark tree after hello, after each
+// batch it applies, and after 0.5 s without bookmark events. It runs each
+// apply batch's ops in order, stops at the first failure and answers the
+// rest "not run". The popup shows the binding and the last error.
+//
+// manifest.json holds the version; Version reads it from there.
+package extension
+
+import (
+	"embed"
+	"encoding/base64"
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+// HostName is the native messaging host name; background.js uses the same.
+const HostName = "com.github.chriscz.mirrormark"
+
+//go:embed manifest.json background.js bind.html bind.js popup.html popup.js
+var Files embed.FS
+
+// Unpack writes the extension to dir and adds the public key to the
+// manifest as "key", so Chrome derives the install's extension id from it.
+func Unpack(dir string, publicKeyDER []byte) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return fs.WalkDir(Files, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := Files.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		if name == "manifest.json" {
+			var m map[string]json.RawMessage
+			if err := json.Unmarshal(data, &m); err != nil {
+				return err
+			}
+			if m["key"], err = json.Marshal(base64.StdEncoding.EncodeToString(publicKeyDER)); err != nil {
+				return err
+			}
+			if data, err = json.MarshalIndent(m, "", "  "); err != nil {
+				return err
+			}
+		}
+		return os.WriteFile(filepath.Join(dir, name), data, 0o644)
+	})
+}
+
+// Version is the extension's version from manifest.json, the one place it
+// is written. Chrome installs a new CRX only when this changes.
+func Version() (string, error) {
+	data, err := Files.ReadFile("manifest.json")
+	if err != nil {
+		return "", err
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	err = json.Unmarshal(data, &m)
+	return m.Version, err
+}
