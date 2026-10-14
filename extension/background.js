@@ -263,15 +263,16 @@ async function applyOp(op) {
       case "remove": {
         const [n] = await chrome.bookmarks.get(op.id);
         if (!matches(n, op.expect)) return { ok: false, error: "stale" };
-        // Never remove a whole subtree: a folder that is not empty still
-        // holds something the host means to keep, and Chrome then refuses
-        // the remove.
-        // The host removes a folder only after everything it knows inside,
-        // but it cannot see separators, and neither browser removes a
-        // folder that is not empty.
+        // Never remove a whole subtree. The host removes a folder only
+        // after everything it knows inside, so a folder that still holds
+        // anything else holds something it means to keep, and neither
+        // browser removes a folder that is not empty. The host cannot see
+        // separators, so remove them first, but only when nothing else is
+        // left: otherwise the remove fails and the separators stay.
         if (n.url === undefined) {
-          for (const k of await chrome.bookmarks.getChildren(op.id)) {
-            if (isSeparator(k)) await chrome.bookmarks.remove(k.id);
+          const kids = await chrome.bookmarks.getChildren(op.id);
+          if (kids.every(isSeparator)) {
+            for (const k of kids) await chrome.bookmarks.remove(k.id);
           }
         }
         await chrome.bookmarks.remove(op.id);
