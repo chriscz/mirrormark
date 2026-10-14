@@ -29,7 +29,7 @@ func TestProfilesFromIniAndScan(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(root, "ab12.dev-edition-default", "prefs.js"), nil, 0o600)
 	os.WriteFile(filepath.Join(root, "cd34.Original profile", "prefs.js"), nil, 0o600)
-	got, err := Profiles(root)
+	got, err := Firefox.Profiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestProfilesFromIniAndScan(t *testing.T) {
 }
 
 func TestProfilesWithNoneFails(t *testing.T) {
-	if _, err := Profiles(t.TempDir()); err == nil || !strings.Contains(err.Error(), "start Firefox") {
+	if _, err := Firefox.Profiles(t.TempDir()); err == nil || !strings.Contains(err.Error(), "start Firefox") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -69,7 +69,7 @@ func TestProfilesListsAnAbsoluteIniPathOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "profiles.ini"), []byte(ini), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Profiles(root)
+	got, err := Firefox.Profiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestProfilesReportsAnUnreadableIni(t *testing.T) {
 	if err := os.WriteFile(ini, []byte("[Profile0]\nName=a\nPath=a\n"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Profiles(root); err == nil || !strings.Contains(err.Error(), ini) {
+	if _, err := Firefox.Profiles(root); err == nil || !strings.Contains(err.Error(), ini) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -99,7 +99,7 @@ func TestProfilesReportsAnUnreadableRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(root, 0o700) })
-	if _, err := Profiles(root); err == nil || !strings.Contains(err.Error(), root) {
+	if _, err := Firefox.Profiles(root); err == nil || !strings.Contains(err.Error(), root) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -108,13 +108,13 @@ func TestDefaultRootPrefersTheNewLocation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	if r, _ := DefaultRoot(); r != filepath.Join(home, ".mozilla", "firefox") {
+	if r, _ := Firefox.DefaultRoot(); r != filepath.Join(home, ".mozilla", "firefox") {
 		t.Fatalf("without profiles.ini: %s", r)
 	}
 	newRoot := filepath.Join(home, ".config", "mozilla", "firefox")
 	os.MkdirAll(newRoot, 0o700)
 	os.WriteFile(filepath.Join(newRoot, "profiles.ini"), nil, 0o644)
-	if r, _ := DefaultRoot(); r != newRoot {
+	if r, _ := Firefox.DefaultRoot(); r != newRoot {
 		t.Fatalf("with profiles.ini: %s", r)
 	}
 }
@@ -207,18 +207,22 @@ func TestPrefsAndTheirResets(t *testing.T) {
 	}
 }
 
-func TestChannelFromTheProfilesFirefox(t *testing.T) {
+func TestCheckTakesOnlyDeveloperEdition(t *testing.T) {
 	ff := t.TempDir()
 	os.MkdirAll(filepath.Join(ff, "defaults", "pref"), 0o755)
-	os.WriteFile(filepath.Join(ff, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "aurora");`+"\n"), 0o644)
+	prefs := filepath.Join(ff, "defaults", "pref", "channel-prefs.js")
+	os.WriteFile(prefs, []byte(`pref("app.update.channel", "aurora");`+"\n"), 0o644)
 	dir := t.TempDir()
-	if _, _, err := Channel(dir); err == nil || !strings.Contains(err.Error(), "start Firefox") {
+	if _, err := Firefox.Check(dir); err == nil || !strings.Contains(err.Error(), "start Firefox") {
 		t.Fatalf("no compatibility.ini: %v", err)
 	}
 	os.WriteFile(filepath.Join(dir, "compatibility.ini"), []byte("[Compatibility]\nLastVersion=159.0_20261001000000/20261001000000\nLastPlatformDir="+ff+"\nLastAppDir="+ff+"/browser\n"), 0o644)
-	bin, ch, err := Channel(dir)
-	if err != nil || bin != filepath.Join(ff, "firefox") || ch != "aurora" {
-		t.Fatalf("%s %s %v", bin, ch, err)
+	if bin, err := Firefox.Check(dir); err != nil || bin != filepath.Join(ff, "firefox") {
+		t.Fatalf("%s %v", bin, err)
+	}
+	os.WriteFile(prefs, []byte(`pref("app.update.channel", "release");`+"\n"), 0o644)
+	if _, err := Firefox.Check(dir); err == nil || !strings.Contains(err.Error(), "release") {
+		t.Fatalf("release: %v", err)
 	}
 }
 
@@ -260,7 +264,7 @@ func TestBindStartsFirefoxForTheUUIDThenOpensThePage(t *testing.T) {
 	t.Setenv("FAKE_INSTALL", "1")
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	if err := Bind(bin, dir, "firefox-work", boundFile(bin)); err != nil {
+	if err := Firefox.Bind(bin, dir, "firefox-work", boundFile(bin)); err != nil {
 		t.Fatal(err)
 	}
 	calls, _ := os.ReadFile(log)
@@ -273,7 +277,7 @@ func TestBindStartsFirefoxForTheUUIDThenOpensThePage(t *testing.T) {
 func TestBindWithoutUUIDSaysToRestart(t *testing.T) {
 	dir := t.TempDir()
 	bin, _ := fakeFirefox(t, dir)
-	err := Bind(bin, dir, "firefox-work", boundFile(bin))
+	err := Firefox.Bind(bin, dir, "firefox-work", boundFile(bin))
 	if err == nil || !strings.Contains(err.Error(), "restart Firefox") {
 		t.Fatalf("err %v", err)
 	}
@@ -283,7 +287,7 @@ func TestBindGivesUpWhenThePageNeverConfirms(t *testing.T) {
 	t.Setenv("FAKE_INSTALL", "1")
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	err := Bind(bin, dir, "firefox-work", func(time.Time) bool { return false })
+	err := Firefox.Bind(bin, dir, "firefox-work", func(time.Time) bool { return false })
 	calls, _ := os.ReadFile(log)
 	if err == nil || bytes.Count(calls, []byte("bind.html")) != 3 {
 		t.Fatalf("err %v, calls:\n%s", err, calls)

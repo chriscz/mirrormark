@@ -20,7 +20,7 @@ var UUIDWait = 15 * time.Second
 // there yet, and waits for the UUID. about:blank opens beside the page
 // because the page closes its own tab, and closing the only tab of the
 // only window quits Firefox.
-func Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error {
+func (b Browser) Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error {
 	uuid, err := UUID(profileDir)
 	if err != nil {
 		return err
@@ -38,12 +38,12 @@ func Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error 
 			}
 		}
 		if uuid == "" {
-			return fmt.Errorf("Firefox has not installed mirrormark in %s; restart Firefox there (close every window), then run mirrormark install --browser firefox again", profileDir)
+			return fmt.Errorf("%s has not installed mirrormark in %s; restart %s there (close every window), then run mirrormark install --browser %s again", b.Name, profileDir, b.Name, b.Config)
 		}
 	}
 	ok, err := chrome.Retry(bin, []string{"--profile", profileDir, "about:blank", "moz-extension://" + uuid + "/bind.html#" + dbID}, bound)
 	if err != nil || ok {
 		return err
 	}
-	return fmt.Errorf("profile %s did not confirm; check that mirrormark is enabled in about:addons there, then run mirrormark install --browser firefox again", profileDir)
+	return fmt.Errorf("profile %s did not confirm; check that mirrormark is enabled in about:addons there, then run mirrormark install --browser %s again", profileDir, b.Config)
 }

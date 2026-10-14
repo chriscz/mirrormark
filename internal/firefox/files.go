@@ -148,13 +148,13 @@ func withPrefs(user []byte) []byte {
 
 var channelRe = regexp.MustCompile(`pref\("app\.update\.channel",\s*"([^"]+)"\)`)
 
-// Channel returns the Firefox binary that last ran the profile, from its
-// compatibility.ini, and that Firefox's update channel: "aurora" for
-// Developer Edition, "release" for release.
-func Channel(profileDir string) (bin, channel string, err error) {
+// Check returns the binary of the browser that last ran the profile, from
+// its compatibility.ini, or why b cannot install into the profile: it was
+// last run by another browser, or nothing tells which.
+func (b Browser) Check(profileDir string) (bin string, err error) {
 	data, err := os.ReadFile(filepath.Join(profileDir, "compatibility.ini"))
 	if err != nil {
-		return "", "", fmt.Errorf("cannot tell which Firefox uses %s; start Firefox in that profile once and close it: %w", profileDir, err)
+		return "", fmt.Errorf("cannot tell which browser uses %s; start %s in that profile once and close it: %w", profileDir, b.Name, err)
 	}
 	var dir string
 	for _, s := range iniSections(string(data)) {
@@ -163,17 +163,22 @@ func Channel(profileDir string) (bin, channel string, err error) {
 		}
 	}
 	if dir == "" {
-		return "", "", fmt.Errorf("%s names no Firefox (LastPlatformDir)", filepath.Join(profileDir, "compatibility.ini"))
+		return "", fmt.Errorf("%s names no browser (LastPlatformDir)", filepath.Join(profileDir, "compatibility.ini"))
 	}
-	prefs, err := os.ReadFile(filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
-	if err != nil {
-		return "", "", fmt.Errorf("cannot read the update channel of the Firefox in %s: %w", dir, err)
+	if b.Channel != "" {
+		prefs, err := os.ReadFile(filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
+		if err != nil {
+			return "", fmt.Errorf("cannot read the update channel of the Firefox in %s: %w", dir, err)
+		}
+		m := channelRe.FindSubmatch(prefs)
+		if m == nil {
+			return "", fmt.Errorf("no update channel in %s", filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
+		}
+		if string(m[1]) != b.Channel {
+			return "", fmt.Errorf("its Firefox is on the %s channel, which installs only add-ons Mozilla signed; mirrormark works only in Firefox Developer Edition for now", m[1])
+		}
 	}
-	m := channelRe.FindSubmatch(prefs)
-	if m == nil {
-		return "", "", fmt.Errorf("no update channel in %s", filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
-	}
-	return filepath.Join(dir, "firefox"), string(m[1]), nil
+	return filepath.Join(dir, b.Bin), nil
 }
 
 var uuidsRe = regexp.MustCompile(`user_pref\("extensions\.webextensions\.uuids",\s*("(?:[^"\\]|\\.)*")\);`)

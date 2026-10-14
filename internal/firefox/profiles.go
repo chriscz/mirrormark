@@ -1,5 +1,5 @@
-// Package firefox installs mirrormark into Firefox Developer Edition on
-// Linux, one profile at a time and without root: it lists the profiles,
+// Package firefox installs mirrormark into Firefox-family browsers on
+// Linux, Firefox Developer Edition first, one profile at a time and without root: it lists the profiles,
 // writes the XPI and three user.js prefs into each, writes the per-user
 // native host manifest, and binds each profile by opening bind.html in it.
 //
@@ -24,10 +24,41 @@ import (
 	"github.com/chriscz/mirrormark/internal/chrome"
 )
 
-// DefaultRoot is the directory holding profiles.ini: the XDG location
-// Firefox uses for new installs since 147, if it holds one, else the
-// legacy ~/.mozilla/firefox.
-func DefaultRoot() (string, error) {
+// Browser is one Gecko browser mirrormark installs into. They share the
+// XPI, the user.js prefs and the per-user host manifest; each has its own
+// profiles root and binary, and its own way to tell its profiles from
+// other Gecko browsers'.
+type Browser struct {
+	Config   string // the --browser value, and browser: in a database
+	Name     string // what messages call it
+	XDGRoot  string // the profiles root under $XDG_CONFIG_HOME, if it holds profiles.ini
+	HomeRoot string // the profiles root under the home directory otherwise
+	Bin      string // its binary, in the directory compatibility.ini names
+	Channel  string // the update channel its builds have, if it is told by that
+	AppName  string // the Name in its application.ini, if it is told by that
+}
+
+// Firefox is Firefox Developer Edition: release Firefox installs only
+// add-ons Mozilla signed, Developer Edition honours
+// xpinstall.signatures.required.
+var Firefox = Browser{Config: "firefox", Name: "Firefox Developer Edition", XDGRoot: "mozilla/firefox",
+	HomeRoot: ".mozilla/firefox", Bin: "firefox", Channel: "aurora"}
+
+// Browsers are the Gecko browsers install knows.
+var Browsers = []Browser{Firefox}
+
+// Lookup returns the browser whose Config is config.
+func Lookup(config string) (Browser, bool) {
+	i := slices.IndexFunc(Browsers, func(b Browser) bool { return b.Config == config })
+	if i < 0 {
+		return Browser{}, false
+	}
+	return Browsers[i], true
+}
+
+// DefaultRoot is the directory holding b's profiles.ini: the XDG location,
+// if it holds one, else the legacy one in the home directory.
+func (b Browser) DefaultRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -36,10 +67,10 @@ func DefaultRoot() (string, error) {
 	if v := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(v) {
 		cfg = v
 	}
-	if r := filepath.Join(cfg, "mozilla", "firefox"); fileExists(filepath.Join(r, "profiles.ini")) {
+	if r := filepath.Join(cfg, b.XDGRoot); fileExists(filepath.Join(r, "profiles.ini")) {
 		return r, nil
 	}
-	return filepath.Join(home, ".mozilla", "firefox"), nil
+	return filepath.Join(home, b.HomeRoot), nil
 }
 
 // Profiles lists root's profiles, sorted by Dir: those in profiles.ini,
@@ -47,7 +78,7 @@ func DefaultRoot() (string, error) {
 // other directory in root that holds a prefs.js, named by what follows its
 // first ".". Firefox's new profile switcher lists its profiles only in an
 // SQLite file, which this does not read, but each one has a prefs.js.
-func Profiles(root string) ([]chrome.Profile, error) {
+func (b Browser) Profiles(root string) ([]chrome.Profile, error) {
 	var out []chrome.Profile
 	seen := map[string]bool{}
 	// A missing file or root means no profiles yet; any other error is
@@ -83,7 +114,7 @@ func Profiles(root string) ([]chrome.Profile, error) {
 		out = append(out, chrome.Profile{Dir: e.Name(), Name: name})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no Firefox profiles in %s; start Firefox Developer Edition once and close it", root)
+		return nil, fmt.Errorf("no %s profiles in %s; start %s once and close it", b.Name, root, b.Name)
 	}
 	slices.SortFunc(out, func(a, b chrome.Profile) int { return strings.Compare(a.Dir, b.Dir) })
 	return out, nil

@@ -709,7 +709,7 @@ func TestFirefoxUninstallWithNoProfileSaysSo(t *testing.T) {
 	if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "No Firefox profile") || !strings.Contains(out.String(), "xpinstall.signatures.required") ||
+	if !strings.Contains(out.String(), "No Firefox Developer Edition profile") || !strings.Contains(out.String(), "xpinstall.signatures.required") ||
 		strings.Contains(out.String(), "checks add-on signatures there again") {
 		t.Fatalf("output:\n%s", out.String())
 	}

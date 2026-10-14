@@ -86,8 +86,8 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if *browser == "firefox" {
-		return installFirefox(p, *udd, picks, stdout, stderr)
+	if fb, ok := firefox.Lookup(*browser); ok {
+		return installFirefox(p, fb, *udd, picks, stdout, stderr)
 	}
 	cb, ok := chrome.Lookup(*browser)
 	if !ok {
@@ -174,33 +174,37 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-const firefoxSafety = `Firefox installs only add-ons Mozilla signed unless a profile says
+// geckoSafety says what install turns off in each profile of b, before it
+// does.
+func geckoSafety(b firefox.Browser) string {
+	return fmt.Sprintf(`%s installs only signed add-ons unless a profile says
 otherwise, and mirrormark is not signed. So install sets, in each profile's
 user.js, xpinstall.signatures.required to false (that profile then accepts
 any unsigned add-on, not only mirrormark) and extensions.autoDisableScopes
 to 14 (an add-on file in the profile's extensions folder starts enabled
 without asking; add-ons elsewhere still ask).
-mirrormark uninstall --browser firefox sets them back.`
+mirrormark uninstall --browser %s sets them back.`, b.Name, b.Config)
+}
 
-// installFirefox installs into Firefox Developer Edition profiles, as the
-// user: Firefox reads add-ons and host manifests from the user's own
-// directories, so no sudo. It refuses profiles of any other Firefox before
-// writing anything, since those install only signed add-ons.
-func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.Writer) int {
+// installFirefox installs into profiles of b, as the user: Gecko browsers
+// read add-ons and host manifests from the user's own directories, so no
+// sudo. It refuses profiles of any other browser before writing anything,
+// since those install only signed add-ons.
+func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
 	var err error
 	if root == "" {
-		root, err = firefox.DefaultRoot()
+		root, err = b.DefaultRoot()
 	} else {
 		root, err = resolveDir(root)
 	}
 	if err != nil {
 		return fail(err)
 	}
-	profiles, err := firefox.Profiles(root)
+	profiles, err := b.Profiles(root)
 	if err != nil {
 		return fail(err)
 	}
@@ -216,15 +220,12 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 	var refused []string
 	for _, c := range chosen {
 		dir := firefox.Dir(root, c)
-		bin, channel, err := firefox.Channel(dir)
-		switch {
-		case err != nil:
+		bin, err := b.Check(dir)
+		if err != nil {
 			refused = append(refused, fmt.Sprintf("%s: %v", c.Name, err))
-		case channel != "aurora":
-			refused = append(refused, fmt.Sprintf("%s: its Firefox is on the %s channel, which installs only add-ons Mozilla signed; mirrormark works only in Firefox Developer Edition for now", c.Name, channel))
-		default:
-			targets = append(targets, target{c, dir, bin})
+			continue
 		}
+		targets = append(targets, target{c, dir, bin})
 	}
 	if len(refused) > 0 {
 		return fail(fmt.Errorf("cannot install into these profiles; leave them out with --profile:\n  %s", strings.Join(refused, "\n  ")))
@@ -234,7 +235,7 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 	// that fails part way must not leave a profile without one.
 	ids := map[string]string{}
 	for _, tg := range targets {
-		if ids[tg.dir], err = ensureDB(p, "firefox", tg.dir, tg.c); err != nil {
+		if ids[tg.dir], err = ensureDB(p, b.Config, tg.dir, tg.c); err != nil {
 			return fail(err)
 		}
 	}
@@ -254,11 +255,11 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 		return fail(err)
 	}
 	if !chrome.FilesCurrent(files) {
-		fmt.Fprintln(stdout, firefoxSafety)
+		fmt.Fprintln(stdout, geckoSafety(b))
 		if err := chrome.WriteFiles(files); err != nil {
 			return fail(err)
 		}
-		fmt.Fprintln(stdout, "Restart Firefox in these profiles if it is running (close every window), then run mirrormark install --browser firefox again to bind them.")
+		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run mirrormark install --browser %s again to bind them.\n", b.Name, b.Config)
 		return 0
 	}
 	fmt.Fprintln(stdout, "Opening a tab in each profile to bind it.")
@@ -266,7 +267,7 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 	for _, tg := range targets {
 		id := ids[tg.dir]
 		bound := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := firefox.Bind(tg.bin, tg.dir, id, bound); err != nil {
+		if err := b.Bind(tg.bin, tg.dir, id, bound); err != nil {
 			fmt.Fprintf(stdout, "not bound: %s: %v\n", tg.c.Name, err)
 			code = 1
 			continue
@@ -274,7 +275,7 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 		fmt.Fprintf(stdout, "bound: %s -> %s\n", tg.c.Name, id)
 	}
 	if code == 0 {
-		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from Firefox first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
+		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), b.Name, p.LogFile())
 	}
 	return code
 }
@@ -473,7 +474,9 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	if fl.Parse(args) != nil {
 		return 2
 	}
-	if *browser != "chrome" && *browser != "firefox" {
+	_, isChromium := chrome.Lookup(*browser)
+	fb, isGecko := firefox.Lookup(*browser)
+	if !isChromium && !isGecko {
 		fmt.Fprintf(stderr, "mirrormark: --browser is chrome or firefox, not %q\n", *browser)
 		return 2
 	}
@@ -488,11 +491,11 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if *browser == "firefox" {
-		if err := uninstallFirefox(p, stdout); err != nil {
+	if isGecko {
+		if err := uninstallFirefox(p, fb, stdout); err != nil {
 			return fail(err)
 		}
-		return finishUninstall(p, *browser, *purge, stdout, stderr)
+		return finishUninstall(p, fb.Config, fb.Name, *purge, stdout, stderr)
 	}
 	cb, _ := chrome.Lookup(*browser) // checked above
 	keyFile := filepath.Join(p.Data, "extension.pem")
@@ -523,7 +526,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
-	return finishUninstall(p, *browser, *purge, stdout, stderr)
+	return finishUninstall(p, cb.Config, cb.Name, *purge, stdout, stderr)
 }
 
 // finishUninstall deals with mirrormark's own files once browser's install
@@ -533,12 +536,11 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 // directory are shared: they go only with the last database, since another
 // browser's profiles still sync through them, and that browser's uninstall
 // needs its databases to find its profiles.
-func finishUninstall(p db.Paths, browser string, purge bool, stdout, stderr io.Writer) int {
+func finishUninstall(p db.Paths, browser, name string, purge bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
-	name := map[string]string{"chrome": "Chrome", "firefox": "Firefox"}[browser]
 	again, kept := "mirrormark uninstall --purge", "the databases, backups and key"
 	if browser != "chrome" {
 		again = "mirrormark uninstall --browser " + browser + " --purge"
@@ -601,19 +603,19 @@ func finishUninstall(p db.Paths, browser string, purge bool, stdout, stderr io.W
 }
 
 // uninstallFirefox removes the add-on from every profile a database file
-// names as Firefox, puts back the two prefs that weakened its add-on
+// names as b's, puts back the two prefs that weakened its add-on
 // checks, and removes the host manifest if it is this one's. It writes
 // user.js first, so if that fails the add-on is still there and running
 // uninstall again finishes the job.
-func uninstallFirefox(p db.Paths, stdout io.Writer) error {
+func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
-		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a Firefox profile", err)
+		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a %s profile", err, b.Name)
 	}
 	var files []chrome.File
 	var gone []string // XPIs, and the host manifest if it is this one's
 	for _, d := range dbs {
-		if d.Profile.Browser != "firefox" {
+		if d.Profile.Browser != b.Config {
 			continue
 		}
 		gone = append(gone, firefox.XPIPath(d.Profile.Path))
@@ -625,15 +627,15 @@ func uninstallFirefox(p db.Paths, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		var b strings.Builder
+		var sb strings.Builder
 		for line := range strings.Lines(string(user)) {
 			if r, ok := firefox.ResetPrefs[strings.TrimSpace(line)]; ok {
 				line = r + "\n"
 			}
-			b.WriteString(line)
+			sb.WriteString(line)
 		}
-		if b.String() != string(user) {
-			files = append(files, chrome.File{Path: path, Data: []byte(b.String())})
+		if sb.String() != string(user) {
+			files = append(files, chrome.File{Path: path, Data: []byte(sb.String())})
 		}
 	}
 	found := len(gone) > 0
@@ -649,10 +651,10 @@ func uninstallFirefox(p db.Paths, stdout io.Writer) error {
 		return err
 	}
 	if !found {
-		fmt.Fprintf(stdout, "No Firefox profile was found in mirrormark's databases in %s, so no user.js was changed. If a profile still has mirrormark, check its user.js for xpinstall.signatures.required and extensions.autoDisableScopes, and set them back to true and 15.\n", p.ProfilesDir())
+		fmt.Fprintf(stdout, "No %s profile was found in mirrormark's databases in %s, so no user.js was changed. If a profile still has mirrormark, check its user.js for xpinstall.signatures.required and extensions.autoDisableScopes, and set them back to true and 15.\n", b.Name, p.ProfilesDir())
 		return nil
 	}
-	fmt.Fprintln(stdout, "Firefox removes mirrormark from each profile when it next starts, and checks add-on signatures there again. Your bookmarks stay in Firefox.")
+	fmt.Fprintf(stdout, "%s removes mirrormark from each profile when it next starts, and checks add-on signatures there again. Your bookmarks stay in %s.\n", b.Name, b.Name)
 	return nil
 }
 
