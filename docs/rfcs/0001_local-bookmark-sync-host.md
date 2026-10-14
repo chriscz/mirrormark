@@ -65,7 +65,7 @@ It runs a **round** on connect, whenever the extension reports a change, and whe
 4. if every write succeeded and the bookmarks changed, writes this profile's database file, setting the `seq` of each union record it changed to one above the highest `seq` of that union it read;
 5. releases the lock.
 
-A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A failed round is retried at the next poll three times, then every 5 seconds three times, then every 30 seconds, until a round succeeds, so a browser that keeps failing does not take the global lock every second. If the browser made every change but the host cannot write its file, the round reports `db-write-failed` and is retried the same way. A crashed host releases its locks with it.
+A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A failed round is retried 5 seconds later, or sooner when a file changes, until a round succeeds, so a browser that keeps failing does not take the global lock, or add to the log, every second. If the browser made every change but the host cannot write its file, the round reports `db-write-failed` and is retried the same way. A crashed host releases its locks with it.
 
 If another member's file is missing or unreadable, the round skips every union that member belongs to, logs a warning and sends it to the popup. It never treats a member it cannot read as empty.
 
@@ -200,15 +200,21 @@ Changes to different fields combine: a title edit on one side and a URL edit on 
 | `Work/News → lwn.net`      | deleted                         | retitled `LWN`               | `Work/_deleted/LWN → lwn.net`                                                          |
 | (none)                     | adds `Work/Mail → fastmail.com` | adds `Work/Mail → gmail.com` | `Work/Mail (chrome/personal) → fastmail.com`, `Work/Mail (chrome/work) → gmail.com`    |
 
-**Folders are never copied**, because a copy would duplicate the subtree. For a folder conflict, theirs wins, because it is already in other profiles, and ours is logged (Open question 1). The engine checks the merged tree for cycles (A moves X into Y while B moves Y into X) and undoes the move it is applying in P. When a folder moves to `_deleted` while another profile adds a bookmark inside it, the bookmark goes with it: kept, but out of sight until restored.
+**Folders are never copied**, because a copy would duplicate the subtree. For a folder conflict, theirs wins, because it is already in other profiles, and ours is logged (Open question 1, awaiting the user's sign-off). The engine checks the merged tree for cycles (A moves X into Y while B moves Y into X) and undoes the move it is applying in P. When a folder moves to `_deleted` while another profile adds a bookmark inside it, the bookmark goes with it: kept, but out of sight until restored.
 
 **First round.** A new member has no base, so all its nodes and all of theirs count as new: identical bookmarks and same-named folders link up, same-titled bookmarks with different URLs become suffixed copies, and the rest is added to both sides. A first round deletes nothing.
 
 **Why it converges.** Rounds never overlap, because each holds the global lock. A round that writes reads every member file first, so its output contains everything published before it; by induction, the highest-`seq` record of a union contains every published change to it. P's base is a state P published, so it is an ancestor of theirs, which is what a three-way merge needs. A round that fails part-way writes no file, so base stays the last published state; in the next round the writes that did land show up on both sides with the same value (a landed `create` links as an identical add), and the rest is retried. Once users stop editing, each profile's next round brings its browser to the latest state, and a round that changes nothing writes nothing, so the rounds stop.
 
-**Wrong-tree guard.** If more than half of the nodes in P's base are gone from P's member folder, purges included, or are live in base but gone from theirs, and base holds more than 5 nodes, the round writes nothing and reports `db-mismatch` in its `status`, shown in the popup and the log. This catches a browser that has not finished loading its bookmarks, a reset profile, a database bound to the wrong profile and a truncated or hand-cut file. Without it, each of these would move a whole union into `_deleted`, or purge it, everywhere. Counting what is missing from theirs is safe because the global lock means theirs is always a whole published state. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or moves the profile's database file aside and re-runs `mirrormark install` for that profile, which makes it a new member (a re-run alone keeps the existing file).
+**Wrong-tree guard.** When P's base holds more than 5 nodes, the round writes nothing and reports `db-mismatch` in its `status`, shown in the popup and the log, if any of these holds:
 
-**Room for "ask which side wins".** The engine is one pure function, `merge.Round(base, ours, theirs Tree, u Union) Result`, returning the ops, the new tree and each conflict with both versions. A later mode would hold a conflict instead of copying it.
+- P's member folder is empty: a browser that has not finished loading its bookmarks, or a reset profile.
+- More than half of base is gone from P's member folder, and more than half of the member folder is not in base: a database bound to the wrong profile.
+- More than half of base would go. A node gone from P's member folder, purges included, counts only where its parent is still there, so deleting a folder counts once however much it holds; deleting it is an ordinary edit. A node live in base and gone from theirs counts each time: theirs lacks it only if it was purged or the file was truncated or cut by hand, and counting it is safe because the global lock means theirs is always a whole published state.
+
+Without the guard, each of these would move a whole union into `_deleted`, or purge it, everywhere. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or puts them in one folder and deletes it, or moves the profile's database file aside and re-runs `mirrormark install` for that profile, which makes it a new member (a re-run alone keeps the existing file).
+
+**Room for "ask which side wins".** The engine is one pure function, `merge.Round(merge.Input) (merge.Result, error)`. The input holds base, ours, theirs and P's label; the result holds the ops, the new tree and each conflict with both versions, and the error is the wrong-tree guard's. A later mode would hold a conflict instead of copying it.
 
 ### 5. Which profile is this?
 
@@ -237,11 +243,11 @@ Without `sudo`, `install` stops and says so; a no-root route is listed under [La
 
 **A key per install.** Chrome derives an extension's id from its public key. `install` generates a key pair with Go's standard crypto, writes the public key into the unpacked extension's manifest `key`, signs the CRX with the private key, puts the id in the host manifest's `allowed_origins`, and keeps the private key in `~/.local/share/mirrormark/extension.pem` (mode `0600`) so upgrades keep the id. No private key is shipped, so an extension built elsewhere does not get this install's id. An upgrade re-signs with the same key and raises `external_version` so Chrome picks up the new build.
 
-`mirrormark uninstall` removes the host manifest, the preferences file, the unpacked extension and the CRX, and keeps the YAML files and the key unless given `--purge`. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
+`mirrormark uninstall` removes the host manifest, the preferences file, the unpacked extension and the CRX, and keeps the YAML files and the key unless given `--purge`. A host manifest that names another extension belongs to another install, so `uninstall` leaves it in place. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
 
 ### 7. Extension and code
 
-The extension is thin: Manifest V3, permissions `alarms`, `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. After a failed connection it waits instead, for an alarm (30 s, or 60 s after the host's `error`), because the worker's timers stop with it; after a new binding it waits a second so the old host can release the database. It sends trees, applies ops, and shows in its popup the bound profile, why the host stopped if it did, and the last round's problems. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
+The extension is thin: Manifest V3, permissions `alarms`, `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. After a failed connection it waits instead for an alarm (30 s, or 60 s after the host's `error`), because the worker's timers stop with it, and while that alarm is pending neither a bookmark event nor a restarted worker reconnects; after a new binding it waits a second so the old host can release the database. It sends `changed` at the first bookmark event of a burst and the tree after it, applies ops, and shows in its popup the bound profile, why the host stopped if it did, and the last round's problems. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
 
 One Go module, `github.com/chriscz/mirrormark`. Its only third-party dependency is `go.yaml.in/yaml/v3`, the YAML organisation's continuation of the archived `gopkg.in/yaml.v3` [R16]. Locking uses `syscall.Flock`; the CRX3 file is written with the standard library.
 
@@ -275,12 +281,12 @@ As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with p
 
 - **`_deleted` grows** in every member until the user empties it.
 - **Merge clutter.** Each conflict leaves suffixed copies to tidy.
-- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; the log and the popup show the warning. After six failures in a row the profile retries only every 30 seconds, so its own edits wait that long once the cause is fixed, unless a file change starts a round sooner.
+- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; the log and the popup show the warning. The profile retries every 5 seconds, so its own edits wait up to that long once the cause is fixed, unless a file change starts a round sooner.
 - **One slow browser stalls everyone.** A round holds the global lock while its browser applies ops, up to the 10-second timeout.
 - **The CRX route needs root and reaches every profile.** Users who refuse `sudo` cannot install this version.
 - **`install` opens a window in every profile it binds.** With many profiles, `--profile` limits it.
 - **Installation depends on undocumented files** (`Local State`, the preferences-file directory) that Chrome may change.
-- **The guard can refuse real changes.** Removing most of a member folder at once trips it; moving the bookmarks into `_deleted` does not. Emptying a `_deleted` that holds more than half of the union trips it too, so a large purge goes in parts. A profile that was closed while another one moved most of the union to `_deleted` and purged it sees the guard every round, and must move its database file aside and re-run `install` to become a new member.
+- **The guard can refuse real changes.** Removing more than half of a union one node at a time, or emptying the member folder, trips it; deleting one folder that holds as much, or moving the bookmarks into `_deleted`, does not. Emptying a `_deleted` that holds more than half of the union node by node trips it too; removing the `_deleted` folder itself does not. A profile that was closed while another one moved most of the union to `_deleted` and purged it sees the guard every round, and must move its database file aside and re-run `install` to become a new member.
 - **No export yet.** Recovering from a bad sync means `_deleted`, the YAML backups read by hand, or the browser's own bookmark export made beforehand; `install` suggests making one.
 - **Same-user programs are trusted.** They can rewrite the YAML files, as they could the browsers' own files.
 
@@ -293,9 +299,9 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Exit:** `bin/dev run make` passes.
 2. **Extension and host.** The extension, the host, the bind page, and writing the database file. **Tests:** a Go fake extension drives the host. **Exit:** passes.
 3. **`mirrormark install`.**
-   - **Tests:** in the dev image, whose two system directories are writable so `install` needs no `sudo`, `install` runs against Google Chrome stable in two data directories driven over the DevTools pipe, once with fresh profiles and once with used ones.
-   - **Exit:** in both runs the extension is enabled and bound, and reaches the host with no user action beyond the restart.
-4. **Union sync.** Writes, `_deleted`, purges, the guard. **Tests:** e2e with two Chrome instances in one union covering each example in Section 4, one browser closed while the other changes, and the latency target. **Exit:** all pass, and a run on the developer's Chrome with test profiles is recorded in the PR.
+   - **Tests:** in the dev image, whose two system directories are writable so `install` needs no `sudo`, `install` runs against Google Chrome stable in two data directories driven over the DevTools pipe, with fresh profiles; it then runs again in a bound profile, which keeps its database and rebinds, and Chrome restarts with the binding kept. A second test lets `install` start Chrome itself for the bind.
+   - **Exit:** the extension is enabled and bound, and reaches the host with no user action beyond the restart.
+4. **Union sync.** Writes, `_deleted`, purges, the guard. **Tests:** e2e with two Chrome instances in one union covering each example in Section 4, a large folder delete that must not trip the guard, one browser closed while the other changes, and the latency target, measured with a handful of bookmarks. **Exit:** all pass, and a run on the developer's own desktop Chrome with test profiles and real `sudo` is recorded in the PR. That manual run is still to do; it is the one check left.
 
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
@@ -315,22 +321,22 @@ Each is its own RFC or stack once the Chrome version works.
 
 ## Success criteria
 
-- Two Chrome profiles with a few hundred bookmarks in one union match within 3 seconds of the last edit while both run (0.5 s quiet, up to 1 s polling, two rounds; measured in Phase 4), and within 3 seconds of a closed one's extension connecting.
+- Two Chrome profiles in one union match within 3 seconds of the last edit while both run (0.5 s quiet, up to 1 s polling, two rounds), and within 3 seconds of a closed one's extension connecting. Phase 4 measures this with a handful of bookmarks; a union of a few hundred is not measured yet.
 - Each example in Section 4 gives the tree shown, in every member.
 - In the property tests and the Phase 4 e2e, no bookmark goes missing except by purge, and a round with no user changes writes nothing.
-- `mirrormark install` takes a fresh and a used Chrome profile on Linux to a bound extension using only the steps it prints.
+- `mirrormark install` takes a fresh Chrome profile on Linux to a bound extension using only the steps it prints, and binds an already bound profile again to the same database (tested in the dev image). A used profile on the developer's desktop Chrome, with real `sudo`, is the manual check that remains.
 
 ## Security, privacy, operational impact
 
 - **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary.
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes them.
-- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`, and a warning that repeats every round is logged once, then its count when it stops.
+- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the host restarts.
 
 ## Open questions
 
-1. **One folder renamed or moved differently on two profiles.** Proposed: theirs wins and ours is logged. Alternative: one folder titled `X (a) / Y (b)`. _Resolve in RFC_; ask the user.
-2. **Chrome account and local folders.** A signed-in Chrome profile can have two bookmark bars [R6]. Proposed: paths resolve in the account set when it exists. _Resolve in implementation._
-3. **URL matching.** Should `http`/`https` or a trailing slash count as the same URL? Proposed: no. _Resolve in implementation._
+1. **One folder renamed or moved differently on two profiles.** _Resolved as built:_ theirs wins and the conflict is logged (Section 4). The alternative was one folder titled `X (a) / Y (b)`. Still awaiting the user's sign-off.
+2. **Chrome account and local folders.** A signed-in Chrome profile can have two bookmark bars [R6]. _Resolved as built:_ when a path resolves, an account folder (`syncing`) wins over a local one of the same name.
+3. **URL matching.** Should `http`/`https` or a trailing slash count as the same URL? _Resolved as built:_ no; URLs compare exactly.
 
 ## References
 
@@ -358,3 +364,5 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — trimmed for the minimal version: no `mirrormark status` or status files (install confirms a binding by the lock file's mtime; errors go to the log and the popup); `sudo install` replaces the `install-system-files` subcommand; no no-root fallback; `install` binds every profile unless `--profile` narrows it; `unpack` added.
 - 2026-10-15 — after review of the merge engine: the wrong-tree guard counts purges and nodes missing from theirs; the extension stops a batch at the first failed op; `remove` never removes a folder's contents.
 - 2026-10-15 — after review of the host and extension: a `status` message ends every round and carries its problems, and `error` is only for a host that stops; new codes `db-write-failed` and `db-lock-error`; failed rounds back off to 5 s and 30 s; the poll compares sizes too; the log rotates at 1 MiB and logs a repeated warning once; the extension reconnects on an alarm and waits a second after a new binding.
+- 2026-10-15 — the extension sends `changed` at the first bookmark event of a burst, and the host's poll starts no round until the tree that follows, so no round runs on a tree older than the user's last edit.
+- 2026-10-15 — final fixes: the wrong-tree guard counts a deleted folder once and catches an empty member folder and a wrong binding directly, so deleting a large folder no longer trips it; every warning is logged, without de-duplication; a failed round is retried after a fixed 5 s; `uninstall` keeps a host manifest naming another extension; a reconnect waits while a reconnect alarm is pending; open questions 1 to 3 recorded as built; Rollout and Success criteria say what was tested and that the manual run on desktop Chrome is still to do.
