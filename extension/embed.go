@@ -1,6 +1,6 @@
-// Package extension holds the Chrome extension's files, embedded in the
+// Package extension holds the browser extension's files, embedded in the
 // binary so one file installs everything. The extension is plain JavaScript
-// with no build step: these files are what Chrome loads.
+// with no build step: these files are what Chrome and Firefox load.
 //
 // The extension stays dormant until bind.html#<database id> stores the
 // profile's binding in chrome.storage.local. It then connects to the native
@@ -25,6 +25,10 @@ import (
 
 // HostName is the native messaging host name; background.js uses the same.
 const HostName = "com.github.chriscz.mirrormark"
+
+// GeckoID is the extension's id in Firefox. Firefox does not derive ids from
+// a key, so every install shares it.
+const GeckoID = "mirrormark@chriscz.github.io"
 
 //go:embed manifest.json background.js bind.html bind.js popup.html popup.js
 var Files embed.FS

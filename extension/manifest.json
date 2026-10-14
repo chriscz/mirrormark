@@ -5,6 +5,9 @@
   "description": "Keeps bookmark folders the same across browser profiles through YAML files on this computer.",
   "minimum_chrome_version": "134",
   "permissions": ["alarms", "bookmarks", "nativeMessaging", "storage"],
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
+  "browser_specific_settings": {
+    "gecko": { "id": "mirrormark@chriscz.github.io", "strict_min_version": "128.0" }
+  },
   "action": { "default_title": "mirrormark", "default_popup": "popup.html" }
 }

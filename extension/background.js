@@ -1,7 +1,8 @@
 // mirrormark: sends this profile's bookmark tree to the local mirrormark
 // program and applies the changes it sends back. It stays idle, with no
 // connection, until `mirrormark install` binds the profile to a database.
-// Chrome installs it in every profile, so it never uninstalls itself.
+// Chrome and Firefox install it in every bound profile, so it never
+// uninstalls itself.
 const HOST = "com.github.chriscz.mirrormark";
 const V = 1;
 const QUIET_MS = 500; // send a tree after this long without bookmark events
@@ -11,6 +12,18 @@ const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
 const RECONNECT = "reconnect"; // the alarm's name
 const ROOTS = { "bookmarks-bar": "toolbar", other: "other", mobile: "mobile" };
+// Firefox has no folderType; its top-level folders have fixed ids.
+const FIREFOX_ROOTS = {
+  toolbar_____: "toolbar",
+  unfiled_____: "other",
+  mobile______: "mobile",
+  menu________: "menu",
+};
+const [, BROWSER = "Chrome", VERSION = ""] =
+  navigator.userAgent.match(/(Firefox|Chrome)\/([\d.]+)/) ?? [];
+// Separators exist only in Firefox. The host never sees them: they hold
+// nothing to sync, and Chrome could not hold them.
+const isSeparator = (n) => n.type === "separator";
 
 let port = null;
 let connecting = null;
@@ -34,6 +47,8 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   await chrome.alarms.clear(RECONNECT);
   connect();
 });
+// Firefox lacks onChildrenReordered and the import events; adding a
+// listener to a missing one would stop this script here.
 for (const e of [
   chrome.bookmarks.onCreated,
   chrome.bookmarks.onRemoved,
@@ -42,7 +57,7 @@ for (const e of [
   chrome.bookmarks.onChildrenReordered,
   chrome.bookmarks.onImportEnded,
 ]) {
-  e.addListener(changed);
+  e?.addListener(changed);
 }
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !(changes.db || changes.boundAt)) return;
@@ -113,8 +128,9 @@ async function open() {
       .then(() => onMessage(p, m))
       .catch((e) => console.warn("mirrormark: handling", m.type, "failed:", e));
   });
-  p.onDisconnect.addListener(() => {
-    const err = chrome.runtime.lastError?.message;
+  p.onDisconnect.addListener((dp) => {
+    // Firefox puts the reason on the port; Chrome in runtime.lastError.
+    const err = dp?.error?.message ?? chrome.runtime.lastError?.message;
     if (port !== p) return; // replaced by a newer connection
     port = null;
     // The host's own error says more than "Native host has exited".
@@ -123,10 +139,9 @@ async function open() {
     chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
   });
-  const version = navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] ?? "";
   // The hello goes out in the same task that sets port, so no tree can
   // precede it.
-  p.postMessage({ v: V, type: "hello", db, browser: "chrome/" + version });
+  p.postMessage({ v: V, type: "hello", db, browser: BROWSER.toLowerCase() + "/" + VERSION });
   await sendTree();
 }
 
@@ -145,18 +160,20 @@ async function sendTree() {
   const [root] = await chrome.bookmarks.getTree();
   const nodes = [];
   const walk = (n, parent) =>
-    (n.children ?? []).forEach((c, index) => {
-      nodes.push({
-        id: c.id,
-        parent,
-        index,
-        title: c.title,
-        url: c.url,
-        root: parent === null ? ROOTS[c.folderType] : undefined,
-        syncing: c.syncing || undefined,
+    (n.children ?? [])
+      .filter((c) => !isSeparator(c))
+      .forEach((c, index) => {
+        nodes.push({
+          id: c.id,
+          parent,
+          index,
+          title: c.title,
+          url: c.url,
+          root: parent === null ? (ROOTS[c.folderType] ?? FIREFOX_ROOTS[c.id]) : undefined,
+          syncing: c.syncing || undefined,
+        });
+        walk(c, c.id);
       });
-      walk(c, c.id);
-    });
   walk(root, null);
   post(p, { v: V, type: "tree", nodes });
 }
@@ -191,10 +208,15 @@ async function onMessage(p, m) {
   }
 }
 
-async function clamp(parentId, index) {
+// realIndex turns the host's index, which counts only siblings that are not
+// separators, into the browser's. An index past the end means the end.
+// The host never moves a node within its own parent (reordering stays
+// local), where Firefox and Chrome read the index differently.
+async function realIndex(parentId, index) {
   if (index === undefined) return undefined;
   const kids = await chrome.bookmarks.getChildren(parentId);
-  return Math.min(index, kids.length);
+  const shown = kids.filter((k) => !isSeparator(k));
+  return index < shown.length ? shown[index].index : kids.length;
 }
 
 // matches reports whether node n is as the host expects. Fields the host
@@ -216,7 +238,7 @@ async function applyOp(op) {
       case "create": {
         const n = await chrome.bookmarks.create({
           parentId: parent,
-          index: await clamp(parent, op.index),
+          index: await realIndex(parent, op.index),
           title: op.title,
           url: op.url,
         });
@@ -235,7 +257,7 @@ async function applyOp(op) {
       case "move": {
         const [n] = await chrome.bookmarks.get(op.id);
         if (!matches(n, op.expect)) return { ok: false, error: "stale" };
-        await chrome.bookmarks.move(op.id, { parentId: parent, index: await clamp(parent, op.index) });
+        await chrome.bookmarks.move(op.id, { parentId: parent, index: await realIndex(parent, op.index) });
         return { ok: true };
       }
       case "remove": {
@@ -244,6 +266,14 @@ async function applyOp(op) {
         // Never remove a whole subtree: a folder that is not empty still
         // holds something the host means to keep, and Chrome then refuses
         // the remove.
+        // The host removes a folder only after everything it knows inside,
+        // but it cannot see separators, and neither browser removes a
+        // folder that is not empty.
+        if (n.url === undefined) {
+          for (const k of await chrome.bookmarks.getChildren(op.id)) {
+            if (isSeparator(k)) await chrome.bookmarks.remove(k.id);
+          }
+        }
         await chrome.bookmarks.remove(op.id);
         return { ok: true };
       }
