@@ -42,7 +42,7 @@ We propose plain native messaging, one host process per browser profile, and YAM
 
 ```
  Chrome (personal)       Chrome (work)          mirrormark CLI
-   extension               extension            (install, uninstall, status)
+   extension               extension            (install, uninstall, unpack)
       │ native messaging      │ native messaging        │
  mirrormark host         mirrormark host                │
       └───────── lock, read, write ───┬─────────────────┘
@@ -67,7 +67,7 @@ It runs a **round** on connect, whenever the extension reports a change, and whe
 
 A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A crashed host releases its locks with it.
 
-If another member's file is missing or unreadable, the round skips every union that member belongs to and reports it in `mirrormark status`. It never treats a member it cannot read as empty.
+If another member's file is missing or unreadable, the round skips every union that member belongs to, logs a warning and sends it to the popup. It never treats a member it cannot read as empty.
 
 ### 2. The protocol
 
@@ -144,13 +144,13 @@ unions:
 ```
 
 - A path starts with a top-level folder, `toolbar`, `other` or `mobile`, or the title the browser shows, such as `Bookmarks bar`. `\/` escapes a slash in a title. One profile's paths may not nest.
-- The first round creates a missing member folder and records its `path` and `id`. After that the host checks that the path still leads to that id. If the folder disappears or leaves the path, the host stops syncing that member and reports it in `status`. A missing member folder never means "everything was deleted". To resume, the user restores the folder or points the config at a new path; a path that differs from the recorded one makes the profile a new member (Section 4, First round).
+- The first round creates a missing member folder and records its `path` and `id`. After that the host checks that the path still leads to that id. If the folder disappears or leaves the path, the host stops syncing that member, logs it and sends it to the popup. A missing member folder never means "everything was deleted". To resume, the user restores the folder or points the config at a new path; a path that differs from the recorded one makes the profile a new member (Section 4, First round).
 
 **File safety.**
 
 - **Atomic writes.** Each write goes to a temporary file in the same directory, is flushed to disk, and is renamed over the old file. A crash leaves the old file or the new one, and a reader never sees half a file.
 - **Backups.** Before the first write of each day, the host copies the database file to `backups/<id>/<date>.yaml` and deletes all but the newest 30. Because there is at most one backup a day, a burst of bad rounds cannot rotate away every good copy. Backups are for reading; copying one back over a database file is not a supported recovery.
-- **Hand edits.** The host validates `config.yaml` on every read; if it is invalid, nothing syncs, and `status` and the popup show the error. In a database file, only the profile block may be edited. The host does not detect edits below it: a removed line reads as a deletion and goes to `_deleted` like any other (or, inside `_deleted`, as a purge), and a truncated file trips the wrong-tree guard (Section 4).
+- **Hand edits.** The host validates `config.yaml` on every read; if it is invalid, nothing syncs, and the log and the popup show the error. In a database file, only the profile block may be edited. The host does not detect edits below it: a removed line reads as a deletion and goes to `_deleted` like any other (or, inside `_deleted`, as a purge), and a truncated file trips the wrong-tree guard (Section 4).
 
 ### 4. Union semantics
 
@@ -198,7 +198,7 @@ Changes to different fields combine: a title edit on one side and a URL edit on 
 
 **Why it converges.** Rounds never overlap, because each holds the global lock. A round that writes reads every member file first, so its output contains everything published before it; by induction, the highest-`seq` record of a union contains every published change to it. P's base is a state P published, so it is an ancestor of theirs, which is what a three-way merge needs. A round that fails part-way writes no file, so base stays the last published state; in the next round the writes that did land show up on both sides with the same value (a landed `create` links as an identical add), and the rest is retried. Once users stop editing, each profile's next round brings its browser to the latest state, and a round that changes nothing writes nothing, so the rounds stop.
 
-**Wrong-tree guard.** If a round would move more than half of a member folder's nodes to `_deleted` (and the folder holds more than 5), it writes nothing and answers `error db-mismatch`, shown in the popup and in `status`. This catches a browser that has not finished loading its bookmarks, a reset profile, a database bound to the wrong profile and a truncated file. Without it, each of these would move a whole union into `_deleted` everywhere. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or re-runs `mirrormark install` for that profile, which makes it a new member.
+**Wrong-tree guard.** If a round would move more than half of a member folder's nodes to `_deleted` (and the folder holds more than 5), it writes nothing and answers `error db-mismatch`, shown in the popup and the log. This catches a browser that has not finished loading its bookmarks, a reset profile, a database bound to the wrong profile and a truncated file. Without it, each of these would move a whole union into `_deleted` everywhere. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or re-runs `mirrormark install` for that profile, which makes it a new member.
 
 **Room for "ask which side wins".** The engine is one pure function, `merge.Round(base, ours, theirs Tree, u Union) Result`, returning the ops, the new tree and each conflict with both versions. A later mode would hold a conflict instead of copying it.
 
@@ -212,28 +212,28 @@ google-chrome --profile-directory="Profile 1" "chrome-extension://<id>/bind.html
 
 which opens a tab in that profile (in the running Chrome if there is one). The page stores the database id in `storage.local`, says so, and closes. The page is not web-accessible, so a web page cannot open it. The extension sends the id in every `hello`; an unbound extension stays idle and its popup says to run `mirrormark install`. If the database file is gone or another host holds its lock (a copied profile), the host answers `error` and the popup says why. Reinstalling the extension clears `storage.local`; running `mirrormark install` again rebinds it.
 
-This works in Google Chrome 155 on Linux, with Chrome running or not, once the extension is loaded in that profile (checked in Docker while planning). The first time a profile opens after the extension was installed, the tab can load before the extension does and shows an error. So `install` confirms each binding: the host records each `hello` in a status file, `install` waits up to 4 seconds for it, and opens the page again, up to 3 times.
+This works in Google Chrome 155 on Linux, with Chrome running or not, once the extension is loaded in that profile (checked in Docker while planning). The first time a profile opens after the extension was installed, the tab can load before the extension does and shows an error. So `install` confirms each binding: the host touches `profiles/<id>.lock` on each `hello`, `install` waits up to 4 seconds for its modification time to move, and opens the page again, up to 3 times.
 
 ### 6. Installing
 
 The binary embeds the extension (`go:embed`). `mirrormark install`:
 
 1. lists Chrome's profiles from `~/.config/google-chrome/Local State` (`profile.info_cache`; `--user-data-dir` picks another data directory);
-2. lets the user pick one or more, by number or with `--profile "Profile 1"`; with a single profile it picks that one;
+2. binds every listed profile, or only those named with `--profile "Profile 1"` (repeatable). Binding a profile only creates its database file; nothing syncs until `config.yaml` names it;
 3. unpacks the extension into `~/.local/share/mirrormark/extension/` and packs `mirrormark.crx` beside it;
-4. writes two system files, as root: `/usr/share/google-chrome/extensions/<id>.json` naming the CRX and its exact version, and the native host manifest `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`, which reaches every Chrome data directory. Branded Chrome ignores `--load-extension` since 137 [R12], but on Linux it installs a CRX named this way without a prompt, in every profile [R11] (both directories checked in the spike). If it cannot write them itself, it runs `sudo mirrormark install-system-files …`, which writes only these two files;
-5. for each pick, creates the database file (id `chrome-<profile name>`, label `chrome/<profile name>`, made unique if taken), and `config.yaml` if it is missing;
-6. if step 4 changed either system file, asks the user to restart Chrome and run `mirrormark install` again, because Chrome reads the extensions directory only at startup; otherwise it binds each pick (Section 5).
+4. writes two system files, as root: `/usr/share/google-chrome/extensions/<id>.json` naming the CRX and its exact version, and the native host manifest `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`, which reaches every Chrome data directory. Branded Chrome ignores `--load-extension` since 137 [R12], but on Linux it installs a CRX named this way without a prompt, in every profile [R11] (both directories checked in the spike). If it cannot write them itself, it copies them into place with `sudo install -m 0644`, so the root step runs no mirrormark code;
+5. for each profile it binds, creates the database file (id `chrome-<profile name>`, label `chrome/<profile name>`, made unique if taken), and `config.yaml` if it is missing;
+6. if step 4 changed either system file, asks the user to restart Chrome and run `mirrormark install` again, because Chrome reads the extensions directory only at startup; otherwise it binds each one (Section 5).
 
-Without `sudo`, it writes the host manifest into `<data dir>/NativeMessagingHosts/` instead, which needs no root, and prints the fallback: open `chrome://extensions` in each picked profile, turn on Developer mode, Load unpacked, choose the unpacked folder; then run `mirrormark install` again to bind. The unpacked manifest carries the install's `key`, so the id is the same.
+Without `sudo`, `install` stops and says so; a no-root route is listed under [Later](#later). `mirrormark unpack` does step 3 alone and prints the folder, for Load unpacked while developing. The unpacked manifest carries the install's `key`, so the id is the same as the installed one.
 
 **A key per install.** Chrome derives an extension's id from its public key. `install` generates a key pair with Go's standard crypto, writes the public key into the unpacked extension's manifest `key`, signs the CRX with the private key, puts the id in the host manifest's `allowed_origins`, and keeps the private key in `~/.local/share/mirrormark/extension.pem` (mode `0600`) so upgrades keep the id. No private key is shipped, so an extension built elsewhere does not get this install's id. An upgrade re-signs with the same key and raises `external_version` so Chrome picks up the new build.
 
-`mirrormark uninstall` removes the host manifests, the preferences file, the unpacked extension and the CRX, and keeps the YAML files and the key unless given `--purge`. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
+`mirrormark uninstall` removes the host manifest, the preferences file, the unpacked extension and the CRX, and keeps the YAML files and the key unless given `--purge`. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
 
 ### 7. Extension and code
 
-The extension is thin: Manifest V3, permissions `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. It sends trees, applies ops, and shows the bound profile, the last batch and any error in its popup. Besides `install` and `uninstall`, the CLI has `status` (profiles, unions, last rounds, errors, log path) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
+The extension is thin: Manifest V3, permissions `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. It sends trees, applies ops, and shows the bound profile and the last error in its popup. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
 
 One Go module, `github.com/chriscz/mirrormark`. Its only third-party dependency is `go.yaml.in/yaml/v3`, the YAML organisation's continuation of the archived `gopkg.in/yaml.v3` [R16]. Locking uses `syscall.Flock`; the CRX3 file is written with the standard library.
 
@@ -267,9 +267,10 @@ As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with p
 
 - **`_deleted` grows** in every member until the user empties it.
 - **Merge clutter.** Each conflict leaves suffixed copies to tidy.
-- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; `status` and the popup show the warning.
+- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; the log and the popup show the warning.
 - **One slow browser stalls everyone.** A round holds the global lock while its browser applies ops, up to the 10-second timeout.
-- **The CRX route needs root and reaches every profile.** Users who refuse `sudo` get the manual fallback, which is tested by hand only.
+- **The CRX route needs root and reaches every profile.** Users who refuse `sudo` cannot install this version.
+- **`install` opens a window in every profile it binds.** With many profiles, `--profile` limits it.
 - **Installation depends on undocumented files** (`Local State`, the preferences-file directory) that Chrome may change.
 - **The guard can refuse real changes.** Removing most of a member folder at once trips it; moving the bookmarks into `_deleted` does not.
 - **No export yet.** Recovering from a bad sync means `_deleted`, the YAML backups read by hand, or the browser's own bookmark export made beforehand; `install` suggests making one.
@@ -285,8 +286,8 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
 2. **Extension and host.** The extension, the host, the bind page, and writing the database file. **Tests:** a Go fake extension drives the host. **Exit:** passes.
 3. **`mirrormark install`.**
    - **Tests:** in the dev image, whose two system directories are writable so `install` needs no `sudo`, `install` runs against Google Chrome stable in two data directories driven over the DevTools pipe, once with fresh profiles and once with used ones.
-   - **Exit:** in both runs the extension is enabled and bound, and reaches the host with no user action beyond the restart. The fallback is tried by hand once and recorded in the PR.
-4. **Union sync.** Writes, `_deleted`, purges, `status`, the guard. **Tests:** e2e with two Chrome instances in one union covering each example in Section 4, one browser closed while the other changes, and the latency target. **Exit:** all pass, and a run on the developer's Chrome with test profiles is recorded in the PR.
+   - **Exit:** in both runs the extension is enabled and bound, and reaches the host with no user action beyond the restart.
+4. **Union sync.** Writes, `_deleted`, purges, the guard. **Tests:** e2e with two Chrome instances in one union covering each example in Section 4, one browser closed while the other changes, and the latency target. **Exit:** all pass, and a run on the developer's Chrome with test profiles is recorded in the PR.
 
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
@@ -301,6 +302,8 @@ Each is its own RFC or stack once the Chrome version works.
 - **Flatpak and Snap browsers**, which restrict native messaging.
 - **Windows and macOS**, which refuse local CRX files [R11].
 - **Release packaging**: `make release` and a README tested in a fresh container.
+- **`mirrormark status`**, summarising profiles, unions, last rounds and errors; until then the log and the popup carry them.
+- **A no-root install**: a per-user host manifest in `<data dir>/NativeMessagingHosts/` plus Load unpacked in each profile.
 
 ## Success criteria
 
@@ -311,9 +314,9 @@ Each is its own RFC or stack once the Chrome version works.
 
 ## Security, privacy, operational impact
 
-- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step writes one JSON file naming a CRX in the user's data directory.
+- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary.
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes them.
-- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log` and records its last `hello`, round and error in `~/.local/state/mirrormark/<id>.status.yaml`, which `status` and `install` read; `status` prints the log path.
+- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path.
 
 ## Open questions
 
@@ -344,3 +347,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-14 — draft
 - 2026-10-14 — cut to a minimal Chrome-only version: three-way merge replaces per-node versions and the purge list; install-time binding replaces the popup claim; checksum, export and preview dropped or deferred; Firefox moved to Later.
 - 2026-10-14 — while planning: database files record only member folders, with `seq` per union record; bind URL and install directories verified in Docker; install runs in two passes around the Chrome restart and confirms each binding; plain JavaScript extension; Go DevTools-pipe e2e driver instead of Puppeteer.
+- 2026-10-15 — trimmed for the minimal version: no `mirrormark status` or status files (install confirms a binding by the lock file's mtime; errors go to the log and the popup); `sudo install` replaces the `install-system-files` subcommand; no no-root fallback; `install` binds every profile unless `--profile` narrows it; `unpack` added.
