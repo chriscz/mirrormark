@@ -1,0 +1,5 @@
+FROM spike-chrome:latest
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends unzip python3 curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSLo /tmp/c.zip https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.79/linux64/chrome-linux64.zip \
+ && sha256sum /tmp/c.zip && unzip -q /tmp/c.zip -d /opt/cft && rm /tmp/c.zip
