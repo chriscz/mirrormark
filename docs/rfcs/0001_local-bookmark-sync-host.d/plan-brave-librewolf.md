@@ -27,7 +27,7 @@
   - Profile root: `$XDG_CONFIG_HOME/<XDGRoot>` (`~/.config/<XDGRoot>` when unset or relative) if it holds `profiles.ini`, else `~/<HomeRoot>`.
   - One per-user host manifest for both: `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json`. The XPI, the three `user.js` lines and `ResetPrefs` are unchanged.
 - **Shared-file rules.** Chromium: an uninstall removes the CRX, the unpacked extension and the host manifest only if no other Chromium browser's external file for the id is in place (under `sysroot`); `--purge` deletes the key only if, in addition, no other Chromium browser's database is left. Gecko: an uninstall removes the host manifest only if no database of another Gecko browser names a profile that still holds the XPI.
-- **Install refreshes the other Chromium browser's external file** when it is present, writes only the system files that differ, and names the refreshed browsers ("Chrome picks up the new build when it next starts.").
+- **Install writes only the browser asked for:** its external file and the shared host manifest, never another browser's file, so nothing is created under a browser that is not installed. After an upgrade the user runs `install` once per browser.
 - **Never-run Gecko profiles** (no `compatibility.ini`): skipped with `skipped: <name>: …` on stdout when no `--profile` was given; refused when named; `install` stops if every listed profile was skipped.
 - Dev image: Brave `1.97.57`, `https://brave-browser-apt-release.s3.brave.com/pool/main/b/brave-browser/brave-browser_1.97.57_amd64.deb`, sha256 `d79919a82aa869cf5121b641afa79958730c4bdaf36a0c51ae0f9c32f9c16bb9`. LibreWolf `158.0-1`, `https://dl.librewolf.net/librewolf/158.0-1/librewolf-158.0-1-linux-x86_64-package.tar.xz`, sha256 `34bb7296feec0c6823abdfaf4fd50e47e9eada9cb4a5ed16e111a951dc9eb16c`, unpacked to `/opt/librewolf`.
 - The e2e harness keeps writing `user_pref("remote.prefs.recommended", false);` into every Gecko profile it prepares: the remote agent's recommended prefs set `extensions.autoDisableScopes` to 0.
@@ -47,7 +47,7 @@ From the spikes (2026-10-15, Docker): Brave's external directory, enabled instal
 internal/chrome/
   profiles.go        Browser, Chrome, Browsers, Lookup, InstallCommand,
                      DefaultUserDataDir, Profiles (Task 1); Brave (Task 4)
-  files.go           ExternalFile, HostManifestPath, SystemFiles(bs, …) (Task 1)
+  files.go           ExternalFile, HostManifestPath, Browser.SystemFiles (Task 1)
   bind.go            Browser.Bind (Task 1)
   chrome_test.go
 internal/firefox/
@@ -85,7 +85,7 @@ func (b Browser) DefaultUserDataDir() (string, error)
 func (b Browser) Profiles(userDataDir string) ([]Profile, error)
 func (b Browser) ExternalFile(id string) string
 func HostManifestPath() string
-func SystemFiles(bs []Browser, e Extension, bin string) []File   // one external file per browser, in order, then the host manifest
+func (b Browser) SystemFiles(e Extension, bin string) []File      // b's external file, then the host manifest
 func (b Browser) Bind(bin, userDataDir, profileDir, extID, dbID string, bound func(since time.Time) bool) error
 // removed: ExternalDir const, SystemFilePaths, package-level DefaultUserDataDir, Profiles, Bind
 
@@ -106,8 +106,7 @@ func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, 
 func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error                                  // Task 2
 func finishUninstall(p db.Paths, browser, name string, purge bool, stdout, stderr io.Writer) int               // Task 2
 func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, stdout, stderr io.Writer) int     // Task 4
-func chromiumUsers(b chrome.Browser, id string) []chrome.Browser                                               // Task 4
-func browserNames(bs []chrome.Browser) string                                                                  // Task 4
+func chromiumUsers(b chrome.Browser, id string) []string                                                       // Task 4: names
 
 // e2e (Task 7)
 var bins map[string]string        // kind → command
@@ -143,7 +142,7 @@ Tasks 1–2 change nothing a user sees except messages that now name the browser
 
 **Interfaces:**
 - Consumes: the code as it is.
-- Produces: `chrome.Browser`, `chrome.Chrome`, `chrome.Browsers`, `chrome.Lookup`, `Browser.InstallCommand`, `Browser.DefaultUserDataDir`, `Browser.Profiles`, `Browser.ExternalFile`, `chrome.HostManifestPath`, `chrome.SystemFiles(bs, e, bin)`, `Browser.Bind`. Removes `ExternalDir`, `SystemFilePaths` and the package-level `DefaultUserDataDir`, `Profiles`, `Bind`.
+- Produces: `chrome.Browser`, `chrome.Chrome`, `chrome.Browsers`, `chrome.Lookup`, `Browser.InstallCommand`, `Browser.DefaultUserDataDir`, `Browser.Profiles`, `Browser.ExternalFile`, `chrome.HostManifestPath`, `Browser.SystemFiles(e, bin)`, `Browser.Bind`. Removes `ExternalDir`, `SystemFilePaths` and the package-level `DefaultUserDataDir`, `Profiles`, `Bind`.
 
 Behaviour is unchanged: every output line and every file Chrome's install writes stays byte for byte the same, so the existing tests are the regression test once their call sites are updated.
 
@@ -153,7 +152,7 @@ In `internal/chrome/chrome_test.go`:
 - `DefaultUserDataDir()` → `Chrome.DefaultUserDataDir()` (3 places);
 - `Profiles(udd)` → `Chrome.Profiles(udd)` (every call);
 - `Bind(` → `Chrome.Bind(` (every call);
-- in `TestSystemFiles`, `SystemFiles(e, "/usr/local/bin/mirrormark")` → `SystemFiles([]Browser{Chrome}, e, "/usr/local/bin/mirrormark")`, and replace its last check with:
+- in `TestSystemFiles`, `SystemFiles(e, "/usr/local/bin/mirrormark")` → `Chrome.SystemFiles(e, "/usr/local/bin/mirrormark")`, and replace its last check with:
 
 ```go
 	if fs[0].Path != Chrome.ExternalFile(e.ID) || fs[1].Path != HostManifestPath() || len(fs) != 2 {
@@ -177,7 +176,7 @@ func TestLookup(t *testing.T) {
 }
 ```
 
-In `cmd/mirrormark/install_test.go`, replace each `chrome.SystemFilePaths(id)` (and `chrome.SystemFilePaths(chrome.ExtensionID(...))`) with `[]string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}` using the same id expression, and in `TestUninstallLeavesAnotherExtensionsHostManifest` replace `chrome.SystemFiles(chrome.Extension{…}, "/bin/x")[1]` with `chrome.SystemFiles([]chrome.Browser{chrome.Chrome}, chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]`.
+In `cmd/mirrormark/install_test.go`, replace each `chrome.SystemFilePaths(id)` (and `chrome.SystemFilePaths(chrome.ExtensionID(...))`) with `[]string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}` using the same id expression, and in `TestUninstallLeavesAnotherExtensionsHostManifest` replace `chrome.SystemFiles(chrome.Extension{…}, "/bin/x")[1]` with `chrome.Chrome.SystemFiles(chrome.Extension{…}, "/bin/x")[1]` (same literal).
 
 - [ ] **Step 2: Run to see them fail**
 
@@ -281,15 +280,14 @@ func (b Browser) ExternalFile(id string) string { return filepath.Join(b.Externa
 // reads.
 func HostManifestPath() string { return filepath.Join(SystemHostDir, extension.HostName+".json") }
 
-// SystemFiles are the external extension file of each browser in bs, in
-// order, then the host manifest that lets the extension start bin.
-func SystemFiles(bs []Browser, e Extension, bin string) []File {
-	var files []File
-	for _, b := range bs {
-		files = append(files, File{b.ExternalFile(e.ID), indented(externalJSON{CRX: e.CRX, Version: e.Version})})
+// SystemFiles are the two files that tell b about the extension and let it
+// start bin as the native host: b's external file, then the host manifest.
+func (b Browser) SystemFiles(e Extension, bin string) []File {
+	return []File{
+		{b.ExternalFile(e.ID), indented(externalJSON{CRX: e.CRX, Version: e.Version})},
+		{HostManifestPath(), indented(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
+			Path: bin, Type: "stdio", AllowedOrigins: []string{"chrome-extension://" + e.ID + "/"}})},
 	}
-	return append(files, File{HostManifestPath(), indented(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
-		Path: bin, Type: "stdio", AllowedOrigins: []string{"chrome-extension://" + e.ID + "/"}})})
 }
 ```
 
@@ -330,7 +328,7 @@ In `cmdInstall`, replace the `switch *browser { … }` with:
 
 and in the rest of the Chrome path:
 - `chrome.DefaultUserDataDir()` → `cb.DefaultUserDataDir()`, `chrome.Profiles(*udd)` → `cb.Profiles(*udd)`;
-- `system := chrome.SystemFiles(ext, self)` → `system := chrome.SystemFiles([]chrome.Browser{cb}, ext, self)`; after the `sysroot` loop add `host := system[len(system)-1]` and use `host.Path` where the code reads `system[1].Path`;
+- `system := chrome.SystemFiles(ext, self)` → `system := cb.SystemFiles(ext, self)` (the rest of that block, `system[1]` included, is unchanged);
 - the sudo failure: `fmt.Errorf("could not copy the files %s needs into place (with sudo): %w", cb.Name, err)`;
 - `ensureDB(p, "chrome", …)` → `ensureDB(p, cb.Config, …)`;
 - the restart line: `fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())`;
@@ -768,7 +766,7 @@ In `Check`, the `compatibility.ini` read becomes:
 
 **Interfaces:**
 - Consumes: Task 1.
-- Produces: `chrome.Brave`; `chromiumUsers`, `browserNames`; `finishUninstall(p, browser, name, purge, keyInUse, stdout, stderr)`.
+- Produces: `chrome.Brave`; `chromiumUsers`; `finishUninstall(p, browser, name, purge, keyInUse, stdout, stderr)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -785,10 +783,6 @@ func TestBraveDescription(t *testing.T) {
 	}
 	if b, ok := Lookup("brave"); !ok || b != Brave || Brave.InstallCommand() != "mirrormark install --browser brave" {
 		t.Fatalf("lookup %+v %v", b, ok)
-	}
-	fs := SystemFiles([]Browser{Brave, Chrome}, Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/c.crx"}, "/bin/m")
-	if len(fs) != 3 || fs[0].Path != Brave.ExternalFile("pjjjaeommfpeolloibnafkcmkindkagl") || !bytes.Equal(fs[0].Data, fs[1].Data) || fs[2].Path != HostManifestPath() {
-		t.Fatalf("files %v", fs)
 	}
 }
 ```
@@ -889,31 +883,6 @@ func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
 	}
 }
 
-// Every external file names the one CRX and its version, so installing
-// into one browser brings the other's file up to date.
-func TestInstallRefreshesTheOtherBrowsersExternalFile(t *testing.T) {
-	skipIfRoot(t)
-	p := testHome(t)
-	root, _ := fakeSystem(t)
-	fakeChromeOnPath(t, p)
-	installChromium(t, "chrome")
-	chromeFile := filepath.Join(root, chrome.Chrome.ExternalFile(installedID(t, p)))
-	current, err := os.ReadFile(chromeFile)
-	must(t, err)
-	// What an older build left behind.
-	must(t, runSudo(strings.NewReader(`{"external_crx": "/old.crx", "external_version": "0.0.1"}`), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", chromeFile))
-	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", chromeData(t)}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
-	}
-	if data, _ := os.ReadFile(chromeFile); !bytes.Equal(data, current) {
-		t.Fatalf("Chrome's file %s", data)
-	}
-	if !strings.Contains(out.String(), "Chrome picks up the new build when it next starts.") {
-		t.Fatalf("output:\n%s", out.String())
-	}
-}
-
 // The key fixes the id both browsers use; purging Brave keeps it while
 // Chrome is installed.
 func TestBravePurgeKeepsTheKeyWhileChromeIsInstalled(t *testing.T) {
@@ -958,77 +927,24 @@ var Browsers = []Browser{Chrome, Brave}
 Add:
 
 ```go
-// chromiumUsers lists the Chromium browsers other than b whose external
+// chromiumUsers names the Chromium browsers other than b whose external
 // extension file for id is in place: they still use the CRX and the host
 // manifest b shares with them.
-func chromiumUsers(b chrome.Browser, id string) []chrome.Browser {
-	var out []chrome.Browser
+func chromiumUsers(b chrome.Browser, id string) []string {
+	var out []string
 	for _, o := range chrome.Browsers {
 		if o.Config == b.Config {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(sysroot, o.ExternalFile(id))); err == nil {
-			out = append(out, o)
+			out = append(out, o.Name)
 		}
 	}
 	return out
 }
-
-// browserNames joins the browsers' names for a message.
-func browserNames(bs []chrome.Browser) string {
-	var s []string
-	for _, b := range bs {
-		s = append(s, b.Name)
-	}
-	return strings.Join(s, " and ")
-}
 ```
 
-In `cmdInstall`, replace the lines from `system := …` to the end of `if !ready { … }` with:
-
-```go
-	// Every external file names the one CRX and its version; one left at an
-	// older version would keep its browser on the old build.
-	others := chromiumUsers(cb, ext.ID)
-	system := chrome.SystemFiles(append([]chrome.Browser{cb}, others...), ext, self)
-	for i := range system {
-		system[i].Path = filepath.Join(sysroot, system[i].Path)
-	}
-	host := system[len(system)-1]
-	stale := slices.DeleteFunc(slices.Clone(system), func(f chrome.File) bool { return chrome.FilesCurrent([]chrome.File{f}) })
-	var refreshed []chrome.Browser
-	for i, o := range others {
-		if slices.ContainsFunc(stale, func(f chrome.File) bool { return f.Path == system[i+1].Path }) {
-			refreshed = append(refreshed, o)
-		}
-	}
-	// Current files mean an earlier run wrote them and asked for the
-	// restart, so the extension is installed and profiles can be bound now.
-	ready := len(stale) == 0
-	if !ready {
-		// The host manifest's name is fixed, so another install's (another
-		// user's key, say) is in the same place; replacing it cuts that
-		// install off from its host.
-		if data, err := os.ReadFile(host.Path); err == nil && !namesExtension(data, ext.ID) {
-			fmt.Fprintf(stderr, "mirrormark: warning: %s lets another extension, not %s, start mirrormark; replacing it. If another install of mirrormark (with another key) uses it, that one stops working.\n", host.Path, ext.ID)
-		}
-		if err := writeSystemFiles(stale, stdout, stderr); err != nil {
-			return fail(fmt.Errorf("could not copy the files %s needs into place (with sudo): %w", cb.Name, err))
-		}
-	}
-```
-
-and the restart block:
-
-```go
-	if !ready {
-		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
-		if len(refreshed) > 0 {
-			fmt.Fprintf(stdout, "%s picks up the new build when it next starts.\n", browserNames(refreshed))
-		}
-		return 0
-	}
-```
+`cmdInstall` keeps Task 1's shape: it writes `cb.SystemFiles(ext, self)`, that is `cb`'s external file and the host manifest, and never another browser's file. An install for Brave on a computer without Brave fails at `cb.Profiles` (no `Local State`) before anything is written, so it creates nothing under `/opt/brave.com`.
 
 `writeSystemFiles`: the line becomes `fmt.Fprintln(stdout, "The browser reads these files only from root's directories; writing them with sudo:")` and its comment "writes the browsers' root-owned files". `removeSystemFiles`: `fmt.Fprintln(stdout, "Removing these files needs root:\n  sudo", strings.Join(args, " "))`.
 
@@ -1038,7 +954,7 @@ In `cmdUninstall`, the Chrome path becomes:
 	keyFile := filepath.Join(p.Data, "extension.pem")
 	key, err := chrome.LoadKey(keyFile)
 	host := filepath.Join(sysroot, chrome.HostManifestPath())
-	var users []chrome.Browser // other Chromium browsers that still have the extension
+	var users []string // other Chromium browsers that still have the extension
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
@@ -1069,7 +985,7 @@ In `cmdUninstall`, the Chrome path becomes:
 	}
 	fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
 	if len(users) > 0 {
-		fmt.Fprintf(stdout, "Kept the CRX and the host manifest, which %s still uses.\n", browserNames(users))
+		fmt.Fprintf(stdout, "Kept the CRX and the host manifest, which %s still uses.\n", strings.Join(users, " and "))
 	}
 	return finishUninstall(p, cb.Config, cb.Name, *purge, len(users) > 0, stdout, stderr)
 ```
@@ -1111,7 +1027,7 @@ and `if browser == "chrome" { files = append(files, …extension.pem) }` becomes
 
 Flag help and the two `--browser` errors: `"chrome, brave or firefox"`; `--user-data-dir`'s help: `"the browser's data directory (default ~/.config/google-chrome for Chrome, ~/.config/BraveSoftware/Brave-Browser for Brave), or Firefox's profiles directory"`. In `main.go`'s usage: `install     Install into Google Chrome, Brave or Firefox Developer Edition and bind its profiles`, `[--browser chrome|brave|firefox]` in both commands, `uninstall   Remove from a browser; keeps your files unless --purge`.
 
-- [ ] **Step 5: README.** Status line: "It works with Google Chrome, Brave and Firefox Developer Edition on Linux." In the Chrome section's step 3, add: "Chrome's extensions page may show a Safety Check card saying it can't verify where mirrormark comes from; mirrormark stays on." In "Upgrade, uninstall, unpack", "unless a Firefox profile's database is left: Firefox's profiles still sync through them, and Firefox's `uninstall` needs those databases to find its profiles" → "unless another browser's database is left: its profiles still sync through them, and its `uninstall` needs those databases to find its profiles", and "it writes both files again" (in "What `sudo` does") → "it writes the files that are not up to date". After the Chrome section, add:
+- [ ] **Step 5: README.** Status line: "It works with Google Chrome, Brave and Firefox Developer Edition on Linux." In "Upgrade, uninstall, unpack", "unless a Firefox profile's database is left: Firefox's profiles still sync through them, and Firefox's `uninstall` needs those databases to find its profiles" → "unless another browser's database is left: its profiles still sync through them, and its `uninstall` needs those databases to find its profiles". After the Chrome section, add:
 
 ```markdown
 ## Install (Brave on Linux)
@@ -1128,14 +1044,13 @@ Linux)](#install-google-chrome-on-linux)), with `--browser brave`:
    `mirrormark install --browser brave` again to bind the profiles. Profile
    ids start with `brave-`, labels with `brave/`.
 
-Like Chrome, Brave shows a Safety Check card saying it can't verify where
-mirrormark comes from; mirrormark stays on. Brave reopens your last session
+Brave's extensions page may show a Safety Check card saying it can't verify
+where mirrormark comes from; mirrormark stays on. Brave reopens your last session
 when it starts, so a bind tab left from a failed try may open again and bind
 the profile again to the same database; that is harmless.
 
-Installing into Chrome or Brave also updates the other's file if it is there,
-so after an upgrade the other picks up the new build at its next start.
-`mirrormark uninstall --browser brave` removes Brave's file. It keeps the
+After upgrading mirrormark, run `mirrormark install --browser brave` as well
+as `mirrormark install` if you use both. `mirrormark uninstall --browser brave` removes Brave's file. It keeps the
 CRX and the host manifest while Chrome still has mirrormark installed, and
 `--purge` keeps the key while Chrome has it installed or a Chrome profile's
 database is left; the same goes for Chrome while Brave has it.
@@ -1630,8 +1545,8 @@ In `e2e/browser.go`: `Kind string // a key of bins`; `func launch(t *testing.T, 
 
 ```go
 // TestBraveInstallAndBind: Brave installs the extension under Chrome's id
-// and binds as Chrome does, and uninstalling Brave leaves Chrome reaching
-// its host.
+// and binds as Chrome does, and uninstalling Brave leaves the host manifest
+// Chrome uses in place.
 func TestBraveInstallAndBind(t *testing.T) {
 	e := setupPair(t, "chrome", "brave")
 	if !strings.HasPrefix(e.DBB, "brave-") {
@@ -1644,9 +1559,6 @@ func TestBraveInstallAndBind(t *testing.T) {
 	}](t, e.B, `chrome.management.getSelf()`)
 	if self.ID != e.ExtID || self.InstallType != "sideload" || !self.Enabled {
 		t.Errorf("Brave: extension %+v, want id %s, sideload, enabled", self, e.ExtID)
-	}
-	if got := eval[string](t, e.B, `chrome.storage.local.get("db").then((r) => r.db)`); got != e.DBB {
-		t.Errorf("Brave is bound to %q, want %q", got, e.DBB)
 	}
 	d, err := db.LoadDB(e.Paths.ProfileFile(e.DBB))
 	if err != nil || d.Profile.Browser != "brave" || d.Profile.Path != filepath.Join(e.B.UDD, "Default") {
@@ -1663,14 +1575,11 @@ func TestBraveInstallAndBind(t *testing.T) {
 	if _, err := os.Stat(chrome.HostManifestPath()); err != nil {
 		t.Fatalf("the host manifest went with Brave: %v", err)
 	}
-	before := time.Now()
-	e.A.Close()
-	e.A = e.launch("a")
-	eventually(t, 15*time.Second, "Chrome's hello after Brave's uninstall", func() bool { return db.Connected(e.Paths, e.DBA, before) })
 }
 
 // TestLibreWolfInstallAndBind: LibreWolf takes Developer Edition's route,
-// and uninstalling it leaves Developer Edition reaching its host.
+// and uninstalling it resets its prefs and leaves the host manifest
+// Developer Edition uses in place.
 func TestLibreWolfInstallAndBind(t *testing.T) {
 	e := setupPair(t, "librewolf", "firefox")
 	if e.DBA != "librewolf-a" || e.DBB != "firefox-b" {
@@ -1679,22 +1588,14 @@ func TestLibreWolfInstallAndBind(t *testing.T) {
 	if got := eval[string](t, e.A, `chrome.runtime.id`); got != extension.GeckoID {
 		t.Errorf("LibreWolf: extension id %q", got)
 	}
-	if got := eval[string](t, e.A, `chrome.storage.local.get("db").then((r) => r.db)`); got != e.DBA {
-		t.Errorf("LibreWolf is bound to %q, want %q", got, e.DBA)
-	}
 	d, err := db.LoadDB(e.Paths.ProfileFile(e.DBA))
 	if err != nil || d.Profile.Browser != "librewolf" || d.Profile.Path != e.A.UDD {
 		t.Errorf("%s database %+v, %v", e.DBA, d, err)
 	}
 	roundDone(t, e.A, "LibreWolf's round after binding")
 	roundDone(t, e.B, "Developer Edition's round after binding")
-	// resistFingerprinting keeps Firefox's user agent.
-	if !strings.Contains(hostLog(t, e), "browser=firefox/158.0") {
-		t.Error("no hello from firefox/158.0 in the host log")
-	}
 
 	e.A.Close()
-	e.B.Close()
 	e.mm(t, "uninstall", "--browser", "librewolf")
 	if _, err := os.Stat(firefox.XPIPath(e.udd("a"))); !os.IsNotExist(err) {
 		t.Errorf("the XPI is still in LibreWolf's profile: %v", err)
@@ -1705,9 +1606,6 @@ func TestLibreWolfInstallAndBind(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.Home, ".mozilla", "native-messaging-hosts", extension.HostName+".json")); err != nil {
 		t.Fatalf("the host manifest went with LibreWolf: %v", err)
 	}
-	before := time.Now()
-	e.B = e.launch("b")
-	eventually(t, 15*time.Second, "Developer Edition's hello after LibreWolf's uninstall", func() bool { return db.Connected(e.Paths, e.DBB, before) })
 }
 ```
 
@@ -1752,5 +1650,5 @@ var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox"
 - **Brave in the dev image.** The spike ran Brave with `--no-sandbox --no-first-run` under Xvfb but not with the harness's `--remote-debugging-pipe` and `--disable-dev-shm-usage` together; Task 7 Step 2 shows it at once.
 - **LibreWolf's slow first start** (over 10 s in the spike's container) sits close to the 15 s waits. Task 7 stops rather than widening them.
 - **Test time** grows by one sync pair and two install tests, about a third. Use `RUN=` while developing.
-- **Writing only stale system files** (Task 4) changes Chrome's install slightly: a second run after a partly failed `sudo` writes only the missing file. The README says so.
+- **Upgrades are per browser.** Install writes only the browser asked for, so a user who upgrades and runs `install` for Chrome but not Brave keeps Brave on the old build until `install --browser brave`; the README says to run both. Accepted in the RFC.
 - **Accepted, untested:** Brave package upgrades and removal touching `/opt/brave.com/brave/extensions/`, Brave Sync, LibreWolf's other packagings and stricter sanitize settings. All stay in the RFC's risks.
