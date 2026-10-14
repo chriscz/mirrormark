@@ -44,6 +44,26 @@ is signed by Mozilla.
   also works, but it lives in Firefox's installation directory, applies to
   every profile of every user, and marks Firefox as managed. Rejected.
 
+**`autoDisableScopes` 14 instead of 0** (checked later the same day, same
+image). `autoDisableScopes` is a bitmask of scopes whose sideloaded add-ons
+start disabled (profile 1, user 2, application 4, system 8; default 15), so 0
+also enables unsigned add-ons dropped into `~/.mozilla/extensions` or a
+system directory. 14 clears only the profile bit. The drop-in was rerun as in
+`exp1c.sh`, with the three lines appended to `user.js` and two starts of 15 s
+each, reading the add-on from `extensions.json`:
+
+| `autoDisableScopes` | Profile | Each start |
+| --- | --- | --- |
+| 14 | fresh | `active: true, userDisabled: false, location: app-profile`; the background connected to the host (`onInstalled:install`, then `onStartup`) |
+| 14 | started once without the add-on | the same |
+| 0 | fresh, and started once | the same |
+| 15 | fresh, and started once | `active: false, userDisabled: true, seen: false`: installed disabled, awaiting the user's consent |
+
+So 14 is enough, and mirrormark uses it. An unsigned add-on placed in the user
+scope (`~/.mozilla/extensions/{ec8030f7-…}/` and `~/.config/mozilla/extensions/{ec8030f7-…}/`)
+was not picked up at all in this build, with 14 or 0, so the gain over 0 was
+not observed directly; it rests on the bitmask.
+
 ## One manifest for both browsers
 
 Adding these keys to the existing `manifest.json` is enough:

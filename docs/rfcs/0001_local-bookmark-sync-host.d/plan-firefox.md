@@ -20,9 +20,10 @@
 - Firefox root ids → config keywords: `toolbar_____` → `toolbar`, `unfiled_____` → `other`, `mobile______` → `mobile`, `menu________` → `menu`. `menu` is valid only for Firefox members.
 - `user.js` lines `install` adds, exactly:
   `user_pref("xpinstall.signatures.required", false);`
-  `user_pref("extensions.autoDisableScopes", 0);`
+  `user_pref("extensions.autoDisableScopes", 14);`
   `user_pref("extensions.startupScanScopes", 1);`
   `uninstall` writes `user_pref("xpinstall.signatures.required", true);` and `user_pref("extensions.autoDisableScopes", 15);` in place of the first two.
+  14 clears only the profile bit of the default 15 (profile 1, user 2, application 4, system 8), so add-ons sideloaded into the other scopes still start disabled and ask.
 - Per-user native host manifest: `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json`, with `allowed_extensions`. Never `~/.config/mozilla/native-messaging-hosts/`.
 - XPI path: `<profile>/extensions/mirrormark@chriscz.github.io.xpi`. The UUID comes from `extensions.webextensions.uuids` in `<profile>/prefs.js`; never write that pref.
 - Firefox binary: `<LastPlatformDir>/firefox` from `<profile>/compatibility.ini`; channel from `<LastPlatformDir>/defaults/pref/channel-prefs.js`. Only channel `aurora` is accepted.
@@ -789,6 +790,24 @@ func TestFilesAppendOnlyMissingPrefs(t *testing.T) {
 	}
 }
 
+func TestPrefsAndTheirResets(t *testing.T) {
+	want := []string{
+		`user_pref("xpinstall.signatures.required", false);`,
+		`user_pref("extensions.autoDisableScopes", 14);`,
+		`user_pref("extensions.startupScanScopes", 1);`,
+	}
+	if !slices.Equal(Prefs, want) {
+		t.Fatalf("Prefs %q", Prefs)
+	}
+	resets := map[string]string{
+		`user_pref("xpinstall.signatures.required", false);`: `user_pref("xpinstall.signatures.required", true);`,
+		`user_pref("extensions.autoDisableScopes", 14);`:     `user_pref("extensions.autoDisableScopes", 15);`,
+	}
+	if !maps.Equal(ResetPrefs, resets) {
+		t.Fatalf("ResetPrefs %q", ResetPrefs)
+	}
+}
+
 func TestChannelFromTheProfilesFirefox(t *testing.T) {
 	ff := t.TempDir()
 	os.MkdirAll(filepath.Join(ff, "defaults", "pref"), 0o755)
@@ -827,11 +846,13 @@ package firefox
 
 // Prefs are the user.js lines that let Firefox Developer Edition install
 // the unsigned XPI from the profile's extensions folder, enabled and
-// without a prompt, at its next start. The last makes a profile that has
-// run before look in that folder at all.
+// without a prompt, at its next start. autoDisableScopes 14 clears only
+// the profile bit of the default 15, so add-ons sideloaded into the user,
+// application or system scopes still start disabled. The last makes a
+// profile that has run before look in that folder at all.
 var Prefs = []string{
 	`user_pref("xpinstall.signatures.required", false);`,
-	`user_pref("extensions.autoDisableScopes", 0);`,
+	`user_pref("extensions.autoDisableScopes", 14);`,
 	`user_pref("extensions.startupScanScopes", 1);`,
 }
 
@@ -1259,7 +1280,8 @@ const firefoxSafety = `Firefox installs only add-ons Mozilla signed unless a pro
 otherwise, and mirrormark is not signed. So install sets, in each profile's
 user.js, xpinstall.signatures.required to false (that profile then accepts
 any unsigned add-on, not only mirrormark) and extensions.autoDisableScopes
-to 0 (an add-on file in the profile starts enabled without asking).
+to 14 (an add-on file in the profile's extensions folder starts enabled
+without asking; add-ons elsewhere still ask).
 mirrormark uninstall --browser firefox sets them back.`
 
 // installFirefox installs into Firefox Developer Edition profiles, as the
