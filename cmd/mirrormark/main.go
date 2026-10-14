@@ -31,7 +31,7 @@ Commands:
               [--browser chrome|firefox] [--purge]
   unpack      Write the extension, with this install's key, for Load unpacked
               [DIR]
-  host        Run as the native messaging host (Chrome does this)
+  host        Run as the native messaging host (the browser does this)
   help        Show this help
 `
 
