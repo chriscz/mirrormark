@@ -151,6 +151,9 @@ func Make(in Input) Plan {
 // Finish fills in the ids of created nodes and reports whether the database
 // file changes. Only changed union records get a new seq, so a round that
 // changes nothing writes nothing and the rounds stop.
+//
+// It does not look at op results: call it only after the browser made every
+// op in Ops. If any op failed, write no file and let the next round retry.
 func (p Plan) Finish(created map[string]string) (*db.DB, bool, error) {
 	changed := false
 	for name := range p.self.Unions {

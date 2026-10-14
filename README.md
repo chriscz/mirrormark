@@ -57,6 +57,15 @@ a folder name. One profile's folders may not be inside each other.
   nothing.
 - While any member's database file cannot be read, the union does not sync.
 
+## When something is wrong
+
+The extension's popup (the mirrormark button in Chrome's toolbar) shows
+which database the profile syncs as and the last error. Everything the
+host does, including skipped unions, conflicts and failed changes, goes to
+`~/.local/state/mirrormark/log`. A change the browser refuses stops that
+profile from saving its round; the host retries every second and reports
+the error each time until it goes through.
+
 ## Development
 
 Everything builds and tests in a Docker image; nothing is installed on your
