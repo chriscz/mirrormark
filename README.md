@@ -95,28 +95,13 @@ extension, even if the extension's files changed (see
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
 needed), the CRX and the unpacked extension. It leaves the host manifest
 alone if another install (a different key) has since replaced it. Chrome
-removes the extension
-from every profile when it next starts. Your bookmarks stay in Chrome, and
-your config, databases, backups, key and log stay where they are; it says
-so. `mirrormark uninstall --purge` also deletes Chrome's databases, their
-backups and the key. It deletes the config and log too, unless a Firefox
-profile's database is left: Firefox's profiles still sync through them, and
-Firefox's `uninstall` needs those databases to find its profiles.
-
-`mirrormark uninstall --browser firefox` removes the XPI from each profile
-whose database file says `browser: firefox`, and the host manifest if it
-names mirrormark. In each such profile's `user.js` it sets
-`xpinstall.signatures.required` and `extensions.autoDisableScopes` (see
-[Install (Firefox Developer Edition on Linux)](#install-firefox-developer-edition-on-linux))
-back to `true` and `15`. It changes every line that sets them to
-mirrormark's values, including lines you wrote yourself; that only turns
-the checks back on. If no database names a Firefox profile, it changes no
-`user.js` and says so. It leaves `extensions.startupScanScopes` at 1: that
-only makes Firefox look in the profile's own `extensions` folder at start,
-which is how it notices the XPI is gone. `--purge` deletes the Firefox
-profiles' databases and their backups, and the config and log too unless a
-Chrome profile's database is left. Installing again turns the two lines
-back, without adding new ones.
+removes the extension from every profile when it next starts. Your
+bookmarks stay in Chrome, and your config, databases, backups, key and log
+stay where they are; it says so. `mirrormark uninstall --purge` also
+deletes Chrome's databases, their backups and the key. It deletes the
+config and log too, unless a Firefox profile's database is left: Firefox's
+profiles still sync through them, and Firefox's `uninstall` needs those
+databases to find its profiles.
 
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
@@ -130,21 +115,31 @@ rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 Release Firefox cannot run mirrormark yet. Firefox Developer Edition can.
 
 **Before you start.** Firefox installs only add-ons Mozilla signed unless a
-profile says otherwise, and mirrormark is not signed. So `install` sets, in
-each profile's `user.js`, `xpinstall.signatures.required` to false (that
-profile then accepts any unsigned add-on, not only mirrormark) and
-`extensions.autoDisableScopes` to 14 (an add-on file in the profile's
-`extensions` folder starts enabled without asking; add-ons elsewhere still
-ask). `mirrormark uninstall --browser firefox` sets them back.
+profile says otherwise, and mirrormark is not signed. So `install` sets
+three prefs in each profile's `user.js`:
+
+- `xpinstall.signatures.required` false: that profile then accepts any
+  unsigned add-on, not only mirrormark.
+- `extensions.autoDisableScopes` 14: an add-on file in the profile's
+  `extensions` folder starts enabled without asking; add-ons elsewhere
+  still ask.
+- `extensions.startupScanScopes` 1: Firefox looks in the profile's own
+  `extensions` folder at start, which is how it finds the add-on, and
+  later notices it is gone.
+
+`mirrormark uninstall --browser firefox` sets the first two back (see
+[Upgrade and uninstall (Firefox)](#upgrade-and-uninstall-firefox)).
 
 The binary needs a stable place, as for Chrome.
 
 1. Run `mirrormark install --browser firefox` as yourself; it needs no
-   `sudo`. By default it takes every profile in `~/.config/mozilla/firefox`
-   or `~/.mozilla/firefox`; `--profile NAME` (repeatable) and
-   `--user-data-dir DIR` narrow it. It refuses, before writing anything,
-   if a chosen profile was last run by a Firefox other than Developer
-   Edition.
+   `sudo`. It takes every profile in `$XDG_CONFIG_HOME/mozilla/firefox`
+   (`~/.config/mozilla/firefox` if that is unset) when that holds a
+   `profiles.ini`, else in `~/.mozilla/firefox`.
+   `--profile NAME` (repeatable) picks some of them, and
+   `--user-data-dir DIR` reads the profiles in `DIR` instead. It refuses,
+   before writing anything, if a chosen profile was last run by a Firefox
+   other than Developer Edition.
 2. Restart Firefox in those profiles if it is running (close every window).
 3. Run `mirrormark install --browser firefox` again. For each profile it
    starts Firefox there if it is not running, opens a tab and prints
@@ -152,8 +147,28 @@ The binary needs a stable place, as for Chrome.
 4. Export your bookmarks from Firefox (Bookmarks, Manage bookmarks, Import
    and Backup), then share folders in `config.yaml` as for Chrome (see
    [Ids, labels and the key](#ids-labels-and-the-key) and
-   [config.yaml](#configyaml)). Separators stay where you put them; mirrormark
-   never syncs them.
+   [config.yaml](#configyaml)). Separators stay where you put them;
+   mirrormark never syncs them.
+
+### Upgrade and uninstall (Firefox)
+
+Upgrading: replace or move the binary, run
+`mirrormark install --browser firefox` again, then restart Firefox in
+those profiles.
+
+`mirrormark uninstall --browser firefox` removes the XPI from each profile
+whose database file says `browser: firefox`, and the host manifest if it
+names mirrormark. In each such profile's `user.js` it sets
+`xpinstall.signatures.required` back to `true` and
+`extensions.autoDisableScopes` back to `15`. It changes every line that
+sets them to mirrormark's values, including lines you wrote yourself; that
+only turns the checks back on. If no database names a Firefox profile, it
+changes no `user.js` and says so. It leaves `extensions.startupScanScopes`
+at 1, so Firefox notices the XPI is gone. Your bookmarks stay in Firefox,
+and your config, databases, backups and log stay where they are.
+`--purge` deletes the Firefox profiles' databases and their backups, and
+the config and log too unless a Chrome profile's database is left.
+Installing again turns the two lines back, without adding new ones.
 
 ## Files
 
@@ -165,7 +180,7 @@ The binary needs a stable place, as for Chrome.
 | `~/.local/share/mirrormark/extension.pem` | The key that fixes the extension id (mode 0600). |
 | `~/.local/share/mirrormark/mirrormark.crx`, `extension/` | The packed and unpacked extension, written by `install`. |
 | `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Firefox profile, written by `install --browser firefox`. |
-| `<profile>/user.js` | Three lines `install --browser firefox` adds: `xpinstall.signatures.required` false, `extensions.autoDisableScopes` 14, `extensions.startupScanScopes` 1. Your own lines stay as they are. |
+| `<profile>/user.js` | The three prefs `install --browser firefox` sets in each Firefox profile (see [Before you start](#install-firefox-developer-edition-on-linux)); `uninstall --browser firefox` sets two of them back. |
 | `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the Firefox add-on start the `mirrormark` binary. |
 | `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
@@ -184,10 +199,10 @@ your bookmarks in plain text.
         chrome-personal: other/Reading
         chrome-work: other/Reading
 
-A path starts with `toolbar`, `other` or `mobile`, or, for a Firefox profile,
-`menu`, or with the title the browser shows for that folder, such as
-`Bookmarks bar`. Write `\/` for a slash inside
-a folder name. One profile's folders may not be inside each other.
+A path starts with `toolbar`, `other` or `mobile`, or, for a Firefox
+profile, `menu`, or with the title the browser shows for that folder, such
+as `Bookmarks bar`. Write `\/` for a slash inside a folder name. One
+profile's folders may not be inside each other.
 
 ## How syncing behaves
 
@@ -317,22 +332,21 @@ machine except Docker.
     bin/dev run make check-e2e RUN=TestInstallAndBind  # one of them
     bin/dev shell                # a shell in the dev container
 
-The end-to-end tests start two Google Chrome instances under Xvfb in the
-dev image, install mirrormark into them with `mirrormark install` and drive
-them over the DevTools protocol. They run one at a time, because they share
-Chrome's system directories, which only the dev image lets your user write.
-Besides installing and binding, they share a folder between the two
-instances and check that each kind of edit, a delete, restore and purge, a
-conflict, the first sync of two filled folders and a closed browser's catch-up
-reach both, with no warning in the host's log. Each edit must reach the
-other running browser within 3 seconds; the tests log how long each took.
-Other tests install into and bind two Firefox Developer Edition profiles,
-from the same image, and drive them over WebDriver BiDi, under Xvfb and a
-D-Bus session, which carries `install`'s bind page to a running Firefox.
-The sync tests run three times: between two Chromes, between two Firefoxes,
-and between a Firefox and a Chrome, as subtests named `chrome-chrome`,
-`firefox-firefox` and `firefox-chrome` (for example
-`RUN=TestEditsPropagate/firefox-chrome`).
+The end-to-end tests run real browsers from the dev image under Xvfb:
+Google Chrome, driven over the DevTools protocol, and Firefox Developer
+Edition, driven over WebDriver BiDi in a D-Bus session, which carries
+`install`'s bind page to a running Firefox. Each test installs mirrormark
+into two browser instances with `mirrormark install` and binds them. They
+run one at a time, because they share Chrome's system directories, which
+only the dev image lets your user write. Besides installing and binding,
+they share a folder between the two instances and check that each kind of
+edit, a delete, restore and purge, a conflict, the first sync of two filled
+folders and a closed browser's catch-up reach both, with no warning in the
+host's log. Each edit must reach the other running browser within 3
+seconds; the tests log how long each took. The sync tests run three times:
+between two Chromes, between two Firefoxes, and between a Firefox and a
+Chrome, as subtests named `chrome-chrome`, `firefox-firefox` and
+`firefox-chrome` (for example `RUN=TestEditsPropagate/firefox-chrome`).
 Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
