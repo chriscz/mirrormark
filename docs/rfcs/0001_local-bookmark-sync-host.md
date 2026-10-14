@@ -57,7 +57,7 @@ We propose plain native messaging, one host process per browser profile, and YAM
 
 The browser starts `mirrormark host` when its extension connects. The process opens the database file the extension is bound to (Section 5), holds a lock on `profiles/<id>.lock` while it runs so that a copied profile cannot drive the same file twice, and exits when the browser closes the connection.
 
-It runs a **round** on connect, whenever the extension reports a change, and whenever `config.yaml` or another member's database file changes. It notices file changes by comparing modification times once a second (`os.Stat`). A round:
+It runs a **round** on connect, whenever the extension reports a change, and whenever `config.yaml` or another member's database file changes. It notices file changes by comparing modification times and sizes once a second (`os.Stat`). A round:
 
 1. takes the global lock (`flock` on `~/.local/share/mirrormark/lock`);
 2. reads `config.yaml` and the database file of every profile that shares a union with this one;
@@ -65,7 +65,7 @@ It runs a **round** on connect, whenever the extension reports a change, and whe
 4. if every write succeeded and the bookmarks changed, writes this profile's database file, setting the `seq` of each union record it changed to one above the highest `seq` of that union it read;
 5. releases the lock.
 
-A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A crashed host releases its locks with it.
+A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A failed round is retried at the next poll three times, then every 5 seconds three times, then every 30 seconds, until a round succeeds, so a browser that keeps failing does not take the global lock every second. If the browser made every change but the host cannot write its file, the round reports `db-write-failed` and is retried the same way. A crashed host releases its locks with it.
 
 If another member's file is missing or unreadable, the round skips every union that member belongs to, logs a warning and sends it to the popup. It never treats a member it cannot read as empty.
 
@@ -89,12 +89,16 @@ If another member's file is missing or unreadable, the round skips every union t
 // extension → host, one result per op
 {"v": 1, "type": "applied", "batch": 7, "results": [{"ok": true}, {"ok": true, "id": "212"}]}
 
-// either direction
-{"v": 1, "type": "error", "code": "db-mismatch", "message": "…"}
+// host → extension, at the end of every round; no problems when it synced cleanly
+{"v": 1, "type": "status", "problems": [{"code": "db-mismatch", "message": "…"}]}
+
+// either direction; from the host, only when it stops
+{"v": 1, "type": "error", "code": "db-locked", "message": "…"}
 ```
 
 - **Whole trees.** The extension always sends its whole tree, and the host compares it with the database file, so a missed event is fixed by the next tree.
 - **No blind writes.** `update`, `move` and `remove` carry what the host expects to find. The extension reads the node first and fails the op as `stale` if it differs, so an edit the user makes during a batch survives and the next round sees it as a change. Ops run one at a time, as MDN advises when order matters [R5], and the extension stops at the first op that fails and answers the rest `not run`: each op assumes the ones before it landed. A `remove` takes one bookmark or one empty folder (`bookmarks.remove`, never `removeTree`), and the host removes a folder's contents before the folder, so a folder that still holds something fails to go instead of taking it along.
+- **Problems.** The popup shows the last `status` message's problems, so a skipped union or an invalid config stays visible until a round no longer finds it. The host's `error` codes are `unsupported-version`, `bad-db`, `db-missing`, `db-locked` and `db-lock-error` (the lock file cannot be locked at all); the `status` codes are `config-invalid`, `db-missing`, `union-skipped`, `db-mismatch`, `apply-failed`, `db-write-failed` and `db-lock-error`.
 - **Versions.** A message with a different `v` gets `error` `unsupported-version`, and the popup says to restart Chrome. This only happens between upgrading the binary and Chrome loading the new extension.
 
 ### 3. The YAML files
@@ -198,7 +202,7 @@ Changes to different fields combine: a title edit on one side and a URL edit on 
 
 **Why it converges.** Rounds never overlap, because each holds the global lock. A round that writes reads every member file first, so its output contains everything published before it; by induction, the highest-`seq` record of a union contains every published change to it. P's base is a state P published, so it is an ancestor of theirs, which is what a three-way merge needs. A round that fails part-way writes no file, so base stays the last published state; in the next round the writes that did land show up on both sides with the same value (a landed `create` links as an identical add), and the rest is retried. Once users stop editing, each profile's next round brings its browser to the latest state, and a round that changes nothing writes nothing, so the rounds stop.
 
-**Wrong-tree guard.** If more than half of the nodes in P's base are gone from P's member folder, purges included, or are live in base but gone from theirs, and base holds more than 5 nodes, the round writes nothing and answers `error db-mismatch`, shown in the popup and the log. This catches a browser that has not finished loading its bookmarks, a reset profile, a database bound to the wrong profile and a truncated or hand-cut file. Without it, each of these would move a whole union into `_deleted`, or purge it, everywhere. Counting what is missing from theirs is safe because the global lock means theirs is always a whole published state. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or re-runs `mirrormark install` for that profile, which makes it a new member.
+**Wrong-tree guard.** If more than half of the nodes in P's base are gone from P's member folder, purges included, or are live in base but gone from theirs, and base holds more than 5 nodes, the round writes nothing and reports `db-mismatch` in its `status`, shown in the popup and the log. This catches a browser that has not finished loading its bookmarks, a reset profile, a database bound to the wrong profile and a truncated or hand-cut file. Without it, each of these would move a whole union into `_deleted`, or purge it, everywhere. Counting what is missing from theirs is safe because the global lock means theirs is always a whole published state. If the change is real, the user moves the bookmarks into `_deleted` by hand (a move does not trip the guard), or re-runs `mirrormark install` for that profile, which makes it a new member.
 
 **Room for "ask which side wins".** The engine is one pure function, `merge.Round(base, ours, theirs Tree, u Union) Result`, returning the ops, the new tree and each conflict with both versions. A later mode would hold a conflict instead of copying it.
 
@@ -233,7 +237,7 @@ Without `sudo`, `install` stops and says so; a no-root route is listed under [La
 
 ### 7. Extension and code
 
-The extension is thin: Manifest V3, permissions `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. It sends trees, applies ops, and shows the bound profile and the last error in its popup. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
+The extension is thin: Manifest V3, permissions `alarms`, `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. After a failed connection it waits instead, for an alarm (30 s, or 60 s after the host's `error`), because the worker's timers stop with it; after a new binding it waits a second so the old host can release the database. It sends trees, applies ops, and shows in its popup the bound profile, why the host stopped if it did, and the last round's problems. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
 
 One Go module, `github.com/chriscz/mirrormark`. Its only third-party dependency is `go.yaml.in/yaml/v3`, the YAML organisation's continuation of the archived `gopkg.in/yaml.v3` [R16]. Locking uses `syscall.Flock`; the CRX3 file is written with the standard library.
 
@@ -267,7 +271,7 @@ As in tab-stash, everything builds and tests in a dev image (`Dockerfile` with p
 
 - **`_deleted` grows** in every member until the user empties it.
 - **Merge clutter.** Each conflict leaves suffixed copies to tidy.
-- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; the log and the popup show the warning.
+- **A failing write stalls one profile.** If an op fails every time, that profile never completes a round and never publishes its own edits; the log and the popup show the warning. After six failures in a row the profile retries only every 30 seconds, so its own edits wait that long once the cause is fixed, unless a file change starts a round sooner.
 - **One slow browser stalls everyone.** A round holds the global lock while its browser applies ops, up to the 10-second timeout.
 - **The CRX route needs root and reaches every profile.** Users who refuse `sudo` cannot install this version.
 - **`install` opens a window in every profile it binds.** With many profiles, `--profile` limits it.
@@ -316,7 +320,7 @@ Each is its own RFC or stack once the Chrome version works.
 
 - **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary.
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes them.
-- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path.
+- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`, and a warning that repeats every round is logged once, then its count when it stops.
 
 ## Open questions
 
@@ -349,3 +353,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-14 — while planning: database files record only member folders, with `seq` per union record; bind URL and install directories verified in Docker; install runs in two passes around the Chrome restart and confirms each binding; plain JavaScript extension; Go DevTools-pipe e2e driver instead of Puppeteer.
 - 2026-10-15 — trimmed for the minimal version: no `mirrormark status` or status files (install confirms a binding by the lock file's mtime; errors go to the log and the popup); `sudo install` replaces the `install-system-files` subcommand; no no-root fallback; `install` binds every profile unless `--profile` narrows it; `unpack` added.
 - 2026-10-15 — after review of the merge engine: the wrong-tree guard counts purges and nodes missing from theirs; the extension stops a batch at the first failed op; `remove` never removes a folder's contents.
+- 2026-10-15 — after review of the host and extension: a `status` message ends every round and carries its problems, and `error` is only for a host that stops; new codes `db-write-failed` and `db-lock-error`; failed rounds back off to 5 s and 30 s; the poll compares sizes too; the log rotates at 1 MiB and logs a repeated warning once; the extension reconnects on an alarm and waits a second after a new binding.
