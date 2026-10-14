@@ -33,9 +33,10 @@ somewhere stable such as `~/.local/bin`, because Chrome runs it from there.
 
 Chrome installs a local extension only if a file in a root-owned directory
 names it, and it looks for native messaging hosts in one, so `install` asks
-for your password once. It writes two small JSON files to a temporary
-directory and runs `sudo install -D -m 0644 <temporary file> <target>` for
-each; no mirrormark code runs as root. The targets are:
+for your password once. For each of two small JSON files it runs
+`sudo install -D -m 0644 /dev/stdin <target>` and writes the file's
+contents to that command's input; no mirrormark code runs as root. The
+targets are:
 
 - `/usr/share/google-chrome/extensions/<extension id>.json`, naming
   `~/.local/share/mirrormark/mirrormark.crx` and its version. Chrome installs

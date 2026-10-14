@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -179,36 +178,29 @@ func resolveDir(dir string) (string, error) {
 }
 
 // writeSystemFiles writes Chrome's two root-owned files. If this process
-// may not, it stages them in a temporary directory and copies them into
-// place with `sudo install`, so no mirrormark code runs as root.
+// may not, it pipes each file's data to `sudo install`, so no mirrormark
+// code runs as root and no staged file can be swapped before root copies it.
 func writeSystemFiles(files []chrome.File, stdout, stderr io.Writer) error {
 	err := chrome.WriteFiles(files)
 	if !errors.Is(err, fs.ErrPermission) {
 		return err
 	}
-	tmp, err := os.MkdirTemp("", "mirrormark-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	fmt.Fprintln(stdout, "Chrome reads these two files only from root's directories; copying them into place with sudo:")
-	for i, f := range files {
-		src := filepath.Join(tmp, strconv.Itoa(i)+".json")
-		if err := os.WriteFile(src, f.Data, 0o644); err != nil {
-			return err
-		}
-		args := []string{"install", "-D", "-m", "0644", src, f.Path}
+	fmt.Fprintln(stdout, "Chrome reads these two files only from root's directories; writing them with sudo:")
+	for _, f := range files {
+		args := []string{"install", "-D", "-m", "0644", "/dev/stdin", f.Path}
 		fmt.Fprintln(stdout, "  sudo", strings.Join(args, " "))
-		if err := runSudo(stdout, stderr, args...); err != nil {
+		if err := runSudo(bytes.NewReader(f.Data), stdout, stderr, args...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func sudo(stdout, stderr io.Writer, args ...string) error {
+// sudo runs a command as root with stdin as its input. sudo asks for the
+// password on the terminal, not on stdin.
+func sudo(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	cmd := exec.Command("sudo", args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	return cmd.Run()
 }
 
@@ -408,5 +400,5 @@ func removeSystemFiles(paths []string, stdout, stderr io.Writer) error {
 	}
 	args := append([]string{"rm", "-f", "--"}, paths...)
 	fmt.Fprintln(stdout, "Removing Chrome's files needs root:\n  sudo", strings.Join(args, " "))
-	return runSudo(stdout, stderr, args...)
+	return runSudo(os.Stdin, stdout, stderr, args...)
 }

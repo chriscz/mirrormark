@@ -168,7 +168,8 @@ func TestUnpackIntoAFolderKeepsTheID(t *testing.T) {
 
 // fakeSystem points the system files into a temporary root whose
 // directories the test user cannot write, like the real ones, and replaces
-// sudo with a fake that records each command and carries out install and rm.
+// sudo with a fake that records each command and carries out install, which
+// must read the file from stdin, and rm.
 func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 	root = t.TempDir()
 	for _, d := range []string{"usr", "etc"} {
@@ -187,13 +188,16 @@ func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 	t.Cleanup(func() { sysroot, runSudo = oldRoot, oldSudo })
 	sysroot = root
 	calls = &[][]string{}
-	runSudo = func(_, _ io.Writer, args ...string) error {
+	runSudo = func(stdin io.Reader, _, _ io.Writer, args ...string) error {
 		*calls = append(*calls, args)
 		lock(0o755)
 		defer lock(0o555)
 		switch args[0] {
-		case "install": // install -D -m 0644 SRC DST
-			data, err := os.ReadFile(args[4])
+		case "install": // install -D -m 0644 /dev/stdin DST
+			if args[4] != "/dev/stdin" {
+				return errors.New("install not from stdin")
+			}
+			data, err := io.ReadAll(stdin)
 			if err != nil {
 				return err
 			}
@@ -262,20 +266,20 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 		t.Fatalf("sudo calls %v", *sudoCalls)
 	}
 	for i, c := range *sudoCalls {
-		want := []string{"install", "-D", "-m", "0644"}
-		if !slices.Equal(c[:4], want) || len(c) != 6 || c[5] != filepath.Join(root, paths[i]) {
+		if !slices.Equal(c, []string{"install", "-D", "-m", "0644", "/dev/stdin", filepath.Join(root, paths[i])}) {
 			t.Fatalf("sudo call %v", c)
-		}
-		if _, err := os.Stat(c[4]); err == nil {
-			t.Fatalf("staged file %s left behind", c[4])
 		}
 		if !strings.Contains(out.String(), c[5]) {
 			t.Fatalf("output does not say what sudo writes:\n%s", out.String())
 		}
 	}
+	// The data came through sudo's stdin.
 	ext, _ := os.ReadFile(filepath.Join(root, paths[0]))
 	if !bytes.Contains(ext, []byte(filepath.Join(p.Data, "mirrormark.crx"))) {
 		t.Fatalf("external file %s", ext)
+	}
+	if host, _ := os.ReadFile(filepath.Join(root, paths[1])); !bytes.Contains(host, []byte(`"chrome-extension://`+id+`/"`)) {
+		t.Fatalf("host manifest %s", host)
 	}
 	for dir, id := range map[string]string{"Default": "chrome-personal", "Profile 1": "chrome-work"} {
 		d, err := db.LoadDB(p.ProfileFile(id))
@@ -347,7 +351,7 @@ func TestInstallStopsWhenSudoFails(t *testing.T) {
 	skipIfRoot(t)
 	p := testHome(t)
 	fakeSystem(t)
-	runSudo = func(_, _ io.Writer, args ...string) error { return fs.ErrPermission }
+	runSudo = func(_ io.Reader, _, _ io.Writer, args ...string) error { return fs.ErrPermission }
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
 	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
@@ -474,7 +478,7 @@ func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	run([]string{"unpack"}, strings.NewReader(""), &out, &errb)
 	other := chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
 	other.Path = filepath.Join(root, other.Path)
-	runSudo(nil, nil, "install", "-D", "-m", "0644", writeTemp(t, other.Data), other.Path)
+	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
 	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
@@ -484,10 +488,4 @@ func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	if len(*sudoCalls) != 1 {
 		t.Fatalf("sudo for nothing: %v", *sudoCalls)
 	}
-}
-
-func writeTemp(t *testing.T, data []byte) string {
-	path := filepath.Join(t.TempDir(), "f")
-	os.WriteFile(path, data, 0o644)
-	return path
 }
