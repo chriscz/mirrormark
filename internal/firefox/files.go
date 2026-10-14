@@ -189,25 +189,52 @@ func (b Browser) Check(profileDir string) (bin string, err error) {
 			return "", fmt.Errorf("no update channel in %s", filepath.Join(dir, "defaults", "pref", "channel-prefs.js"))
 		}
 		if string(m[1]) != b.Channel {
-			return "", fmt.Errorf("it was last run by a browser on the %s channel from %s, not %s; Firefox on that channel installs only add-ons Mozilla signed. mirrormark works in %s", m[1], dir, b.Name, supported())
+			return "", b.channelRefusal(dir, string(m[1]))
 		}
 	}
 	if b.AppName != "" {
-		ini, err := os.ReadFile(filepath.Join(dir, "application.ini"))
+		name, err := appName(dir)
 		if err != nil {
 			return "", fmt.Errorf("cannot tell which browser is in %s: %w", dir, err)
 		}
-		var name string
-		for _, s := range iniSections(string(ini)) {
-			if s["[]"] == "App" {
-				name = s["Name"]
-			}
-		}
 		if name != b.AppName {
-			return "", fmt.Errorf("it was last run by %s from %s, not %s. mirrormark works in %s", cmp.Or(name, "a browser that does not name itself"), dir, b.AppName, supported())
+			return "", fmt.Errorf("it was last run by %s from %s, not %s. mirrormark works in %s", cmp.Or(name, "a browser that does not name itself"), dir, b.Name, supported())
 		}
 	}
 	return filepath.Join(dir, b.Bin), nil
+}
+
+// channelRefusal says why b refuses a profile last run from dir, by a
+// browser on another update channel: which browser that is, if
+// application.ini names one install knows, so the user can ask for it.
+// Only Mozilla's Firefox is said to need add-ons Mozilla signed; other
+// Gecko browsers decide that for themselves.
+func (b Browser) channelRefusal(dir, channel string) error {
+	name, _ := appName(dir) // a profile it cannot name is still refused
+	for _, o := range Browsers {
+		if o.AppName != "" && o.AppName == name && o.Config != b.Config {
+			return fmt.Errorf("it was last run by %s from %s, not %s: this profile belongs to %s; use --browser %s", name, dir, b.Name, o.Name, o.Config)
+		}
+	}
+	if name == "Firefox" {
+		return fmt.Errorf("it was last run by Firefox on the %s channel from %s, not %s; Firefox on that channel installs only add-ons Mozilla signed. mirrormark works in %s", channel, dir, b.Name, supported())
+	}
+	return fmt.Errorf("it was last run by %s on the %s channel from %s, not %s. mirrormark works in %s", cmp.Or(name, "a browser"), channel, dir, b.Name, supported())
+}
+
+// appName is the Name in the application.ini of the browser in dir.
+func appName(dir string) (string, error) {
+	ini, err := os.ReadFile(filepath.Join(dir, "application.ini"))
+	if err != nil {
+		return "", err
+	}
+	var name string
+	for _, s := range iniSections(string(ini)) {
+		if s["[]"] == "App" {
+			name = s["Name"]
+		}
+	}
+	return name, nil
 }
 
 // supported says which browsers install takes, and with which --browser.

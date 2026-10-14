@@ -310,10 +310,17 @@ func TestLibreWolfDefaultRoot(t *testing.T) {
 		t.Fatalf("without profiles.ini: %s", r)
 	}
 	xdg := filepath.Join(home, "xdg", "librewolf", "librewolf")
-	os.MkdirAll(xdg, 0o700)
-	os.WriteFile(filepath.Join(xdg, "profiles.ini"), nil, 0o644)
+	must(t, os.MkdirAll(xdg, 0o700))
+	must(t, os.WriteFile(filepath.Join(xdg, "profiles.ini"), nil, 0o644))
 	if r, _ := LibreWolf.DefaultRoot(); r != xdg {
 		t.Fatalf("with profiles.ini: %s", r)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -321,14 +328,15 @@ func TestLibreWolfDefaultRoot(t *testing.T) {
 // names app (none if app is "") and whose channel-prefs.js says channel,
 // and a profile last run from it.
 func geckoInstall(t *testing.T, app, channel string) (dir, profile string) {
+	t.Helper()
 	dir = t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "defaults", "pref"), 0o755)
-	os.WriteFile(filepath.Join(dir, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "`+channel+`");`+"\n"), 0o644)
+	must(t, os.MkdirAll(filepath.Join(dir, "defaults", "pref"), 0o755))
+	must(t, os.WriteFile(filepath.Join(dir, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "`+channel+`");`+"\n"), 0o644))
 	if app != "" {
-		os.WriteFile(filepath.Join(dir, "application.ini"), []byte("[App]\nVendor=x\nName="+app+"\n"), 0o644)
+		must(t, os.WriteFile(filepath.Join(dir, "application.ini"), []byte("[App]\nVendor=x\nName="+app+"\n"), 0o644))
 	}
 	profile = t.TempDir()
-	os.WriteFile(filepath.Join(profile, "compatibility.ini"), []byte("[Compatibility]\nLastPlatformDir="+dir+"\n"), 0o644)
+	must(t, os.WriteFile(filepath.Join(profile, "compatibility.ini"), []byte("[Compatibility]\nLastPlatformDir="+dir+"\n"), 0o644))
 	return dir, profile
 }
 
@@ -345,11 +353,26 @@ func TestCheckTellsLibreWolfFromFirefox(t *testing.T) {
 			t.Fatalf("%s as LibreWolf: %v", name, err)
 		}
 	}
-	if _, err := Firefox.Check(lw); err == nil || !strings.Contains(err.Error(), "--browser librewolf") {
+	if _, err := Firefox.Check(lw); err == nil || !strings.Contains(err.Error(), "this profile belongs to LibreWolf; use --browser librewolf") || strings.Contains(err.Error(), "Mozilla signed") {
 		t.Fatalf("LibreWolf as Firefox: %v", err)
 	}
-	if _, err := Firefox.Check(release); err == nil || !strings.Contains(err.Error(), "not Firefox Developer Edition") {
+	if _, err := Firefox.Check(release); err == nil || !strings.Contains(err.Error(), "not Firefox Developer Edition") || !strings.Contains(err.Error(), "Mozilla signed") {
 		t.Fatalf("release Firefox as Developer Edition: %v", err)
+	}
+	// Only Mozilla's Firefox is said to install only add-ons Mozilla signed.
+	_, fork := geckoInstall(t, "Waterfox", "release")
+	if _, err := Firefox.Check(fork); err == nil || !strings.Contains(err.Error(), "last run by Waterfox") || strings.Contains(err.Error(), "Mozilla signed") {
+		t.Fatalf("another Gecko browser as Developer Edition: %v", err)
+	}
+}
+
+// A refusal names the browser asked for by its name, not by what its
+// application.ini says.
+func TestCheckRefusalNamesTheBrowserAskedFor(t *testing.T) {
+	_, dev := geckoInstall(t, "Firefox", "aurora")
+	b := Browser{Config: "test", Name: "Test Browser", Bin: "test", AppName: "TestApp"}
+	if _, err := b.Check(dev); err == nil || !strings.Contains(err.Error(), "not Test Browser") {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -360,7 +383,7 @@ func TestCheckRefusesWithoutAReadableApplicationIni(t *testing.T) {
 	if _, err := LibreWolf.Check(profile); err == nil || !strings.Contains(err.Error(), "application.ini") {
 		t.Fatalf("no application.ini: %v", err)
 	}
-	os.Mkdir(filepath.Join(dir, "application.ini"), 0o755) // reading it fails, even as root
+	must(t, os.Mkdir(filepath.Join(dir, "application.ini"), 0o755)) // reading it fails, even as root
 	if _, err := LibreWolf.Check(profile); err == nil || !strings.Contains(err.Error(), "application.ini") {
 		t.Fatalf("unreadable application.ini: %v", err)
 	}

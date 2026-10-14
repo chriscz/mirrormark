@@ -1318,7 +1318,7 @@ func TestEachGeckoBrowserTakesOnlyItsOwnProfiles(t *testing.T) {
 	ffRoot, _ := firefoxData(t, p, "aurora")
 	for _, c := range []struct{ browser, root, want string }{
 		{"librewolf", ffRoot, "not LibreWolf"},
-		{"firefox", lwRoot, "--browser librewolf"},
+		{"firefox", lwRoot, "this profile belongs to LibreWolf; use --browser librewolf"},
 	} {
 		var out, errb bytes.Buffer
 		if code := run([]string{"install", "--browser", c.browser, "--user-data-dir", c.root}, strings.NewReader(""), &out, &errb); code != 1 {
@@ -1387,12 +1387,15 @@ func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
 }
 
 // When uninstall cannot tell whether another Gecko browser's profile still
-// holds the add-on, it keeps the host manifest and says why.
+// holds the add-on, it keeps the host manifest and says why. No Developer
+// Edition profile can be checked, so only that keeps it.
 func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
 	_, ffRoot, _ := installGecko(t)
-	ext := filepath.Join(ffRoot, "xalpha.alpha", "extensions")
-	must(t, os.RemoveAll(ext))
-	must(t, os.WriteFile(ext, nil, 0o600)) // the XPI's path now cannot be checked
+	for _, n := range []string{"alpha", "beta"} {
+		ext := filepath.Join(ffRoot, "x"+n+"."+n, "extensions")
+		must(t, os.RemoveAll(ext))
+		must(t, os.WriteFile(ext, nil, 0o600)) // the XPI's path now cannot be checked
+	}
 	var out, errb bytes.Buffer
 	if code := run([]string{"uninstall", "--browser", "librewolf"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())

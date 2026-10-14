@@ -200,7 +200,7 @@ changes no `user.js` and says so. It leaves `extensions.startupScanScopes`
 at 1, so Firefox notices the XPI is gone. Your bookmarks stay in Firefox,
 and your config, databases, backups and log stay where they are.
 `--purge` deletes the Firefox profiles' databases and their backups, and
-the config and log too unless a Chrome profile's database is left.
+the config and log too unless another browser's database is left.
 Installing again turns the two lines back, without adding new ones.
 
 ## Install (LibreWolf on Linux)
