@@ -81,7 +81,11 @@ func TestFirefoxUninstall(t *testing.T) {
 			t.Fatal("mirrormark is still active")
 		}
 	}
-	if prefs, _ := os.ReadFile(filepath.Join(e.udd("a"), "prefs.js")); bytes.Contains(prefs, []byte(`"xpinstall.signatures.required", false`)) {
+	prefs, err := os.ReadFile(filepath.Join(e.udd("a"), "prefs.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(prefs, []byte(`"xpinstall.signatures.required", false`)) {
 		t.Fatal("prefs.js still turns signature checks off")
 	}
 }
