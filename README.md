@@ -56,10 +56,22 @@ it writes both files again. When the files are already up to date,
 
 ### Ids, labels and the key
 
-Each bound profile gets a database id from its Chrome name, such as
-`chrome-work`, and a label such as `chrome/work` (used in conflict copies).
-A taken id gets `-2`, `-3` and so on. Edit the label in
-`~/.local/share/mirrormark/profiles/<id>.yaml` if you like.
+Each bound profile gets a database id: the `<id>` in the
+`bound: <profile> -> <id>` line that `install` prints, and the name of its
+file, `~/.local/share/mirrormark/profiles/<id>.yaml`. `config.yaml` names
+profiles by these ids. The id comes from the profile's name in Chrome: a
+profile named "Your Chrome" gets `chrome-your-chrome`, and a second profile
+of that name gets `chrome-your-chrome-2` (then `-3` and so on). To share a
+folder between those two:
+
+    format: 1
+    unions:
+      work:
+        chrome-your-chrome: toolbar/Work
+        chrome-your-chrome-2: toolbar/Work
+
+Each profile also gets a label, such as `chrome/your-chrome`, used in
+conflict copies. Edit the label in its database file if you like.
 
 The first `install` or `unpack` creates `~/.local/share/mirrormark/extension.pem`.
 The extension id comes from this key, so keep it: a new key is a new
@@ -157,17 +169,37 @@ a folder name. One profile's folders may not be inside each other.
 
 ## When something is wrong
 
-The extension's popup (the mirrormark button in Chrome's toolbar) shows
-which database the profile syncs as, why the host stopped if it did, and
-every problem the last round found, such as a skipped union. A problem
-stays in the popup until a round no longer finds it. Everything the host
-does, including skipped unions, conflicts and failed changes, goes to
-`~/.local/state/mirrormark/log`, every time it happens.
+Everything the host does, including skipped unions, conflicts and failed
+changes, goes to `~/.local/state/mirrormark/log`, every time it happens.
 
 A change the browser refuses stops that profile from saving its round. The
 host retries every 5 seconds until the change goes through, and a changed
 file starts a round sooner. The same goes for a database file the host
 cannot write.
+
+### What the popup shows
+
+The extension's popup is the mirrormark button in Chrome's toolbar. It
+shows:
+
+- the database the profile syncs as, such as `Syncs as chrome-work.`, or
+  that the profile is not bound;
+- why the host stopped, if it did, such as `db-locked: …`, or why Chrome
+  could not start it;
+- each problem the last round found, as `<code>: <message>`, such as
+  `union-skipped: …` or `db-mismatch: …`. A problem stays until a round no
+  longer finds it, so nothing below the binding means the last round synced
+  cleanly.
+
+### The popup says Chrome cannot reach the host
+
+`Specified native messaging host not found.` or `Access to the specified
+native messaging host is forbidden.` means Chrome could not start
+mirrormark. The host manifest is missing, or another install of mirrormark,
+with another key, replaced it, so it names another extension. Run
+`mirrormark install` again, and restart Chrome if it asks. On a computer
+where two users install mirrormark, only the last one to run `install`
+reaches its host (see [Ids, labels and the key](#ids-labels-and-the-key)).
 
 ### Installing and binding
 
