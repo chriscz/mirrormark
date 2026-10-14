@@ -318,10 +318,15 @@ func (b *Browser) Move(t *testing.T, ref, path string, index int) {
 	eval[string](t, b, fmt.Sprintf("Promise.all([mm.node(%s), mm.folder(%s)]).then(([n, f]) => chrome.bookmarks.move(n.id, %s)).then(() => '')", q(ref), q(path), dest))
 }
 
-// AddSeparator puts a separator at index in the folder at path (Firefox).
+// AddSeparator puts a separator at index in the folder at path, or at the
+// end if index is negative (Firefox).
 func (b *Browser) AddSeparator(t *testing.T, path string, index int) {
 	t.Helper()
-	eval[string](t, b, fmt.Sprintf("mm.folder(%s).then((f) => chrome.bookmarks.create({parentId: f.id, type: 'separator', index: %d})).then(() => '')", q(path), index))
+	at := ""
+	if index >= 0 {
+		at = fmt.Sprintf(", index: %d", index)
+	}
+	eval[string](t, b, fmt.Sprintf("mm.folder(%s).then((f) => chrome.bookmarks.create({parentId: f.id, type: 'separator'%s})).then(() => '')", q(path), at))
 }
 
 // Separators lists the positions of the separators directly in the folder
