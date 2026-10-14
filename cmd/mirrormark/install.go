@@ -64,8 +64,8 @@ unions: {}
 func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("install", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	browser := fl.String("browser", "chrome", "chrome or firefox")
-	udd := fl.String("user-data-dir", "", "Chrome's data directory (default ~/.config/google-chrome), or Firefox's profiles directory")
+	browser := fl.String("browser", "chrome", "chrome, brave or firefox")
+	udd := fl.String("user-data-dir", "", "the browser's data directory (default ~/.config/google-chrome for Chrome, ~/.config/BraveSoftware/Brave-Browser for Brave), or Firefox's profiles directory")
 	var picks multiFlag
 	fl.Var(&picks, "profile", `profile to bind, by directory such as "Profile 1" or by name; repeatable (default: every profile)`)
 	if fl.Parse(args) != nil {
@@ -91,7 +91,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	cb, ok := chrome.Lookup(*browser)
 	if !ok {
-		fmt.Fprintf(stderr, "mirrormark: --browser is chrome or firefox, not %q\n", *browser)
+		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave or firefox, not %q\n", *browser)
 		return 2
 	}
 	if *udd == "" {
@@ -328,7 +328,7 @@ func resolveDir(dir string) (string, error) {
 	return real, err
 }
 
-// writeSystemFiles writes Chrome's two root-owned files. If this process
+// writeSystemFiles writes the browsers' root-owned files. If this process
 // may not, it pipes each file's data to `sudo install`, so no mirrormark
 // code runs as root and no staged file can be swapped before root copies it.
 func writeSystemFiles(files []chrome.File, stdout, stderr io.Writer) error {
@@ -336,7 +336,7 @@ func writeSystemFiles(files []chrome.File, stdout, stderr io.Writer) error {
 	if !errors.Is(err, fs.ErrPermission) {
 		return err
 	}
-	fmt.Fprintln(stdout, "Chrome reads these two files only from root's directories; writing them with sudo:")
+	fmt.Fprintln(stdout, "The browser reads these files only from root's directories; writing them with sudo:")
 	for _, f := range files {
 		args := []string{"install", "-D", "-m", "0644", "/dev/stdin", f.Path}
 		fmt.Fprintln(stdout, "  sudo", strings.Join(args, " "))
@@ -479,15 +479,15 @@ func cmdUnpack(args []string, stdout, stderr io.Writer) int {
 func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	purge := fl.Bool("purge", false, "also delete this browser's databases and backups (and Chrome's key), and the config and log with the last browser's")
-	browser := fl.String("browser", "chrome", "chrome or firefox")
+	purge := fl.Bool("purge", false, "also delete this browser's databases and backups (and the key with the last Chromium browser's), and the config and log with the last browser's")
+	browser := fl.String("browser", "chrome", "chrome, brave or firefox")
 	if fl.Parse(args) != nil {
 		return 2
 	}
 	_, isChromium := chrome.Lookup(*browser)
 	fb, isGecko := firefox.Lookup(*browser)
 	if !isChromium && !isGecko {
-		fmt.Fprintf(stderr, "mirrormark: --browser is chrome or firefox, not %q\n", *browser)
+		fmt.Fprintf(stderr, "mirrormark: --browser is chrome, brave or firefox, not %q\n", *browser)
 		return 2
 	}
 	if refuseRoot("uninstall", "; it uses sudo only to remove two files", stderr) {
@@ -505,19 +505,22 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		if err := uninstallFirefox(p, fb, stdout); err != nil {
 			return fail(err)
 		}
-		return finishUninstall(p, fb.Config, fb.Name, *purge, stdout, stderr)
+		return finishUninstall(p, fb.Config, fb.Name, *purge, false, stdout, stderr)
 	}
 	cb, _ := chrome.Lookup(*browser) // checked above
 	keyFile := filepath.Join(p.Data, "extension.pem")
 	key, err := chrome.LoadKey(keyFile)
 	host := filepath.Join(sysroot, chrome.HostManifestPath())
+	var users []string // other Chromium browsers that still have the extension
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
+		users = chromiumUsers(cb, id)
 		paths := []string{filepath.Join(sysroot, cb.ExternalFile(id))}
-		// The host manifest's name is fixed; one that names another
-		// extension belongs to another install.
-		if data, err := os.ReadFile(host); err == nil && namesExtension(data, id) {
+		// The host manifest serves every Chromium browser, so it goes with
+		// the last one's external file. Its name is fixed; one that names
+		// another extension belongs to another install.
+		if data, err := os.ReadFile(host); err == nil && namesExtension(data, id) && len(users) == 0 {
 			paths = append(paths, host)
 		}
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {
@@ -529,32 +532,42 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	default:
 		return fail(err)
 	}
-	if err := chrome.RemoveFiles([]string{filepath.Join(p.Data, "mirrormark.crx")}); err != nil {
-		return fail(err)
-	}
-	if err := os.RemoveAll(filepath.Join(p.Data, "extension")); err != nil {
-		return fail(err)
+	if len(users) == 0 {
+		if err := chrome.RemoveFiles([]string{filepath.Join(p.Data, "mirrormark.crx")}); err != nil {
+			return fail(err)
+		}
+		if err := os.RemoveAll(filepath.Join(p.Data, "extension")); err != nil {
+			return fail(err)
+		}
 	}
 	fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
-	return finishUninstall(p, cb.Config, cb.Name, *purge, stdout, stderr)
+	if len(users) > 0 {
+		fmt.Fprintf(stdout, "Kept the CRX and the host manifest, which %s still uses.\n", strings.Join(users, " and "))
+	}
+	return finishUninstall(p, cb.Config, cb.Name, *purge, len(users) > 0, stdout, stderr)
 }
 
 // finishUninstall deals with mirrormark's own files once browser's install
 // is undone. Without purge it says where they are. With purge it deletes
-// browser's databases, with their backups and lock files, and Chrome's key
-// if browser is Chrome. The config, the log and the rest of the data
+// browser's databases, with their backups and lock files, and the key if
+// browser is Chromium-based and no other Chromium browser still needs it.
+// keyInUse says another Chromium browser still has the extension
+// installed; the key that fixes its id stays then. The config, the log and the rest of the data
 // directory are shared: they go only with the last database, since another
 // browser's profiles still sync through them, and that browser's uninstall
 // needs its databases to find its profiles.
-func finishUninstall(p db.Paths, browser, name string, purge bool, stdout, stderr io.Writer) int {
+func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
+	_, chromium := chrome.Lookup(browser)
 	again, kept := "mirrormark uninstall --purge", "the databases, backups and key"
-	if browser != "chrome" {
+	if browser != chrome.Chrome.Config {
 		again = "mirrormark uninstall --browser " + browser + " --purge"
-		kept = "the databases and backups" // only Chrome has a key
+	}
+	if !chromium {
+		kept = "the databases and backups" // only the Chromium browsers have a key
 	}
 	if !purge {
 		fmt.Fprintf(stdout, "Kept your config %s, %s in %s, and the log in %s.\n%s deletes %s's databases and backups, and the rest once no other browser's are left.\n", p.ConfigFile(), kept, p.Data, p.State, again, name)
@@ -568,12 +581,17 @@ func finishUninstall(p db.Paths, browser, name string, purge bool, stdout, stder
 	for id, d := range dbs {
 		if d.Profile.Browser != browser {
 			others = append(others, id)
+			if _, ok := chrome.Lookup(d.Profile.Browser); ok {
+				keyInUse = true
+			}
 			continue
 		}
 		files = append(files, p.ProfileFile(id), p.ProfileLock(id))
 		dirs = append(dirs, p.BackupDir(id))
 	}
-	if browser == "chrome" {
+	// The key fixes the id every Chromium browser here installed the
+	// extension under.
+	if chromium && !keyInUse {
 		files = append(files, filepath.Join(p.Data, "extension.pem"))
 	}
 	if len(others) == 0 {
@@ -668,7 +686,23 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 	return nil
 }
 
-// removeSystemFiles removes Chrome's root-owned files, with `sudo rm` if
+// chromiumUsers names the Chromium browsers other than b whose external
+// extension file for id is in place: they still use the CRX and the host
+// manifest b shares with them.
+func chromiumUsers(b chrome.Browser, id string) []string {
+	var out []string
+	for _, o := range chrome.Browsers {
+		if o.Config == b.Config {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(sysroot, o.ExternalFile(id))); err == nil {
+			out = append(out, o.Name)
+		}
+	}
+	return out
+}
+
+// removeSystemFiles removes the browsers' root-owned files, with `sudo rm` if
 // this process may not.
 func removeSystemFiles(paths []string, stdout, stderr io.Writer) error {
 	err := chrome.RemoveFiles(paths)
@@ -676,6 +710,6 @@ func removeSystemFiles(paths []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	args := append([]string{"rm", "-f", "--"}, paths...)
-	fmt.Fprintln(stdout, "Removing Chrome's files needs root:\n  sudo", strings.Join(args, " "))
+	fmt.Fprintln(stdout, "Removing these files needs root:\n  sudo", strings.Join(args, " "))
 	return runSudo(os.Stdin, stdout, stderr, args...)
 }

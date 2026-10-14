@@ -22,13 +22,12 @@ func main() {
 const usageText = `Usage: mirrormark <command> [options]
 
 Commands:
-  install     Install into Google Chrome or Firefox Developer Edition and bind
-              its profiles
-              [--browser chrome|firefox] [--user-data-dir DIR]
+  install     Install into Google Chrome, Brave or Firefox Developer Edition
+              and bind its profiles
+              [--browser chrome|brave|firefox] [--user-data-dir DIR]
               [--profile DIR_OR_NAME]...
-  uninstall   Remove from Google Chrome or Firefox; keeps your files unless
-              --purge
-              [--browser chrome|firefox] [--purge]
+  uninstall   Remove from a browser; keeps your files unless --purge
+              [--browser chrome|brave|firefox] [--purge]
   unpack      Write the extension, with this install's key, for Load unpacked
               [DIR]
   host        Run as the native messaging host (the browser does this)

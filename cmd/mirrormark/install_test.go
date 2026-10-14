@@ -122,14 +122,16 @@ func TestConfigExampleIsAValidEmptyConfig(t *testing.T) {
 }
 
 // testHome gives the test its own home and mirrormark paths, and a
-// google-chrome first on PATH that fails, so no unit test starts the real
-// Chrome; fakeChromeOnPath goes before it.
+// google-chrome and a brave-browser first on PATH that fail, so no unit test
+// starts a real browser; fakeChromeOnPath goes before them.
 func testHome(t *testing.T) db.Paths {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, "bin")
 	os.Mkdir(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "google-chrome"), []byte("#!/bin/sh\necho 'unit tests must not start Chrome' >&2\nexit 1\n"), 0o755)
+	for _, n := range []string{"google-chrome", "brave-browser"} {
+		os.WriteFile(filepath.Join(dir, n), []byte("#!/bin/sh\necho 'unit tests must not start a browser' >&2\nexit 1\n"), 0o755)
+	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(v, "")
@@ -182,7 +184,7 @@ func TestUnpackIntoAFolderKeepsTheID(t *testing.T) {
 // must read the file from stdin, and rm.
 func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 	root = t.TempDir()
-	for _, d := range []string{"usr", "etc"} {
+	for _, d := range []string{"usr", "etc", "opt"} {
 		os.Mkdir(filepath.Join(root, d), 0o555)
 	}
 	lock := func(mode fs.FileMode) {
@@ -223,7 +225,7 @@ func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 	return root, calls
 }
 
-// fakeChromeOnPath puts a google-chrome on PATH that does what the
+// fakeChromeOnPath puts a google-chrome and a brave-browser on PATH that does what the
 // extension's hello does: touch the lock file of the database the bind URL
 // names, unless $FAKE_NO_HELLO names that database. It logs each call.
 // It sets the time from the clock rather than letting touch take the
@@ -234,7 +236,9 @@ func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
 	log = filepath.Join(dir, "calls")
 	script := "#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> " + log + "\n" +
 		"[ \"${url##*#}\" = \"$FAKE_NO_HELLO\" ] || touch -d \"@$(date +%s.%N)\" \"" + p.ProfilesDir() + "/${url##*#}.lock\"\n"
-	os.WriteFile(filepath.Join(dir, "google-chrome"), []byte(script), 0o755)
+	for _, n := range []string{"google-chrome", "brave-browser"} {
+		os.WriteFile(filepath.Join(dir, n), []byte(script), 0o755)
+	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	old := chrome.BindWait
 	chrome.BindWait = 500 * time.Millisecond
@@ -1031,4 +1035,154 @@ func TestInstallStopsWhenNoProfileHasRun(t *testing.T) {
 	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
 		t.Fatalf("made databases %v", dbs)
 	}
+}
+
+// installedID is the extension id of the key install made.
+func installedID(t *testing.T, p db.Paths) string {
+	t.Helper()
+	key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
+	must(t, err)
+	return chrome.ExtensionID(chrome.PublicKeyDER(key))
+}
+
+// installChromium runs install's first pass for each browser, each in a
+// data directory of its own with profiles Default ("Personal") and
+// Profile 1 ("Work").
+func installChromium(t *testing.T, browsers ...string) {
+	t.Helper()
+	for _, b := range browsers {
+		var out, errb bytes.Buffer
+		if code := run([]string{"install", "--browser", b, "--user-data-dir", chromeData(t)}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("install %s: exit %d: %s%s", b, code, out.String(), errb.String())
+		}
+	}
+}
+
+func TestInstallIntoBraveThenBind(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := fakeSystem(t)
+	calls := fakeChromeOnPath(t, p)
+	udd := chromeData(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "Restart Brave") || !strings.Contains(out.String(), "mirrormark install --browser brave again") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	id := installedID(t, p)
+	mustExist(t, "install", filepath.Join(root, chrome.Brave.ExternalFile(id)), filepath.Join(root, chrome.HostManifestPath()))
+	mustBeGone(t, "install", filepath.Join(root, chrome.Chrome.ExternalFile(id)))
+	for dir, id := range map[string]string{"Default": "brave-personal", "Profile 1": "brave-work"} {
+		d, err := db.LoadDB(p.ProfileFile(id))
+		if err != nil || d.Profile.Browser != "brave" || d.Profile.Label != "brave/"+strings.TrimPrefix(id, "brave-") || d.Profile.Path != filepath.Join(udd, dir) {
+			t.Fatalf("%s: %+v, %v", id, d, err)
+		}
+	}
+
+	out.Reset()
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "bound: Profile 1 -> brave-work\n") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("--user-data-dir="+udd+" --profile-directory=Profile 1 chrome-extension://"+id+"/bind.html#brave-work\n")) {
+		t.Fatalf("calls:\n%s", c)
+	}
+}
+
+// Install for a browser that has never run here (no Local State) stops
+// before it writes anything, so it creates nothing under that browser's
+// system directory.
+func TestInstallIntoAbsentBraveWritesNothing(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := fakeSystem(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "Brave") || len(*calls) != 0 {
+		t.Fatalf("stderr %q, sudo calls %q", errb.String(), *calls)
+	}
+	mustBeGone(t, "absent brave", filepath.Join(root, "opt", "brave.com"), filepath.Join(root, chrome.HostManifestPath()), p.Data)
+}
+
+// The CRX and the host manifest serve every Chromium browser: they go with
+// the last one's external file, whichever goes first.
+func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
+	for _, c := range []struct{ gone, stays chrome.Browser }{{chrome.Brave, chrome.Chrome}, {chrome.Chrome, chrome.Brave}} {
+		t.Run(c.gone.Config, func(t *testing.T) {
+			skipIfRoot(t)
+			p := testHome(t)
+			root, _ := fakeSystem(t)
+			fakeChromeOnPath(t, p)
+			installChromium(t, "chrome", "brave")
+			id := installedID(t, p)
+			host, crx := filepath.Join(root, chrome.HostManifestPath()), filepath.Join(p.Data, "mirrormark.crx")
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", c.gone.Config}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, "first uninstall", filepath.Join(root, c.gone.ExternalFile(id)))
+			mustExist(t, "first uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"))
+			if !strings.Contains(out.String(), "which "+c.stays.Name+" still uses") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+			if code := run([]string{"uninstall", "--browser", c.stays.Config}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx)
+		})
+	}
+}
+
+// The key fixes the id both browsers use; purging either keeps it while
+// the other is installed.
+func TestPurgingOneChromiumBrowserKeepsTheKey(t *testing.T) {
+	for _, c := range []struct {
+		gone, stays chrome.Browser
+		goneIDs     []string
+		staysID     string
+	}{
+		{chrome.Brave, chrome.Chrome, []string{"brave-personal", "brave-work"}, "chrome-personal"},
+		{chrome.Chrome, chrome.Brave, []string{"chrome-personal", "chrome-work"}, "brave-personal"},
+	} {
+		t.Run(c.gone.Config, func(t *testing.T) {
+			skipIfRoot(t)
+			p := testHome(t)
+			fakeSystem(t)
+			fakeChromeOnPath(t, p)
+			installChromium(t, "chrome", "brave")
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", c.gone.Config, "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, c.gone.Config+" purge", p.ProfileFile(c.goneIDs[0]), p.ProfileFile(c.goneIDs[1]))
+			mustExist(t, c.gone.Config+" purge", filepath.Join(p.Data, "extension.pem"), p.ProfileFile(c.staysID), p.ConfigFile())
+			if code := run([]string{"uninstall", "--browser", c.stays.Config, "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, "last purge", p.ConfigFile(), p.Data, p.State)
+		})
+	}
+}
+
+// A Chromium browser's database left after its plain uninstall still
+// keeps the key: installing that browser again must give the same id.
+func TestBravePurgeKeepsTheKeyWhileChromesDatabasesAreLeft(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	installChromium(t, "chrome", "brave")
+	var out, errb bytes.Buffer
+	for _, args := range [][]string{{"uninstall"}, {"uninstall", "--browser", "brave", "--purge"}} {
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%q: exit %d: %s%s", args, code, out.String(), errb.String())
+		}
+	}
+	mustExist(t, "brave purge", filepath.Join(p.Data, "extension.pem"), p.ProfileFile("chrome-personal"))
 }

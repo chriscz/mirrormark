@@ -318,6 +318,19 @@ func TestLookup(t *testing.T) {
 	}
 }
 
+func TestBraveDescription(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/x/config")
+	if got, _ := Brave.DefaultUserDataDir(); got != "/x/config/BraveSoftware/Brave-Browser" {
+		t.Fatalf("data dir %s", got)
+	}
+	if got := Brave.ExternalFile("pjjjaeommfpeolloibnafkcmkindkagl"); got != "/opt/brave.com/brave/extensions/pjjjaeommfpeolloibnafkcmkindkagl.json" {
+		t.Fatalf("external file %s", got)
+	}
+	if b, ok := Lookup("brave"); !ok || b != Brave || Brave.InstallCommand() != "mirrormark install --browser brave" {
+		t.Fatalf("lookup %+v %v", b, ok)
+	}
+}
+
 // fakeChrome writes a script that logs its arguments, one call per line.
 func fakeChrome(t *testing.T) (bin, log string) {
 	dir := t.TempDir()

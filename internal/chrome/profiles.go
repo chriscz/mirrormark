@@ -43,8 +43,14 @@ type Browser struct {
 var Chrome = Browser{Config: "chrome", Name: "Chrome", DataDir: "google-chrome", Bin: "google-chrome",
 	ExternalDir: "/usr/share/google-chrome/extensions"}
 
+// Brave is Brave stable from Brave's package. It reads external extension
+// files from its own install directory, and native host manifests from
+// Chrome's system directory, so it shares Chrome's host manifest.
+var Brave = Browser{Config: "brave", Name: "Brave", DataDir: "BraveSoftware/Brave-Browser", Bin: "brave-browser",
+	ExternalDir: "/opt/brave.com/brave/extensions"}
+
 // Browsers are the Chromium-based browsers install knows.
-var Browsers = []Browser{Chrome}
+var Browsers = []Browser{Chrome, Brave}
 
 // Lookup returns the browser whose Config is config.
 func Lookup(config string) (Browser, bool) {

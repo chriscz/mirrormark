@@ -4,8 +4,8 @@ mirrormark keeps chosen bookmark folders the same across browser profiles on
 one computer. It is a browser extension plus one Go program, and it stores
 everything in YAML files you can read. No server, no account, no network.
 
-Status: early. It works with Google Chrome and Firefox Developer Edition on
-Linux.
+Status: early. It works with Google Chrome, Brave and Firefox Developer
+Edition on Linux.
 
 ## Install (Google Chrome on Linux)
 
@@ -99,8 +99,8 @@ removes the extension from every profile when it next starts. Your
 bookmarks stay in Chrome, and your config, databases, backups, key and log
 stay where they are; it says so. `mirrormark uninstall --purge` also
 deletes Chrome's databases, their backups and the key. It deletes the
-config and log too, unless a Firefox profile's database is left: Firefox's
-profiles still sync through them, and Firefox's `uninstall` needs those
+config and log too, unless another browser's database is left: its
+profiles still sync through them, and its `uninstall` needs those
 databases to find its profiles.
 
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
@@ -109,6 +109,35 @@ Load unpacked in `chrome://extensions` (Developer mode). It still needs
 `install`'s host manifest to reach the host. For Load unpacked, give a
 folder of your own, such as `~/mirrormark-extension`: `install` deletes and
 rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
+
+## Install (Brave on Linux)
+
+Brave installs as Chrome does (see [Install (Google Chrome on
+Linux)](#install-google-chrome-on-linux)), with `--browser brave`:
+
+1. Run `mirrormark install --browser brave`. It binds every profile in
+   `~/.config/BraveSoftware/Brave-Browser` (or `$XDG_CONFIG_HOME/…`);
+   `--profile` and `--user-data-dir` work as for Chrome. With `sudo` it
+   writes `/opt/brave.com/brave/extensions/<extension id>.json` and the same
+   host manifest Chrome uses, so Chrome and Brave share one extension id.
+2. Restart Brave (`pgrep -x brave` shows none left), then run
+   `mirrormark install --browser brave` again to bind the profiles. Profile
+   ids start with `brave-`, labels with `brave/`.
+
+Brave's extensions page may show a Safety Check card saying it can't verify
+where mirrormark comes from; mirrormark stays on. Brave reopens your last
+session when it starts, so a bind tab left from a failed try may open again
+and bind the profile again to the same database; that is harmless.
+
+After upgrading mirrormark, run `mirrormark install --browser brave` as well
+as `mirrormark install` if you use both. `mirrormark uninstall --browser
+brave` removes Brave's file. It keeps the CRX and the host manifest while
+Chrome still has mirrormark installed, and `--purge` keeps the key while
+Chrome has it installed or a Chrome profile's database is left; the same
+goes for Chrome while Brave has it.
+
+Only Brave stable from Brave's own package is supported. Brave Beta and
+Nightly, and Brave from Flatpak or Snap, are untested and not supported.
 
 ## Install (Firefox Developer Edition on Linux)
 
