@@ -392,11 +392,11 @@ machine except Docker.
     bin/dev shell                # a shell in the dev container
 
 The end-to-end tests run real browsers from the dev image under Xvfb:
-Google Chrome, driven over the DevTools protocol, and Firefox Developer
-Edition, driven over WebDriver BiDi in a D-Bus session, which carries
-`install`'s bind page to a running Firefox. Each test installs mirrormark
+Google Chrome and Brave, driven over the DevTools protocol, and Firefox
+Developer Edition and LibreWolf, driven over WebDriver BiDi in a D-Bus
+session, which carries `install`'s bind page to a running Firefox. Each test installs mirrormark
 into two browser instances with `mirrormark install` and binds them. They
-run one at a time, because they share Chrome's system directories, which
+run one at a time, because they share the Chromium browsers' system directories, which
 only the dev image lets your user write. Besides installing and binding,
 they share a folder between the two instances and check that each kind of
 edit, a delete, restore and purge, a conflict, the first sync of two filled
