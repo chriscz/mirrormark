@@ -63,7 +63,7 @@ type Problem struct {
 	Message string `json:"message"`
 }
 
-// Chrome limits messages to the extension to 1 MB. Messages from it may be
+// Both browsers limit messages to the extension to 1 MB. Messages from it may be
 // larger; 64 MB bounds what a broken peer can make us allocate.
 const (
 	maxOut = 1 << 20
@@ -95,7 +95,7 @@ func WriteMsg(w io.Writer, m Msg) error {
 		return err
 	}
 	if len(b) > maxOut {
-		return fmt.Errorf("message of %d bytes is over Chrome's 1 MB limit", len(b))
+		return fmt.Errorf("message of %d bytes is over the browsers' 1 MB limit", len(b))
 	}
 	// One write, so a reader never sees a length without its message.
 	out := binary.NativeEndian.AppendUint32(make([]byte, 0, 4+len(b)), uint32(len(b)))

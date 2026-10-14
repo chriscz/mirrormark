@@ -156,7 +156,7 @@ func (s *state) warn(code, msg string) {
 
 func (s *state) handle(m Msg) error {
 	if m.V != Version {
-		return s.fail("unsupported-version", fmt.Sprintf("protocol version %d is not %d; restart Chrome after upgrading mirrormark", m.V, Version))
+		return s.fail("unsupported-version", fmt.Sprintf("protocol version %d is not %d; restart the browser after upgrading mirrormark", m.V, Version))
 	}
 	switch m.Type {
 	case "hello":

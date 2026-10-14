@@ -53,6 +53,23 @@ func TestExtensionOriginRunsTheHost(t *testing.T) {
 	}
 }
 
+// Firefox starts the host with the host manifest's path and the
+// extension's id.
+func TestFirefoxArgumentsRunTheHost(t *testing.T) {
+	d := t.TempDir()
+	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+		t.Setenv(v, d+"/"+v)
+	}
+	var out, errb bytes.Buffer
+	args := []string{"/home/u/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json", "mirrormark@chriscz.github.io"}
+	if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("host wrote %q to stdout", out.String())
+	}
+}
+
 // A log over 1 MiB moves to log.1, replacing the one before, when a host
 // starts.
 func TestHostRotatesALargeLog(t *testing.T) {

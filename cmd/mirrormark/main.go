@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/db"
 	"github.com/chriscz/mirrormark/internal/host"
 )
@@ -37,8 +38,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
-	// Chrome runs the host with the extension's origin as its only argument.
-	if strings.HasPrefix(args[0], "chrome-extension://") || args[0] == "host" {
+	// Chrome runs the host with the extension's origin as its only argument;
+	// Firefox with the host manifest's path and the extension's id.
+	if strings.HasPrefix(args[0], "chrome-extension://") ||
+		strings.HasSuffix(args[0], "/"+extension.HostName+".json") || args[0] == "host" {
 		return cmdHost(stdin, stdout, stderr)
 	}
 	switch args[0] {
