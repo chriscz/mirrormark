@@ -123,6 +123,24 @@ func TestFilesAppendOnlyMissingPrefs(t *testing.T) {
 	}
 }
 
+// After an uninstall, user.js holds the reset lines; install puts each pref
+// back where its reset line is, so reinstalling adds no lines.
+func TestFilesReplaceResetLinesInPlace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "user.js"), []byte(ResetPrefs[Prefs[0]]+"\nuser_pref(\"browser.startup.page\", 3);\n"+ResetPrefs[Prefs[1]]+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files, err := Files([]string{dir}, "/usr/local/bin/mirrormark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Prefs[0] + "\nuser_pref(\"browser.startup.page\", 3);\n" + Prefs[1] + "\n" + Prefs[2] + "\n"
+	if string(files[2].Data) != want {
+		t.Fatalf("user.js %q", files[2].Data)
+	}
+}
+
 func TestPrefsAndTheirResets(t *testing.T) {
 	want := []string{
 		`user_pref("xpinstall.signatures.required", false);`,

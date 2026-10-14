@@ -245,11 +245,16 @@ func TestFilesCurrentAndWrite(t *testing.T) {
 func TestWriteFilesKeepsALinkAndTheMode(t *testing.T) {
 	dir, dotfiles := t.TempDir(), t.TempDir()
 	target, link := filepath.Join(dotfiles, "user.js"), filepath.Join(dir, "user.js")
-	os.WriteFile(target, []byte("old"), 0o600)
-	os.Symlink(target, link)
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
 	private := filepath.Join(dir, "private.js")
-	os.WriteFile(private, []byte("old"), 0o600)
-	os.Chmod(private, 0o600)
+	if err := os.WriteFile(private, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteFiles([]File{{link, []byte("new")}, {private, []byte("new")}}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +270,9 @@ func TestWriteFilesKeepsALinkAndTheMode(t *testing.T) {
 	}
 	// A link to nothing is left alone: writing it would replace the link.
 	dangling := filepath.Join(dir, "dangling.js")
-	os.Symlink(filepath.Join(dotfiles, "missing"), dangling)
+	if err := os.Symlink(filepath.Join(dotfiles, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteFiles([]File{{dangling, []byte("new")}}); err == nil {
 		t.Fatal("wrote over a dangling link")
 	}

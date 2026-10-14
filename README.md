@@ -4,7 +4,8 @@ mirrormark keeps chosen bookmark folders the same across browser profiles on
 one computer. It is a browser extension plus one Go program, and it stores
 everything in YAML files you can read. No server, no account, no network.
 
-Status: early. It works with Google Chrome on Linux only.
+Status: early. It works with Google Chrome and Firefox Developer Edition on
+Linux.
 
 ## Install (Google Chrome on Linux)
 
@@ -97,7 +98,25 @@ alone if another install (a different key) has since replaced it. Chrome
 removes the extension
 from every profile when it next starts. Your bookmarks stay in Chrome, and
 your config, databases, backups, key and log stay where they are; it says
-so. `mirrormark uninstall --purge` deletes them too.
+so. `mirrormark uninstall --purge` also deletes Chrome's databases, their
+backups and the key. It deletes the config and log too, unless a Firefox
+profile's database is left: Firefox's profiles still sync through them, and
+Firefox's `uninstall` needs those databases to find its profiles.
+
+`mirrormark uninstall --browser firefox` removes the XPI from each profile
+whose database file says `browser: firefox`, and the host manifest if it
+names mirrormark. In each such profile's `user.js` it sets
+`xpinstall.signatures.required` and `extensions.autoDisableScopes` (see
+[Install (Firefox Developer Edition on Linux)](#install-firefox-developer-edition-on-linux))
+back to `true` and `15`. It changes every line that sets them to
+mirrormark's values, including lines you wrote yourself; that only turns
+the checks back on. If no database names a Firefox profile, it changes no
+`user.js` and says so. It leaves `extensions.startupScanScopes` at 1: that
+only makes Firefox look in the profile's own `extensions` folder at start,
+which is how it notices the XPI is gone. `--purge` deletes the Firefox
+profiles' databases and their backups, and the config and log too unless a
+Chrome profile's database is left. Installing again turns the two lines
+back, without adding new ones.
 
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
@@ -105,6 +124,36 @@ Load unpacked in `chrome://extensions` (Developer mode). It still needs
 `install`'s host manifest to reach the host. For Load unpacked, give a
 folder of your own, such as `~/mirrormark-extension`: `install` deletes and
 rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
+
+## Install (Firefox Developer Edition on Linux)
+
+Release Firefox cannot run mirrormark yet. Firefox Developer Edition can.
+
+**Before you start.** Firefox installs only add-ons Mozilla signed unless a
+profile says otherwise, and mirrormark is not signed. So `install` sets, in
+each profile's `user.js`, `xpinstall.signatures.required` to false (that
+profile then accepts any unsigned add-on, not only mirrormark) and
+`extensions.autoDisableScopes` to 14 (an add-on file in the profile's
+`extensions` folder starts enabled without asking; add-ons elsewhere still
+ask). `mirrormark uninstall --browser firefox` sets them back.
+
+The binary needs a stable place, as for Chrome.
+
+1. Run `mirrormark install --browser firefox` as yourself; it needs no
+   `sudo`. By default it takes every profile in `~/.config/mozilla/firefox`
+   or `~/.mozilla/firefox`; `--profile NAME` (repeatable) and
+   `--user-data-dir DIR` narrow it. It refuses, before writing anything,
+   if a chosen profile was last run by a Firefox other than Developer
+   Edition.
+2. Restart Firefox in those profiles if it is running (close every window).
+3. Run `mirrormark install --browser firefox` again. For each profile it
+   starts Firefox there if it is not running, opens a tab and prints
+   `bound: <profile> -> firefox-<name>`.
+4. Export your bookmarks from Firefox (Bookmarks, Manage bookmarks, Import
+   and Backup), then share folders in `config.yaml` as for Chrome (see
+   [Ids, labels and the key](#ids-labels-and-the-key) and
+   [config.yaml](#configyaml)). Separators stay where you put them; mirrormark
+   never syncs them.
 
 ## Files
 
@@ -115,6 +164,9 @@ rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 | `~/.local/share/mirrormark/backups/<id>/` | One copy of each database a day, the newest 30. For reading only. |
 | `~/.local/share/mirrormark/extension.pem` | The key that fixes the extension id (mode 0600). |
 | `~/.local/share/mirrormark/mirrormark.crx`, `extension/` | The packed and unpacked extension, written by `install`. |
+| `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Firefox profile, written by `install --browser firefox`. |
+| `<profile>/user.js` | Three lines `install --browser firefox` adds: `xpinstall.signatures.required` false, `extensions.autoDisableScopes` 14, `extensions.startupScanScopes` 1. Your own lines stay as they are. |
+| `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the Firefox add-on start the `mirrormark` binary. |
 | `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.

@@ -93,8 +93,8 @@ type hostManifestJSON struct {
 }
 
 // Files are the files install writes: the host manifest letting the add-on
-// start bin, then for each profile the XPI and its user.js with every line
-// of Prefs it lacks appended. The user's own lines stay as they are.
+// start bin, then for each profile the XPI and its user.js with the prefs
+// set (see withPrefs). The user's own lines stay as they are.
 func Files(profileDirs []string, bin string) ([]chrome.File, error) {
 	host, err := HostManifestPath()
 	if err != nil {
@@ -112,26 +112,38 @@ func Files(profileDirs []string, bin string) ([]chrome.File, error) {
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
-		if len(user) > 0 && user[len(user)-1] != '\n' {
-			user = append(user, '\n')
-		}
-		for _, p := range Prefs {
-			if !hasLine(user, p) {
-				user = append(user, p+"\n"...)
-			}
-		}
-		files = append(files, chrome.File{Path: XPIPath(dir), Data: xpi}, chrome.File{Path: filepath.Join(dir, "user.js"), Data: user})
+		files = append(files, chrome.File{Path: XPIPath(dir), Data: xpi}, chrome.File{Path: filepath.Join(dir, "user.js"), Data: withPrefs(user)})
 	}
 	return files, nil
 }
 
-func hasLine(data []byte, line string) bool {
-	for l := range strings.Lines(string(data)) {
-		if strings.TrimSpace(l) == line {
-			return true
+// withPrefs returns user.js with each line uninstall wrote (a value of
+// ResetPrefs) turned back into its pref where it is, so installing again
+// adds no lines, then every pref still missing appended. Changing a line
+// in place relies on no later line setting the same pref: Firefox applies
+// the last one.
+func withPrefs(user []byte) []byte {
+	var b strings.Builder
+	have := map[string]bool{}
+	for line := range strings.Lines(string(user)) {
+		l := strings.TrimSpace(line)
+		for p, r := range ResetPrefs {
+			if l == r {
+				l, line = p, p+"\n"
+			}
+		}
+		have[l] = true
+		if !strings.HasSuffix(line, "\n") {
+			line += "\n"
+		}
+		b.WriteString(line)
+	}
+	for _, p := range Prefs {
+		if !have[p] {
+			b.WriteString(p + "\n")
 		}
 	}
-	return false
+	return []byte(b.String())
 }
 
 var channelRe = regexp.MustCompile(`pref\("app\.update\.channel",\s*"([^"]+)"\)`)
