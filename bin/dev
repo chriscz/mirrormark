@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Run mirrormark's build tools inside the dev Docker image (see Dockerfile).
+set -euo pipefail
+
+IMAGE=mirrormark-dev
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+    cat <<EOF
+Usage: bin/dev <command> [args...]
+
+Commands:
+  image build   Build the image, or rebuild it after a Dockerfile change
+  shell         Open a temporary shell in the dev container
+  run <cmd...>  Run one command in the dev container
+  help          Show this help
+
+The repo is mounted at /src and commands run as your user. Go's caches live
+in .cache/ in the repo so they survive between containers.
+
+Examples:
+  bin/dev run make
+  bin/dev run make check-e2e
+EOF
+}
+
+image_build() { docker build -t "$IMAGE" "$ROOT"; }
+
+container() {
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || image_build
+    local tty=()
+    [ -t 0 ] && tty=(-t)
+    # HOME=/tmp: your UID has no home directory in the image.
+    docker run --rm -i "${tty[@]}" -u "$(id -u):$(id -g)" -e HOME=/tmp \
+        -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/mod -e GOFLAGS=-modcacherw \
+        -v "$ROOT":/src "$IMAGE" "$@"
+}
+
+case "${1:-help}" in
+    image) [ "${2:-}" = build ] || { usage >&2; exit 1; }; image_build ;;
+    shell) container bash ;;
+    run) shift; [ $# -gt 0 ] || { usage >&2; exit 1; }; container "$@" ;;
+    help | -h | --help) usage ;;
+    *) usage >&2; exit 1 ;;
+esac
