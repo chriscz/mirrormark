@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -115,14 +116,34 @@ func FilesCurrent(files []File) bool {
 	return true
 }
 
-// WriteFiles writes world-readable files and directories: Chrome reads
-// them as the user.
+// WriteFiles writes world-readable files and directories: the browser
+// reads them as the user. A file that exists keeps its mode, and one that
+// is a symlink is written where the link points, so a user's own file
+// (user.js kept with their dotfiles, say) stays as they set it up.
 func WriteFiles(files []File) error {
 	for _, f := range files {
-		if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+		path, mode := f.Path, fs.FileMode(0o644)
+		real, err := filepath.EvalSymlinks(path)
+		switch {
+		case err == nil:
+			path = real
+			fi, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			mode = fi.Mode().Perm()
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		default:
+			// A link to nothing would be replaced by a file.
+			if _, err := os.Lstat(path); err == nil {
+				return fmt.Errorf("%s is a symlink to a file that does not exist", path)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		if err := db.WriteAtomic(f.Path, f.Data, 0o644); err != nil {
+		if err := db.WriteAtomic(path, f.Data, mode); err != nil {
 			return err
 		}
 	}

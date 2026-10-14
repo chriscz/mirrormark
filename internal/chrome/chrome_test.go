@@ -240,6 +240,40 @@ func TestFilesCurrentAndWrite(t *testing.T) {
 	}
 }
 
+// Rewriting a file the user keeps elsewhere and links in, as dotfiles often
+// are, writes through the link; a file the user made private stays private.
+func TestWriteFilesKeepsALinkAndTheMode(t *testing.T) {
+	dir, dotfiles := t.TempDir(), t.TempDir()
+	target, link := filepath.Join(dotfiles, "user.js"), filepath.Join(dir, "user.js")
+	os.WriteFile(target, []byte("old"), 0o600)
+	os.Symlink(target, link)
+	private := filepath.Join(dir, "private.js")
+	os.WriteFile(private, []byte("old"), 0o600)
+	os.Chmod(private, 0o600)
+	if err := WriteFiles([]File{{link, []byte("new")}, {private, []byte("new")}}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link replaced: %v %v", fi, err)
+	}
+	for _, f := range []string{target, private} {
+		data, _ := os.ReadFile(f)
+		fi, _ := os.Stat(f)
+		if string(data) != "new" || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %q %v", f, data, fi.Mode().Perm())
+		}
+	}
+	// A link to nothing is left alone: writing it would replace the link.
+	dangling := filepath.Join(dir, "dangling.js")
+	os.Symlink(filepath.Join(dotfiles, "missing"), dangling)
+	if err := WriteFiles([]File{{dangling, []byte("new")}}); err == nil {
+		t.Fatal("wrote over a dangling link")
+	}
+	if fi, err := os.Lstat(dangling); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dangling link replaced: %v %v", fi, err)
+	}
+}
+
 func TestSystemFiles(t *testing.T) {
 	e := Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "0.1.0", CRX: "/h/.local/share/mirrormark/mirrormark.crx"}
 	fs := SystemFiles(e, "/usr/local/bin/mirrormark")
