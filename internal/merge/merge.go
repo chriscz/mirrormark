@@ -45,6 +45,7 @@
 package merge
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -115,12 +116,14 @@ type node struct {
 	val
 	id          string // P's browser id; "" means create it
 	index       int    // position among the source's siblings
-	inOurs      bool   // P's browser already holds it under this parent
 	theirsMoved bool   // the parent came from theirs
 	oursParent  string
 }
 
-type bnode struct{ title, url, parent string }
+type bnode struct {
+	title, url, parent string
+	index              int
+}
 
 type merger struct {
 	in                 Input
@@ -216,8 +219,8 @@ func flatten(ns []*db.Node) map[string]entry {
 }
 
 func (m *merger) indexBrowser(ns []*db.Node, parent string) {
-	for _, n := range ns {
-		m.browser[n.ID] = bnode{title: n.Title, url: n.URL, parent: parent}
+	for i, n := range ns {
+		m.browser[n.ID] = bnode{title: n.Title, url: n.URL, parent: parent, index: i}
 		m.indexBrowser(n.Children, n.ID)
 		m.browserOrder = append(m.browserOrder, n.ID)
 	}
@@ -313,8 +316,8 @@ func suffixed(v val, label string) val {
 
 func same(a, b val) bool { return a.title == b.title && a.url == b.url && a.parent == b.parent }
 
-func (m *merger) put(k string, v val, id string, index int, inOurs, theirsMoved bool) *node {
-	n := &node{val: v, id: id, index: index, inOurs: inOurs, theirsMoved: theirsMoved}
+func (m *merger) put(k string, v val, id string, index int, theirsMoved bool) *node {
+	n := &node{val: v, id: id, index: index, theirsMoved: theirsMoved}
 	m.out[k] = n
 	return n
 }
@@ -332,7 +335,7 @@ func (m *merger) mergeOne(k string) {
 				m.dropped[k] = &node{val: t.v, index: t.index}
 				return
 			}
-			m.put(k, t.v, "", t.index, false, true)
+			m.put(k, t.v, "", t.index, true)
 			return
 		}
 		// P deleted it: that is a move into _deleted, merged like any edit.
@@ -343,24 +346,24 @@ func (m *merger) mergeOne(k string) {
 		m.merge3(k, b.v, vo, t.v, "", last, t.index)
 	case inB && !inT: // another member purged it
 		if same(b.v, o.v) {
-			m.dropped[k] = &node{val: o.v, id: o.id, index: o.index, inOurs: true}
+			m.dropped[k] = &node{val: o.v, id: o.id, index: o.index}
 			return
 		}
 		v := o.v
 		v.by = m.in.Label
-		m.put(k, v, o.id, o.index, true, false)
+		m.put(k, v, o.id, o.index, false)
 	case inB:
 		m.merge3(k, b.v, o.v, t.v, o.id, o.index, t.index)
 	case inO && inT: // the same add on both sides, linked
-		m.put(k, o.v, o.id, o.index, true, false)
+		m.put(k, o.v, o.id, o.index, false)
 	case inO:
-		m.put(k, o.v, o.id, o.index, true, false)
+		m.put(k, o.v, o.id, o.index, false)
 	default: // added by another member
 		v := t.v
 		if r, ok := m.retitle[k]; ok {
 			v = r
 		}
-		m.put(k, v, "", t.index, false, true)
+		m.put(k, v, "", t.index, true)
 	}
 }
 
@@ -387,14 +390,14 @@ func (m *merger) merge3(k string, b, o, t val, id string, oIndex, tIndex int) {
 		m.conflicts = append(m.conflicts, c)
 		if !b.folder {
 			// Both survive: theirs keeps m, P's browser node becomes the copy.
-			m.put(k, suffixed(t, t.by), "", tIndex, false, true)
+			m.put(k, suffixed(t, t.by), "", tIndex, true)
 			if o.suffix == "" && o.title == suffixed(b, m.in.Label).title {
 				// Our copy's retitle landed in a round that wrote no file.
 				o.suffix = m.in.Label
 			}
 			ov := suffixed(o, m.in.Label)
 			ov.by = m.in.Label
-			m.put(m.in.NewM(), ov, id, oIndex, id != "", false)
+			m.put(m.in.NewM(), ov, id, oIndex, false)
 			return
 		}
 		// Folders are never copied, because a copy would duplicate the
@@ -421,7 +424,7 @@ func (m *merger) merge3(k string, b, o, t val, id string, oIndex, tIndex int) {
 	if fp == fromTheirs {
 		index = tIndex
 	}
-	n := m.put(k, r, id, index, id != "" && fp != fromTheirs, fp == fromTheirs)
+	n := m.put(k, r, id, index, fp == fromTheirs)
 	n.oursParent = o.parent
 }
 
@@ -492,9 +495,9 @@ func (m *merger) resurrect() {
 				m.out[n.parent] = d
 				delete(m.dropped, n.parent)
 			case n.parent == m.deleted:
-				m.put(m.deleted, val{title: DeletedTitle, folder: true, by: m.in.Label}, "", last, false, false)
+				m.put(m.deleted, val{title: DeletedTitle, folder: true, by: m.in.Label}, "", last, false)
 			default:
-				n.parent, n.inOurs, n.index = m.deletedM(), false, last
+				n.parent, n.index = m.deletedM(), last
 			}
 		}
 	}
@@ -533,7 +536,7 @@ func (m *merger) breakCycles() bool {
 				}
 			}
 			if n := m.out[c]; n.theirsMoved {
-				n.parent, n.theirsMoved, n.inOurs = n.oursParent, false, n.id != ""
+				n.parent, n.theirsMoved = n.oursParent, false
 			}
 			break
 		}
@@ -564,7 +567,7 @@ func (m *merger) dedupe(kids map[string][]string) {
 			}
 			j := kids[p][i]
 			o := m.out[j]
-			n.id, n.inOurs, n.index = o.id, true, o.index
+			n.id, n.index = o.id, o.index
 			for _, c := range kids[j] {
 				m.out[c].parent = k
 			}
@@ -578,18 +581,26 @@ func (m *merger) dedupe(kids map[string][]string) {
 	}
 }
 
+// build orders each folder's children as P's browser will hold them: the
+// nodes the browser already holds there in its order, the others at their
+// source index among them. ops places each node after its tree sibling, so
+// the browser ends up in exactly this order and the next round sees no
+// change.
 func (m *merger) build(parent string, kids map[string][]string) []*db.Node {
+	pid := m.in.RootID
+	if parent != "" {
+		pid = m.out[parent].id
+	}
 	var ordered, rest []string
 	for _, k := range kids[parent] {
-		if m.out[k].inOurs {
+		if id := m.out[k].id; id != "" && pid != "" && m.browser[id].parent == pid {
 			ordered = append(ordered, k)
 		} else {
 			rest = append(rest, k)
 		}
 	}
-	byIndex := func(a, b string) int { return m.out[a].index - m.out[b].index }
-	slices.SortStableFunc(ordered, byIndex)
-	slices.SortStableFunc(rest, byIndex)
+	slices.SortStableFunc(ordered, func(a, b string) int { return m.browser[m.out[a].id].index - m.browser[m.out[b].id].index })
+	slices.SortStableFunc(rest, func(a, b string) int { return m.out[a].index - m.out[b].index })
 	for _, k := range rest {
 		ordered = slices.Insert(ordered, min(m.out[k].index, len(ordered)), k)
 	}
@@ -610,22 +621,39 @@ func (m *merger) build(parent string, kids map[string][]string) []*db.Node {
 func (m *merger) ops(tree []*db.Node) []Op {
 	var seq, upd, rem []Op
 	kept := map[string]bool{}
+	// kids tracks each folder's children as the ops leave them, by browser
+	// id or, for a created node, its Ref. Each node goes right after its
+	// tree sibling; a node the browser holds before that sibling may still
+	// leave later in the batch, so the tree index alone could be off.
+	kids := map[string][]string{}
+	for _, id := range m.browserOrder {
+		p := m.browser[id].parent
+		kids[p] = append(kids[p], id)
+	}
+	key := func(n *db.Node) string { return cmp.Or(n.ID, n.M) }
 	var walk func(parent string, ns []*db.Node)
 	walk = func(parent string, ns []*db.Node) {
 		for i, n := range ns {
+			at := 0
+			if i > 0 {
+				at = slices.Index(kids[parent], key(ns[i-1])) + 1
+			}
 			if n.ID == "" {
-				op := Op{Op: "create", Ref: n.M, Parent: parent, Index: new(i), Title: new(n.Title)}
+				op := Op{Op: "create", Ref: n.M, Parent: parent, Index: new(at), Title: new(n.Title)}
 				if n.URL != "" {
 					op.URL = new(n.URL)
 				}
 				seq = append(seq, op)
+				kids[parent] = slices.Insert(kids[parent], at, n.M)
 				walk(n.M, n.Children)
 				continue
 			}
 			kept[n.ID] = true
 			b := m.browser[n.ID]
 			if b.parent != parent {
-				seq = append(seq, Op{Op: "move", ID: n.ID, Parent: parent, Index: new(i), Expect: &Expect{Parent: b.parent}})
+				seq = append(seq, Op{Op: "move", ID: n.ID, Parent: parent, Index: new(at), Expect: &Expect{Parent: b.parent}})
+				kids[b.parent] = slices.DeleteFunc(kids[b.parent], func(id string) bool { return id == n.ID })
+				kids[parent] = slices.Insert(kids[parent], at, n.ID)
 			}
 			if b.title != n.Title || b.url != n.URL {
 				op := Op{Op: "update", ID: n.ID, Expect: &Expect{Title: new(b.title), URL: new(b.url)}}

@@ -77,15 +77,35 @@ func (s *sim) round(m *member) (bool, error) {
 			ids[res.Ops[i].Ref] = r.ID
 		}
 	}
-	if got, want := m.b.Lines(m.root), fakebrowser.NodeLines(res.Tree); !slices.Equal(got, want) {
+	if got, want := order(m.b.Children(m.root)), order(res.Tree); !slices.Equal(got, want) {
 		return false, fmt.Errorf("%s: browser after ops:\n%q\nmerged tree:\n%q", m.label, got, want)
 	}
 	fill(res.Tree, ids)
 	if m.has && db.EqualNodes(res.Tree, m.rec) {
 		return false, nil
 	}
+	if m.has && len(res.Ops) == 0 && slices.Equal(fakebrowser.NodeLines(res.Tree), fakebrowser.NodeLines(m.rec)) &&
+		slices.Equal(flat(res.Tree), flat(m.rec)) {
+		return false, fmt.Errorf("%s: a quiet round wrote an order-only change", m.label)
+	}
 	m.rec, m.has, m.seq = res.Tree, true, best+1
 	return true, nil
+}
+
+// flat lists every node's fields but not its position, so two trees that
+// differ only in sibling order list the same.
+func flat(ns []*db.Node) []string {
+	var out []string
+	var walk func(ns []*db.Node, parent string)
+	walk = func(ns []*db.Node, parent string) {
+		for _, n := range ns {
+			out = append(out, fmt.Sprintf("%s %s %q %q %s %s %s", parent, n.M, n.Title, n.URL, n.ID, n.By, n.Suffix))
+			walk(n.Children, n.M)
+		}
+	}
+	walk(ns, "")
+	slices.Sort(out)
+	return out
 }
 
 // settle runs sweeps of rounds over every member until one sweep publishes

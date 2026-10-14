@@ -89,10 +89,25 @@ func (f *fixture) round(theirs []*db.Node) merge.Result {
 			f.t.Fatalf("op %d %+v failed: %s", i, res.Ops[i], r.Error)
 		}
 	}
-	if got, want := f.b.Lines(f.root), fakebrowser.NodeLines(res.Tree); !slices.Equal(got, want) {
+	if got, want := order(f.b.Children(f.root)), order(res.Tree); !slices.Equal(got, want) {
 		f.t.Fatalf("browser after ops:\n%q\nmerged tree:\n%q", got, want)
 	}
 	return res
+}
+
+// order lists a tree's paths in sibling order. The merged tree must list as
+// the browser does after the ops, or the next quiet round sees a change.
+func order(ns []*db.Node) []string {
+	var out []string
+	var walk func(ns []*db.Node, prefix string)
+	walk = func(ns []*db.Node, prefix string) {
+		for _, n := range ns {
+			out = append(out, prefix+"/"+n.Title+" "+n.URL)
+			walk(n.Children, prefix+"/"+n.Title)
+		}
+	}
+	walk(ns, "")
+	return out
 }
 
 func (f *fixture) want(want ...string) {
@@ -629,4 +644,22 @@ func TestRetryAfterAddConflictLandedKeepsOneSuffix(t *testing.T) {
 	f.round(theirs)
 	f.round(theirs)
 	f.want("/Mail (chrome/personal) https://fastmail.com/", "/Mail (chrome/work) https://gmail.com/")
+}
+
+// New nodes go where the merged tree puts them even when nodes before them
+// in the browser leave the folder later in the batch.
+func TestBrowserOrderMatchesTheTree(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
+		b.Add(root, "A", "https://a/")
+		b.Add(root, "B", "https://b/")
+		b.Add(root, "F", "")
+	})
+	res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { // A into F, C after B
+		a, b, fo := ns[0], ns[1], ns[2]
+		fo.Children = []*db.Node{a}
+		return []*db.Node{b, {Title: "C", URL: "https://c/", M: "m-C", By: other}, fo}
+	}))
+	if got := order(res.Tree); !slices.Equal(got, []string{"/B https://b/", "/C https://c/", "/F ", "/F/A https://a/"}) {
+		t.Fatalf("order %q", got)
+	}
 }
