@@ -102,7 +102,7 @@ func Connected(p Paths, id string, since time.Time) bool   // a host touched pro
 
 // internal/merge (task 3)
 const DeletedTitle = "_deleted"
-var ErrWrongTree error
+var ErrWrongTree error  // "db-mismatch: … would move to _deleted or be purged; is a database file truncated, or this profile bound to the wrong one?"
 type Input struct{ Base []*db.Node; HasBase bool; Ours, Theirs []*db.Node; RootID, Label string; NewM func() string }
 type Conflict struct{ Folder bool; Ours, Theirs string }
 type Result struct{ Tree []*db.Node; Ops []Op; Conflicts []Conflict }
@@ -122,6 +122,9 @@ func (b *Browser) Lines(id string) []string
 func (b *Browser) Apply(ops []merge.Op, fail func(i int) bool) []merge.OpResult
 func (b *Browser) Tree() []round.TreeNode          // task 4
 func NodeLines(ns []*db.Node) []string
+type Union interface{ Len() int; Member(i int) (*Browser, string, []*db.Node); Edited(i int); Round(i int, fail func(int) bool) (bool, error) } // task 4
+func Fuzz(seed uint64, u Union, budget int) error  // random edits and failing rounds; budget caps removes per burst, -1 none
+func Seeds() int                                   // -mirrormark.fuzz, default 300, 30 with -short
 
 // internal/round (task 4)
 type TreeNode struct{ ID string; Parent *string; Index int; Title, URL, Root string; Syncing bool } // json: id,parent,index,title,url,root,syncing
@@ -1866,9 +1869,11 @@ import (
 const DeletedTitle = "_deleted"
 
 // ErrWrongTree means the round would move most of a member folder into
-// _deleted. That is far more often a browser that has not loaded its
-// bookmarks, a reset profile or a wrong binding than a real mass delete.
-var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle)
+// _deleted or remove it. That is far more often a browser that has not
+// loaded its bookmarks, a reset profile, a wrong binding or a damaged file
+// than a real mass delete.
+var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle +
+	" or be purged; is a database file truncated, or this profile bound to the wrong one?")
 
 type Input struct {
 	Base    []*db.Node // P's record; nil and HasBase false on P's first round
@@ -2447,12 +2452,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `internal/round/live.go`, `internal/round/round.go`
-- Test: `internal/round/round_test.go`, `internal/round/property_test.go` (package `round_test`)
-- Modify: `internal/fakebrowser/fakebrowser.go` (add `Tree`)
+- Test: `internal/round/round_test.go`, `internal/round/property_test.go` (package `round_test`), `internal/round/export_test.go`
+- Modify: `internal/fakebrowser/fakebrowser.go` (add `Tree`); `internal/fakebrowser/fuzz.go` and `internal/merge/fuzz_test.go` (the merge fuzz driver moves to `fakebrowser.Fuzz` so the property test reuses it)
 
 **Interfaces:**
 - Consumes: `db.Config`, `db.DB`, `db.Member`, `db.SplitPath`, `db.EqualNodes`, `merge.Round`, `merge.Input`, `merge.Op`, `merge.Conflict`, `merge.ErrWrongTree`; `fakebrowser`.
-- Produces: `round.TreeNode`, `round.Live`, `round.Build`, `round.Input`, `round.Plan`, `round.Make`, `Plan.Finish`; `(*fakebrowser.Browser).Tree() []round.TreeNode`.
+- Produces: `round.TreeNode`, `round.Live`, `round.Build`, `round.Input`, `round.Plan`, `round.Make`, `Plan.Finish`; `(*fakebrowser.Browser).Tree() []round.TreeNode`; `fakebrowser.Union`, `fakebrowser.Fuzz`, `fakebrowser.Seeds`.
 
 - [ ] **Step 1: Write `internal/round/live.go`** (the tree message's node type and path resolution)
 
@@ -2585,6 +2590,8 @@ Top-level nodes get `Parent: nil` (the walk starts below the invisible root `"0"
 package round_test
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -2738,6 +2745,44 @@ func TestFinishFailsWithoutCreatedIDs(t *testing.T) {
 		t.Fatal("Finish accepted a create without an id")
 	}
 }
+
+func TestFailedMergeSkipsTheUnion(t *testing.T) {
+	defer round.SetMerge(func(merge.Input) (merge.Result, error) {
+		return merge.Result{}, errors.New("merge: 1 nodes do not reach the member folder")
+	})()
+	b := fakebrowser.New()
+	w := b.Add("1", "Work", "")
+	b.Add(w, "GitHub", "https://github.com/")
+	a := profile("a")
+	old := &db.Member{Seq: 4, Path: "toolbar/Work", ID: w, Children: []*db.Node{{Title: "GitHub", URL: "https://github.com/", ID: "5", M: "m-1"}}}
+	a.Unions = map[string]*db.Member{"work": old}
+	p := round.Make(round.Input{Config: config(map[string]string{"a": "toolbar/Work"}), Self: a, Live: live(t, b), NewM: merge.NewM})
+	if !strings.Contains(p.Skipped["work"], "do not reach") || len(p.Ops) != 0 || len(p.WrongTree) != 0 {
+		t.Fatalf("plan %+v", p)
+	}
+	next, changed, err := p.Finish(nil)
+	if err != nil || changed || next.Unions["work"] != old {
+		t.Fatalf("a failed merge must keep the record: changed %v err %v %+v", changed, err, next.Unions["work"])
+	}
+}
+
+func TestWrongTreeSkipsTheUnion(t *testing.T) {
+	b := fakebrowser.New()
+	w := b.Add("1", "Work", "")
+	a := profile("a")
+	old := &db.Member{Seq: 4, Path: "toolbar/Work", ID: w}
+	for i := range 6 {
+		old.Children = append(old.Children, &db.Node{Title: "B", URL: fmt.Sprintf("https://b/%d", i), ID: fmt.Sprint(100 + i), M: fmt.Sprintf("m-%d", i)})
+	}
+	a.Unions = map[string]*db.Member{"work": old}
+	p := round.Make(round.Input{Config: config(map[string]string{"a": "toolbar/Work"}), Self: a, Live: live(t, b), NewM: merge.NewM})
+	if !slices.Equal(p.WrongTree, []string{"work"}) || p.Skipped["work"] == "" || len(p.Ops) != 0 {
+		t.Fatalf("plan %+v", p)
+	}
+	if next, changed, _ := p.Finish(nil); changed || next.Unions["work"] != old {
+		t.Fatalf("the guard must keep the record: changed %v", changed)
+	}
+}
 ```
 
 - [ ] **Step 4: Run them to see them fail**
@@ -2759,6 +2804,9 @@ import (
 	"github.com/chriscz/mirrormark/internal/db"
 	"github.com/chriscz/mirrormark/internal/merge"
 )
+
+// mergeRound is merge.Round; a test replaces it to make a merge fail.
+var mergeRound = merge.Round
 
 type Input struct {
 	Config *db.Config
@@ -2800,13 +2848,16 @@ func Make(in Input) Plan {
 				next.Unions[name] = old
 			}
 		}
-		rec := in.Self.Unions[name]
-		if rec != nil && rec.Path != path {
-			rec = nil // the config points somewhere new: a new member
-		}
+		// A record made for another path is not a base: the config points
+		// somewhere new, so this is a new member. It still counts as a
+		// published state of the union, so it can be theirs.
 		var records []*db.Member
+		rec := in.Self.Unions[name]
 		if rec != nil {
 			records = append(records, rec)
+			if rec.Path != path {
+				rec = nil
+			}
 		}
 		unreadable := ""
 		for _, id := range slices.Sorted(maps.Keys(members)) {
@@ -2870,9 +2921,13 @@ func Make(in Input) Plan {
 		if theirs != nil {
 			mi.Theirs = theirs.Children
 		}
-		res, err := merge.Round(mi)
-		if errors.Is(err, merge.ErrWrongTree) {
-			p.WrongTree = append(p.WrongTree, name)
+		res, err := mergeRound(mi)
+		if err != nil {
+			// Never go on with an empty result: it would publish an
+			// empty union to every member.
+			if errors.Is(err, merge.ErrWrongTree) {
+				p.WrongTree = append(p.WrongTree, name)
+			}
 			skip(err.Error())
 			continue
 		}
@@ -2933,6 +2988,21 @@ func fillIDs(ns []*db.Node, created map[string]string) error {
 }
 ```
 
+`internal/round/export_test.go` lets the tests force a failed merge:
+
+```go
+package round
+
+import "github.com/chriscz/mirrormark/internal/merge"
+
+// SetMerge replaces merge.Round for one test and returns the undo.
+func SetMerge(f func(merge.Input) (merge.Result, error)) func() {
+	old := mergeRound
+	mergeRound = f
+	return func() { mergeRound = old }
+}
+```
+
 - [ ] **Step 6: Run the unit tests**
 
 Run: `bin/dev run go test ./internal/round/ -run 'Test[^P]' -v`
@@ -2940,15 +3010,13 @@ Expected: PASS.
 
 - [ ] **Step 7: Write the property test** `internal/round/property_test.go`
 
-Three members, one union at `toolbar/U`. Random user edits interleave with rounds of random members (some fail part-way, which also models a closed browser: it simply runs no round). Each member's file goes through YAML, as on disk. Then quiet passes until a full pass writes nothing and sends no ops. Invariants: every member's union is identical (ignoring sibling order and browser ids); every URL a user created, and did not change or purge since, is present in every member; no URL appears twice (URLs are unique when created, so a second copy is a duplicate the merge made); a quiet pass is reached within 12 passes.
+Three members, one union at `toolbar/U`, each starting with its own bookmarks (30 nodes in all). The test implements `fakebrowser.Union` over `round.Make` and `Finish`, each member's file going through YAML as on disk, and runs it through `fakebrowser.Fuzz`, the driver the merge fuzz test already used: bursts of random user edits, purges included; sweeps in which members are closed and batches fail part-way; then sweeps until one neither writes nor sends ops. After each burst every member's union must be identical (ignoring sibling order and browser ids) and no URL may be lost unless a user purged or changed it. Removes are capped at 4 nodes per burst, so the wrong-tree guard has no cause to trip and any refusal fails the test. The fuzz editor adds colliding URLs on purpose, so the test does not check that each URL appears once.
 
 ```go
 package round_test
 
 import (
 	"fmt"
-	"math/rand/v2"
-	"slices"
 	"testing"
 
 	"github.com/chriscz/mirrormark/internal/db"
@@ -2959,268 +3027,120 @@ import (
 )
 
 type member struct {
-	id      string
-	b       *fakebrowser.Browser
-	file    *db.DB
-	removed int // nodes removed by the user since the last completed round
+	b    *fakebrowser.Browser
+	root string
+	file *db.DB
 }
 
-type world struct {
-	t       *testing.T
-	r       *rand.Rand
-	cfg     *db.Config
-	members []*member
-	urls    map[string]bool // URLs that must survive everywhere
-	n       int
+// hosts is a union at toolbar/U whose rounds go through round.Make and
+// Finish as the host's would, each database file through YAML as on disk.
+type hosts struct {
+	cfg *db.Config
+	ms  []*member
 }
 
-func newWorld(t *testing.T, seed uint64) *world {
-	w := &world{t: t, r: rand.New(rand.NewPCG(seed, 7)), urls: map[string]bool{},
-		cfg: &db.Config{Format: 1, Unions: map[string]map[string]string{"u": {}}}}
+func newHosts() *hosts {
+	h := &hosts{cfg: config(map[string]string{})}
 	for i := range 3 {
 		id := fmt.Sprintf("p%d", i)
-		m := &member{id: id, b: fakebrowser.New(), file: profile(id)}
-		w.cfg.Unions["u"][id] = "toolbar/U"
-		w.members = append(w.members, m)
-		// Members start with their own bookmarks; the first rounds union them.
-		u := m.b.Add("1", "U", "")
+		h.cfg.Unions["work"][id] = "toolbar/U"
+		b := fakebrowser.New()
+		m := &member{b: b, root: b.Add("1", "U", ""), file: profile(id)}
+		// Each member starts with its own bookmarks, and all with one the
+		// same; the first rounds join them. With 30 nodes in the union and
+		// few removes per burst, the wrong-tree guard has no reason to trip.
 		n := 8
 		if i == 0 {
 			n = 12
 		}
-		for range n {
-			m.b.Add(u, w.title(), w.url())
+		for j := range n {
+			b.Add(m.root, fmt.Sprintf("I%d", j), fmt.Sprintf("https://init/%s/%d", id, j))
 		}
-		m.b.Add(m.b.Add(u, "Shared", ""), "Same", "https://same/")
-		w.urls["https://same/"] = true
+		b.Add(b.Add(m.root, "Shared", ""), "Same", "https://same/")
+		h.ms = append(h.ms, m)
 	}
-	return w
+	return h
 }
 
-func (w *world) url() string {
-	w.n++
-	u := fmt.Sprintf("https://e.example/%d", w.n)
-	w.urls[u] = true
-	return u
+func (h *hosts) Len() int { return len(h.ms) }
+
+func (h *hosts) Member(i int) (*fakebrowser.Browser, string, []*db.Node) {
+	m := h.ms[i]
+	var rec []*db.Node
+	if r := m.file.Unions["work"]; r != nil {
+		rec = r.Children
+	}
+	return m.b, m.root, rec
 }
 
-func (w *world) title() string { return fmt.Sprintf("t%d", w.r.IntN(6)) }
+func (h *hosts) Edited(int) {}
 
-// reload passes a database file through YAML, as a write and read would.
-func reload(t *testing.T, d *db.DB) *db.DB {
-	data, err := yaml.Marshal(d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out db.DB
-	if err := yaml.Unmarshal(data, &out); err != nil {
-		t.Fatal(err)
-	}
-	return &out
-}
-
-// round runs one round for m; ops fail with probability fail.
-func (w *world) round(m *member, fail float64) (wrote bool, ops int) {
+// Round reports a round that sent ops as a change too, so a quiet sweep is
+// one that neither writes nor touches a browser.
+func (h *hosts) Round(i int, fail func(int) bool) (bool, error) {
+	m := h.ms[i]
 	others := map[string]*db.DB{}
-	for _, o := range w.members {
+	for _, o := range h.ms {
 		if o != m {
-			others[o.id] = o.file
+			others[o.file.Profile.ID] = o.file
 		}
 	}
 	l, err := round.Build(m.b.Tree())
 	if err != nil {
-		w.t.Fatal(err)
+		return false, err
 	}
-	p := round.Make(round.Input{Config: w.cfg, Self: m.file, Others: others, Live: l, NewM: merge.NewM})
-	if len(p.WrongTree) > 0 || len(p.Skipped) > 0 {
-		w.t.Fatalf("%s: skipped %v wrong tree %v", m.id, p.Skipped, p.WrongTree)
+	p := round.Make(round.Input{Config: h.cfg, Self: m.file, Others: others, Live: l, NewM: merge.NewM})
+	if len(p.WrongTree) > 0 {
+		return false, fmt.Errorf("member %d: %w", i, merge.ErrWrongTree)
+	}
+	if len(p.Skipped) > 0 {
+		return false, fmt.Errorf("member %d: skipped %v", i, p.Skipped)
 	}
 	created := map[string]string{}
-	failed := false
-	for i, r := range m.b.Apply(p.Ops, func(int) bool { return w.r.Float64() < fail }) {
+	for j, r := range m.b.Apply(p.Ops, fail) {
+		if r.Error == "injected" {
+			return false, nil // the batch stopped here; no file is written
+		}
 		if !r.OK {
-			failed = true
-		} else if p.Ops[i].Op == "create" {
-			created[p.Ops[i].Ref] = r.ID
+			return false, fmt.Errorf("member %d: op %+v: %s", i, p.Ops[j], r.Error)
+		}
+		if p.Ops[j].Op == "create" {
+			created[p.Ops[j].Ref] = r.ID
 		}
 	}
-	if failed || p.EnsureOnly {
-		return false, len(p.Ops)
+	if p.EnsureOnly {
+		return false, fmt.Errorf("member %d: member folder missing", i)
 	}
 	next, changed, err := p.Finish(created)
 	if err != nil {
-		w.t.Fatal(err)
+		return false, fmt.Errorf("member %d: %w", i, err)
 	}
 	if changed {
-		m.file = reload(w.t, next)
+		data, err := yaml.Marshal(next)
+		if err != nil {
+			return false, err
+		}
+		var d db.DB
+		if err := yaml.Unmarshal(data, &d); err != nil {
+			return false, err
+		}
+		m.file = &d
 	}
-	m.removed = 0
-	return changed, len(p.Ops)
+	return changed || len(p.Ops) > 0, nil
 }
 
-// pick returns a random folder or bookmark under the union folder, inside or
-// outside _deleted. It never returns the union folder or _deleted itself.
-func (w *world) pick(m *member, wantFolder bool, inDeleted bool) (id, parent string, ok bool) {
-	u := m.b.Find("1", "U")
-	type cand struct{ id, parent string }
-	var cs []cand
-	var walk func(parent string, del bool)
-	walk = func(parent string, del bool) {
-		for _, n := range m.b.Children(parent) {
-			isDel := parent == u && n.Title == merge.DeletedTitle && n.URL == ""
-			if !isDel && (n.URL == "") == wantFolder && del == inDeleted {
-				cs = append(cs, cand{n.ID, parent})
-			}
-			walk(n.ID, del || isDel)
-		}
-	}
-	walk(u, false)
-	if len(cs) == 0 {
-		return "", "", false
-	}
-	c := cs[w.r.IntN(len(cs))]
-	return c.id, c.parent, true
-}
-
-func (w *world) folderIn(m *member) string {
-	if id, _, ok := w.pick(m, true, false); ok && w.r.IntN(2) == 0 {
-		return id
-	}
-	return m.b.Find("1", "U")
-}
-
-func (w *world) edit(m *member) {
-	b := m.b
-	switch w.r.IntN(8) {
-	case 0, 1:
-		b.Add(w.folderIn(m), w.title(), w.url())
-	case 2:
-		b.Add(w.folderIn(m), w.title(), "")
-	case 3:
-		if id, _, ok := w.pick(m, w.r.IntN(2) == 0, false); ok {
-			b.Rename(id, w.title())
-		}
-	case 4:
-		if id, _, ok := w.pick(m, false, false); ok {
-			delete(w.urls, w.urlOf(m, id))
-			b.SetURL(id, w.url())
-		}
-	case 5:
-		if id, _, ok := w.pick(m, w.r.IntN(3) == 0, false); ok {
-			to := w.folderIn(m)
-			if to != id && !w.inside(m, to, id) {
-				b.Move(id, to)
-			}
-		}
-	case 6:
-		// Delete: a bookmark, or a folder with at most one child, and at
-		// most two per round, so the wrong-tree guard never trips.
-		if m.removed < 2 {
-			if id, _, ok := w.pick(m, w.r.IntN(4) == 0, false); ok {
-				if kids := len(b.Children(id)); kids <= 1 {
-					b.Remove(id)
-					m.removed += 1 + kids
-				}
-			}
-		}
-	case 7:
-		if id, _, ok := w.pick(m, false, true); ok && w.size(m) > 15 {
-			delete(w.urls, w.urlOf(m, id))
-			b.Remove(id)
-		}
-	}
-}
-
-func (w *world) urlOf(m *member, id string) string {
-	var find func(ns []*db.Node) string
-	find = func(ns []*db.Node) string {
-		for _, n := range ns {
-			if n.ID == id {
-				return n.URL
-			}
-			if u := find(n.Children); u != "" {
-				return u
-			}
-		}
-		return ""
-	}
-	return find(m.b.Children(m.b.Find("1", "U")))
-}
-
-func (w *world) inside(m *member, id, ancestor string) bool {
-	var has func(ns []*db.Node) bool
-	has = func(ns []*db.Node) bool {
-		for _, n := range ns {
-			if n.ID == id || has(n.Children) {
-				return true
-			}
-		}
-		return false
-	}
-	return has(m.b.Children(ancestor))
-}
-
-func (w *world) size(m *member) int { return len(m.b.Lines(m.b.Find("1", "U"))) }
-
+// TestConvergence runs three hosts through random edits, closed profiles
+// and batches that fail part-way, with removes kept under the wrong-tree
+// guard. Run more seeds with -mirrormark.fuzz=20000.
 func TestConvergence(t *testing.T) {
-	for seed := range uint64(300) {
-		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			w := newWorld(t, seed)
-			for range 60 {
-				m := w.members[w.r.IntN(len(w.members))]
-				if w.r.IntN(3) == 0 {
-					w.edit(m)
-				} else {
-					w.round(m, 0.1)
-				}
+	failed := 0
+	for seed := range fakebrowser.Seeds() {
+		if err := fakebrowser.Fuzz(uint64(seed), newHosts(), 4); err != nil {
+			t.Errorf("seed %d: %v", seed, err)
+			if failed++; failed > 10 {
+				t.Fatal("too many failing seeds")
 			}
-			for pass := 0; ; pass++ {
-				if pass == 12 {
-					t.Fatal("no quiet pass after 12 passes")
-				}
-				quiet := true
-				for _, m := range w.members {
-					if wrote, ops := w.round(m, 0); wrote || ops > 0 {
-						quiet = false
-					}
-				}
-				if quiet {
-					break
-				}
-			}
-			want := w.members[0].b.Lines(w.members[0].b.Find("1", "U"))
-			for _, m := range w.members[1:] {
-				if got := m.b.Lines(m.b.Find("1", "U")); !slices.Equal(got, want) {
-					t.Fatalf("%s differs from p0:\n%q\n%q", m.id, got, want)
-				}
-			}
-			// Every URL is unique when created, so a URL seen twice is a
-			// duplicate the merge made (for example by retrying a create
-			// that had landed).
-			present := map[string]int{}
-			for _, n := range w.members[0].b.Children(w.members[0].b.Find("1", "U")) {
-				collect(n, present)
-			}
-			for u, c := range present {
-				if c > 1 {
-					t.Fatalf("%s appears %d times", u, c)
-				}
-			}
-			for u := range w.urls {
-				if present[u] == 0 {
-					t.Fatalf("lost %s", u)
-				}
-			}
-		})
-	}
-}
-
-func collect(n *db.Node, into map[string]int) {
-	if n.URL != "" {
-		into[n.URL]++
-	}
-	for _, c := range n.Children {
-		collect(c, into)
+		}
 	}
 }
 ```
@@ -3228,7 +3148,7 @@ func collect(n *db.Node, into map[string]int) {
 - [ ] **Step 8: Run the property test**
 
 Run: `bin/dev run go test ./internal/round/ -run TestConvergence -count=1`
-Expected: PASS for all 300 seeds. A failing seed prints its number; rerun it alone with `-run 'TestConvergence/<seed>$' -v` and fix the cause in `merge` or `round` (add a unit test in `merge_test.go` that reproduces it first). Do not weaken an invariant to make a seed pass; if an invariant looks wrong, stop and raise it.
+Expected: PASS for all 300 seeds (`-args -mirrormark.fuzz=20000` runs more). A failing seed prints its number; fix the cause in `merge` or `round` (add a unit test in `merge_test.go` that reproduces it first). Do not weaken an invariant to make a seed pass; if an invariant looks wrong, stop and raise it.
 
 - [ ] **Step 9: Verify**
 
@@ -3808,7 +3728,7 @@ func (s *state) round() {
 		s.o.Log.Info("conflict", "folder", c.Folder, "ours", c.Ours, "theirs", c.Theirs)
 	}
 	if len(plan.WrongTree) > 0 {
-		s.warn("db-mismatch", fmt.Sprintf("refusing to move most of %v to _deleted; is this profile bound to the right database?", plan.WrongTree))
+		s.warn("db-mismatch", fmt.Sprintf("not syncing %v: %v", plan.WrongTree, merge.ErrWrongTree))
 	}
 	created := map[string]string{}
 	if len(plan.Ops) > 0 {
