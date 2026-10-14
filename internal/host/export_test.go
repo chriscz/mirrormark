@@ -1,9 +1,6 @@
 package host
 
-var (
-	RetryDelay = retryDelay
-	Split      = split
-)
+var Split = split
 
 const (
 	BatchOps   = batchOps

@@ -165,10 +165,9 @@ does, including skipped unions, conflicts and failed changes, goes to
 `~/.local/state/mirrormark/log`, every time it happens.
 
 A change the browser refuses stops that profile from saving its round. The
-host retries at the next poll three times, then every 5 seconds three
-times, then every 30 seconds, until the change goes through; a changed
-file starts a round sooner. A round that succeeds starts the count over. The same goes for a
-database file the host cannot write.
+host retries every 5 seconds until the change goes through, and a changed
+file starts a round sooner. The same goes for a database file the host
+cannot write.
 
 ### Installing and binding
 

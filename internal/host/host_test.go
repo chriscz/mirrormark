@@ -395,9 +395,9 @@ func TestSilentBrowserWritesNothing(t *testing.T) {
 }
 
 // An op that fails every time writes no file and shows in the popup. It is
-// retried at the poll, not as fast as the browser answers, and after three
-// failures in a row only every few seconds. Each failure is logged.
-// A round that succeeds clears the popup and the back-off.
+// retried only after a few seconds, not as fast as the browser answers or at
+// every poll, and each failure is logged. A changed file starts a round
+// sooner, and a round that succeeds clears the popup.
 func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	p := paths(t)
 	addProfile(t, p, "a")
@@ -425,10 +425,9 @@ func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	if m.Code != "apply-failed" || !strings.Contains(m.Message, "injected") {
 		t.Fatalf("error %+v", m)
 	}
-	eventually(t, "three tries", func() bool { n, _ := a.count(); return n >= 3 })
 	time.Sleep(500 * time.Millisecond) // 25 polls
-	if n, _ := a.count(); n != 3 {
-		t.Fatalf("%d batches; want 3 before the 5 s back-off", n)
+	if n, _ := a.count(); n != 1 {
+		t.Fatalf("%d batches; want 1 before the retry delay", n)
 	}
 	d, err := db.LoadDB(p.ProfileFile("a"))
 	if err != nil {
@@ -437,28 +436,28 @@ func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	if d.Unions["work"] != nil {
 		t.Fatalf("a wrote a record although an op failed: %+v", d.Unions["work"])
 	}
-	if n := strings.Count(log.String(), "msg=\"op failed\""); n != 3 {
-		t.Fatalf("op failed logged %d times, want once per try:\n%s", n, log)
-	}
 
-	// A changed file starts a round despite the back-off; this one succeeds.
-	failing.Store(false)
+	// A changed file starts a round despite the delay; it fails again and is
+	// logged again.
 	writeConfig(t, p, workUnion+"\n")
+	eventually(t, "a second try", func() bool { n, _ := a.count(); return n == 2 })
+	eventually(t, "the second failure in the log", func() bool {
+		return strings.Count(log.String(), "msg=\"op failed\"") == 2
+	})
+
+	// This one succeeds.
+	failing.Store(false)
+	writeConfig(t, p, workUnion)
 	eventually(t, "a clean round", a.healthy)
 
-	// The back-off starts over: three quick tries again.
+	// The next failure waits for the delay again.
 	failing.Store(true)
 	before, _ := a.count()
 	b.edit(func(br *fakebrowser.Browser) { br.Add(br.Find("1", "Work"), "Z", "https://z/") })
-	eventually(t, "three quick tries", func() bool { n, _ := a.count(); return n >= before+3 })
-}
-
-func TestRetryDelay(t *testing.T) {
-	want := []time.Duration{0, 0, 0, 5 * time.Second, 5 * time.Second, 5 * time.Second, 30 * time.Second, 30 * time.Second}
-	for f, w := range want {
-		if got := host.RetryDelay(f); got != w {
-			t.Errorf("after %d failures: %v, want %v", f, got, w)
-		}
+	eventually(t, "a failed try", func() bool { n, _ := a.count(); return n == before+1 })
+	time.Sleep(500 * time.Millisecond)
+	if n, _ := a.count(); n != before+1 {
+		t.Fatalf("%d batches after the clean round; want 1 before the retry delay", n-before)
 	}
 }
 

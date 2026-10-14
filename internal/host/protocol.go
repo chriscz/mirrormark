@@ -10,8 +10,8 @@
 // in batches and waits for each; if any op fails or the browser does not
 // answer in time, it writes no file and the next round retries. A round
 // that failed is retried at the poll, not on the tree that follows the
-// failed batch, so an op that always fails does not spin, and after a few
-// failures in a row it waits longer (see Msg).
+// failed batch and only after retryDelay, so an op that always fails does
+// not spin (see Msg).
 package host
 
 import (
@@ -41,8 +41,8 @@ const Version = 1
 // make every change), db-write-failed (the browser made them but the
 // database file could not be written), db-lock-error (the lock that keeps
 // rounds apart cannot be taken). A round with apply-failed, db-write-failed
-// or db-lock-error is retried at the next poll, three times, then every 5 s
-// three times, then every 30 s until one succeeds.
+// or db-lock-error is retried every 5 s until one succeeds, or sooner when a
+// file changes.
 type Msg struct {
 	V        int              `json:"v"`
 	Type     string           `json:"type"`

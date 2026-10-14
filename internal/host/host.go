@@ -44,8 +44,7 @@ type state struct {
 	unlock   func() // releases the profile lock; held while Run runs
 	live     *round.Live
 	fresh    bool      // live reflects the browser: no batch or edit since
-	retry    bool      // the last round failed; run the next one at the poll
-	failures int       // rounds failed in a row
+	retry    bool      // the last round failed; the poll retries it after retryDelay
 	next     time.Time // the earliest retry of a failed round
 	batch    int
 	files    map[string]stamp
@@ -67,19 +66,11 @@ type failed struct {
 
 func (f failed) Unwrap() error { return f.error }
 
-// retryDelay is how long to wait after the given number of failed rounds in
-// a row. The first few retry at the next poll; then 5 s, then 30 s, so a
-// browser that keeps refusing a change, or answering too slowly, does not
-// take the global lock every second.
-func retryDelay(failures int) time.Duration {
-	switch {
-	case failures < 3:
-		return 0
-	case failures < 6:
-		return 5 * time.Second
-	}
-	return 30 * time.Second
-}
+// retryDelay is how long a failed round waits before the poll retries it,
+// so a browser that keeps refusing a change, or answering too slowly, does
+// not take the global lock, or add to the log, every second. A changed file
+// starts a round sooner.
+const retryDelay = 5 * time.Second
 
 // Run serves one extension connection until the browser closes it.
 func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
@@ -261,10 +252,7 @@ func (s *state) run() {
 			code = f.code
 		}
 		s.warn(code, err.Error())
-		s.failures++
-		s.next = time.Now().Add(retryDelay(s.failures))
-	} else {
-		s.failures = 0
+		s.next = time.Now().Add(retryDelay)
 	}
 	s.send(Msg{Type: "status", Problems: s.problems})
 }
