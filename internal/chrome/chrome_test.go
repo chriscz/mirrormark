@@ -22,7 +22,7 @@ func TestProfilesFromLocalState(t *testing.T) {
 	udd := t.TempDir()
 	os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"info_cache":{
 		"Profile 1":{"name":"Work"},"Default":{"name":"Personal"}}}}`), 0o600)
-	got, err := Profiles(udd)
+	got, err := Chrome.Profiles(udd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestProfilesFromLocalState(t *testing.T) {
 }
 
 func TestProfilesWithoutLocalStateFails(t *testing.T) {
-	if _, err := Profiles(t.TempDir()); err == nil {
+	if _, err := Chrome.Profiles(t.TempDir()); err == nil {
 		t.Fatal("no error for a data directory Chrome never used")
 	}
 }
@@ -42,7 +42,7 @@ func TestProfilesRejectsEmptyOrBrokenLocalState(t *testing.T) {
 	for _, data := range []string{`{}`, `{"profile":`} {
 		udd := t.TempDir()
 		os.WriteFile(filepath.Join(udd, "Local State"), []byte(data), 0o600)
-		if _, err := Profiles(udd); err == nil {
+		if _, err := Chrome.Profiles(udd); err == nil {
 			t.Errorf("no error for Local State %s", data)
 		}
 	}
@@ -50,12 +50,12 @@ func TestProfilesRejectsEmptyOrBrokenLocalState(t *testing.T) {
 
 func TestDefaultUserDataDirFollowsXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/x/config")
-	if got, _ := DefaultUserDataDir(); got != "/x/config/google-chrome" {
+	if got, _ := Chrome.DefaultUserDataDir(); got != "/x/config/google-chrome" {
 		t.Fatalf("got %s", got)
 	}
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 	t.Setenv("HOME", "/h")
-	if got, _ := DefaultUserDataDir(); got != "/h/.config/google-chrome" {
+	if got, _ := Chrome.DefaultUserDataDir(); got != "/h/.config/google-chrome" {
 		t.Fatalf("got %s", got)
 	}
 }
@@ -283,7 +283,7 @@ func TestWriteFilesKeepsALinkAndTheMode(t *testing.T) {
 
 func TestSystemFiles(t *testing.T) {
 	e := Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "0.1.0", CRX: "/h/.local/share/mirrormark/mirrormark.crx"}
-	fs := SystemFiles(e, "/usr/local/bin/mirrormark")
+	fs := Chrome.SystemFiles(e, "/usr/local/bin/mirrormark")
 	if fs[0].Path != "/usr/share/google-chrome/extensions/pjjjaeommfpeolloibnafkcmkindkagl.json" ||
 		!bytes.Contains(fs[0].Data, []byte(`"external_version": "0.1.0"`)) {
 		t.Fatalf("external file %s %s", fs[0].Path, fs[0].Data)
@@ -301,8 +301,20 @@ func TestSystemFiles(t *testing.T) {
 		host.Path != "/usr/local/bin/mirrormark" || host.Type != "stdio" || len(host.AllowedOrigins) != 1 {
 		t.Fatalf("host manifest %s: %v", fs[1].Data, err)
 	}
-	if paths := SystemFilePaths(e.ID); paths[0] != fs[0].Path || paths[1] != fs[1].Path {
-		t.Fatalf("paths %v", paths)
+	if fs[0].Path != Chrome.ExternalFile(e.ID) || fs[1].Path != HostManifestPath() || len(fs) != 2 {
+		t.Fatalf("paths %s %s", fs[0].Path, fs[1].Path)
+	}
+}
+
+func TestLookup(t *testing.T) {
+	if b, ok := Lookup("chrome"); !ok || b != Chrome {
+		t.Fatalf("chrome: %+v %v", b, ok)
+	}
+	if _, ok := Lookup("firefox"); ok {
+		t.Fatal("firefox is not a Chromium browser")
+	}
+	if Chrome.InstallCommand() != "mirrormark install" {
+		t.Fatalf("Chrome's command %q", Chrome.InstallCommand())
 	}
 }
 
@@ -340,7 +352,7 @@ func TestBindRetriesUntilConfirmed(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
 	udd := filepath.Join(t.TempDir(), "udd")
-	err := Bind(fake, udd, "Profile 1", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-work", func(time.Time) bool {
+	err := Chrome.Bind(fake, udd, "Profile 1", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-work", func(time.Time) bool {
 		data, _ := os.ReadFile(log)
 		return bytes.Count(data, []byte("\n")) >= 2
 	})
@@ -358,8 +370,8 @@ func TestBindGivesUpAfterThreeTries(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	udd, _ := DefaultUserDataDir()
-	err := Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return false })
+	udd, _ := Chrome.DefaultUserDataDir()
+	err := Chrome.Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return false })
 	if err == nil || !strings.Contains(err.Error(), "chrome://extensions") {
 		t.Fatalf("err %v", err)
 	}
@@ -376,7 +388,7 @@ func TestBindPassesTheAttemptStart(t *testing.T) {
 	fake, _ := fakeChrome(t)
 	before := time.Now()
 	var seen time.Time
-	Bind(fake, t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(since time.Time) bool {
+	Chrome.Bind(fake, t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(since time.Time) bool {
 		seen = since
 		return true
 	})
@@ -386,7 +398,7 @@ func TestBindPassesTheAttemptStart(t *testing.T) {
 }
 
 func TestBindReportsAChromeThatWillNotStart(t *testing.T) {
-	err := Bind(filepath.Join(t.TempDir(), "missing"), t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return true })
+	err := Chrome.Bind(filepath.Join(t.TempDir(), "missing"), t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return true })
 	if err == nil {
 		t.Fatal("no error")
 	}

@@ -271,7 +271,7 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	}
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
 	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-	paths := chrome.SystemFilePaths(id)
+	paths := []string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}
 	if len(*sudoCalls) != 2 {
 		t.Fatalf("sudo calls %v", *sudoCalls)
 	}
@@ -424,7 +424,7 @@ func TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest(t *testing.T) {
 	p := testHome(t)
 	root, _ := fakeSystem(t)
 	fakeChromeOnPath(t, p)
-	other := chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
+	other := chrome.Chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
 	other.Path = filepath.Join(root, other.Path)
 	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
 	var out, errb bytes.Buffer
@@ -460,7 +460,8 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 	var out, errb bytes.Buffer
 	run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
-	paths := chrome.SystemFilePaths(chrome.ExtensionID(chrome.PublicKeyDER(key)))
+	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
+	paths := []string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}
 
 	out.Reset()
 	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
@@ -508,7 +509,7 @@ func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	root, sudoCalls := fakeSystem(t)
 	var out, errb bytes.Buffer
 	run([]string{"unpack"}, strings.NewReader(""), &out, &errb)
-	other := chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
+	other := chrome.Chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
 	other.Path = filepath.Join(root, other.Path)
 	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
 	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {

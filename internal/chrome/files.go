@@ -14,14 +14,9 @@ import (
 	"github.com/chriscz/mirrormark/internal/db"
 )
 
-const (
-	// ExternalDir: on Linux, branded Chrome installs a CRX named by a JSON
-	// file here into every profile, without a prompt, at its next start.
-	ExternalDir = "/usr/share/google-chrome/extensions"
-	// SystemHostDir: native host manifests here reach every Chrome data
-	// directory, not only the default one.
-	SystemHostDir = "/etc/opt/chrome/native-messaging-hosts"
-)
+// SystemHostDir: native host manifests here reach every data directory of
+// every Chromium browser mirrormark supports, not only the default ones.
+const SystemHostDir = "/etc/opt/chrome/native-messaging-hosts"
 
 // Extension is the unpacked extension and its CRX, under the install's key.
 type Extension struct{ ID, Version, Dir, CRX string }
@@ -89,19 +84,19 @@ func indented[T externalJSON | hostManifestJSON](v T) []byte {
 	return append(b, '\n')
 }
 
-// SystemFilePaths are the external extension file for extension id and the
-// native host manifest, in that order.
-func SystemFilePaths(id string) []string {
-	return []string{filepath.Join(ExternalDir, id+".json"), filepath.Join(SystemHostDir, extension.HostName+".json")}
-}
+// ExternalFile is the file that tells b to install the extension id.
+func (b Browser) ExternalFile(id string) string { return filepath.Join(b.ExternalDir, id+".json") }
 
-// SystemFiles are the two files that tell Chrome about the extension and
-// let it start bin as the native host, in SystemFilePaths order.
-func SystemFiles(e Extension, bin string) []File {
-	p := SystemFilePaths(e.ID)
+// HostManifestPath is the native host manifest every browser in Browsers
+// reads.
+func HostManifestPath() string { return filepath.Join(SystemHostDir, extension.HostName+".json") }
+
+// SystemFiles are the two files that tell b about the extension and let it
+// start bin as the native host: b's external file, then the host manifest.
+func (b Browser) SystemFiles(e Extension, bin string) []File {
 	return []File{
-		{p[0], indented(externalJSON{CRX: e.CRX, Version: e.Version})},
-		{p[1], indented(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
+		{b.ExternalFile(e.ID), indented(externalJSON{CRX: e.CRX, Version: e.Version})},
+		{HostManifestPath(), indented(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
 			Path: bin, Type: "stdio", AllowedOrigins: []string{"chrome-extension://" + e.ID + "/"}})},
 	}
 }

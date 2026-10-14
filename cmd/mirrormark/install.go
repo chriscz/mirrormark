@@ -86,23 +86,23 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	switch *browser {
-	case "chrome":
-	case "firefox":
+	if *browser == "firefox" {
 		return installFirefox(p, *udd, picks, stdout, stderr)
-	default:
+	}
+	cb, ok := chrome.Lookup(*browser)
+	if !ok {
 		fmt.Fprintf(stderr, "mirrormark: --browser is chrome or firefox, not %q\n", *browser)
 		return 2
 	}
 	if *udd == "" {
-		*udd, err = chrome.DefaultUserDataDir()
+		*udd, err = cb.DefaultUserDataDir()
 	} else {
 		*udd, err = resolveDir(*udd)
 	}
 	if err != nil {
 		return fail(err)
 	}
-	profiles, err := chrome.Profiles(*udd)
+	profiles, err := cb.Profiles(*udd)
 	if err != nil {
 		return fail(err)
 	}
@@ -119,7 +119,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	system := chrome.SystemFiles(ext, self)
+	system := cb.SystemFiles(ext, self)
 	for i := range system {
 		system[i].Path = filepath.Join(sysroot, system[i].Path)
 	}
@@ -134,12 +134,12 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "mirrormark: warning: %s lets another extension, not %s, start mirrormark; replacing it. If another install of mirrormark (with another key) uses it, that one stops working.\n", system[1].Path, ext.ID)
 		}
 		if err := writeSystemFiles(system, stdout, stderr); err != nil {
-			return fail(fmt.Errorf("could not copy the files Chrome needs into place (with sudo): %w", err))
+			return fail(fmt.Errorf("could not copy the files %s needs into place (with sudo): %w", cb.Name, err))
 		}
 	}
 	ids := map[string]string{}
 	for _, c := range chosen {
-		id, err := ensureDB(p, "chrome", filepath.Join(*udd, c.Dir), c)
+		id, err := ensureDB(p, cb.Config, filepath.Join(*udd, c.Dir), c)
 		if err != nil {
 			return fail(err)
 		}
@@ -149,10 +149,10 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	if !ready {
-		fmt.Fprintln(stdout, "Restart Chrome (close every window), then run mirrormark install again to bind the profiles.")
+		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
 		return 0
 	}
-	bin, err := exec.LookPath("google-chrome")
+	bin, err := exec.LookPath(cb.Bin)
 	if err != nil {
 		return fail(err)
 	}
@@ -161,7 +161,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	for _, c := range chosen {
 		id := ids[c.Dir]
 		bound := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := chrome.Bind(bin, *udd, c.Dir, ext.ID, id, bound); err != nil {
+		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, bound); err != nil {
 			fmt.Fprintf(stdout, "not bound: %s: %v\n", c.Dir, err)
 			code = 1
 			continue
@@ -169,7 +169,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "bound: %s -> %s\n", c.Dir, id)
 	}
 	if code == 0 {
-		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from Chrome first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
+		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), cb.Name, p.LogFile())
 	}
 	return code
 }
@@ -494,27 +494,25 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		}
 		return finishUninstall(p, *browser, *purge, stdout, stderr)
 	}
+	cb, _ := chrome.Lookup(*browser) // checked above
 	keyFile := filepath.Join(p.Data, "extension.pem")
 	key, err := chrome.LoadKey(keyFile)
+	host := filepath.Join(sysroot, chrome.HostManifestPath())
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-		var paths []string
-		for _, f := range chrome.SystemFilePaths(id) {
-			paths = append(paths, filepath.Join(sysroot, f))
-		}
+		paths := []string{filepath.Join(sysroot, cb.ExternalFile(id))}
 		// The host manifest's name is fixed; one that names another
 		// extension belongs to another install.
-		if data, err := os.ReadFile(paths[1]); err != nil || !namesExtension(data, id) {
-			paths = paths[:1]
+		if data, err := os.ReadFile(host); err == nil && namesExtension(data, id) {
+			paths = append(paths, host)
 		}
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {
 			return fail(err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
-		ps := chrome.SystemFilePaths("<id>")
 		fmt.Fprintf(stdout, "No key in %s, so the extension id is unknown. Remove %s and %s by hand if they are there.\n",
-			keyFile, filepath.Join(sysroot, ps[0]), filepath.Join(sysroot, ps[1]))
+			keyFile, filepath.Join(sysroot, cb.ExternalFile("<id>")), host)
 	default:
 		return fail(err)
 	}
@@ -524,7 +522,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	if err := os.RemoveAll(filepath.Join(p.Data, "extension")); err != nil {
 		return fail(err)
 	}
-	fmt.Fprintln(stdout, "Chrome removes mirrormark from every profile when it next starts. Your bookmarks stay in Chrome.")
+	fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
 	return finishUninstall(p, *browser, *purge, stdout, stderr)
 }
 

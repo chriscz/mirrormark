@@ -36,18 +36,18 @@ func Retry(bin string, args []string, bound func(since time.Time) bool) (bool, e
 	return false, nil
 }
 
-// Bind opens bind.html#<dbID> in one profile and waits for bound to report
-// the host's hello since the attempt started.
-func Bind(chromeBin, userDataDir, profileDir, extID, dbID string, bound func(since time.Time) bool) error {
-	def, _ := DefaultUserDataDir()
+// Bind opens bind.html#<dbID> in one of b's profiles with bin and waits
+// for bound to report the host's hello since the attempt started.
+func (b Browser) Bind(bin, userDataDir, profileDir, extID, dbID string, bound func(since time.Time) bool) error {
+	def, _ := b.DefaultUserDataDir()
 	var args []string
 	if userDataDir != def {
 		args = append(args, "--user-data-dir="+userDataDir)
 	}
 	args = append(args, "--profile-directory="+profileDir, "chrome-extension://"+extID+"/bind.html#"+dbID)
-	ok, err := Retry(chromeBin, args, bound)
+	ok, err := Retry(bin, args, bound)
 	if err != nil || ok {
 		return err
 	}
-	return fmt.Errorf("profile %s did not confirm within %d tries; check that Chrome was restarted after install and that mirrormark is enabled in chrome://extensions there, then run mirrormark install again", profileDir, bindTries)
+	return fmt.Errorf("profile %s did not confirm within %d tries; check that %s was restarted after install and that mirrormark is enabled in chrome://extensions there, then run %s again", profileDir, bindTries, b.Name, b.InstallCommand())
 }
