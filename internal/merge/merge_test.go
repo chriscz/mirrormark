@@ -556,3 +556,51 @@ func TestApplyStopsAtTheFirstFailure(t *testing.T) {
 		t.Fatalf("browser %q", got)
 	}
 }
+
+// bigDeleted is a member folder of 4 bookmarks and a _deleted of 20.
+func bigDeleted(b *fakebrowser.Browser, root string) {
+	d := b.Add(root, "_deleted", "")
+	for i := range 20 {
+		b.Add(d, fmt.Sprintf("D%d", i), fmt.Sprintf("https://d/%d", i))
+	}
+	for i := range 4 {
+		b.Add(root, fmt.Sprintf("L%d", i), fmt.Sprintf("https://l/%d", i))
+	}
+}
+
+func wrongTree(t *testing.T, f *fixture, theirs []*db.Node) {
+	t.Helper()
+	res, err := merge.Round(merge.Input{Base: f.base, HasBase: true, Ours: f.b.Children(f.root),
+		Theirs: theirs, RootID: f.root, Label: me, NewM: freshMs()})
+	if !errors.Is(err, merge.ErrWrongTree) || len(res.Ops) != 0 {
+		t.Fatalf("err %v ops %+v, want ErrWrongTree and no ops", err, res.Ops)
+	}
+}
+
+// A browser that has not loaded its bookmarks would otherwise purge all of
+// _deleted everywhere, since only the live nodes counted.
+func TestWrongTreeGuardCountsPurges(t *testing.T) {
+	f := newFixture(t, bigDeleted)
+	for _, n := range f.b.Children(f.root) {
+		f.b.RemoveTree(n.ID)
+	}
+	wrongTree(t, f, f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
+}
+
+// A truncated or hand-cut theirs reads as another member's purge.
+func TestWrongTreeGuardCountsWhatTheirsLacks(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
+		for _, s := range []string{"A", "B", "C", "D", "E", "F", "G", "H"} {
+			b.Add(root, s, "https://"+s+"/")
+		}
+	})
+	wrongTree(t, f, f.theirs(func(ns []*db.Node) []*db.Node { return ns[:1] }))
+}
+
+// Their purge of what P already holds in _deleted is not a wrong tree,
+// however much of the folder it is.
+func TestTheirLargePurgeOfDeletedIsApplied(t *testing.T) {
+	f := newFixture(t, bigDeleted)
+	f.round(f.theirs(func(ns []*db.Node) []*db.Node { ns[0].Children = nil; return ns }))
+	f.want("/L0 https://l/0", "/L1 https://l/1", "/L2 https://l/2", "/L3 https://l/3", "/_deleted/")
+}

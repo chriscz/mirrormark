@@ -27,9 +27,12 @@
 // and a node whose parent is gone everywhere moves to _deleted.
 //
 // When the merged parents form a cycle, the move that came from theirs is
-// undone. A round that would move more than half of a member folder of more
-// than five nodes into _deleted is refused with ErrWrongTree, because an
-// unloaded browser or a wrong binding is far likelier than such a delete.
+// undone. A round is refused with ErrWrongTree when base holds more than
+// five nodes and more than half of them are gone from ours, purges included,
+// or are live in base but gone from theirs: an unloaded browser, a wrong
+// binding or a truncated file is far likelier than such a delete. Theirs is
+// always a whole published state, since rounds hold a global lock, so what
+// it lacks was purged or the file is damaged.
 //
 // The result is the merged tree and the ops that turn P's browser into it.
 // Sibling order is not merged: nodes the browser already holds keep their
@@ -56,9 +59,10 @@ import (
 const DeletedTitle = "_deleted"
 
 // ErrWrongTree means the round would move most of a member folder into
-// _deleted. That is far more often a browser that has not loaded its
-// bookmarks, a reset profile or a wrong binding than a real mass delete.
-var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle)
+// _deleted or remove it. That is far more often a browser that has not
+// loaded its bookmarks, a reset profile, a wrong binding or a damaged file
+// than a real mass delete.
+var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle + " or be removed")
 
 type Input struct {
 	Base    []*db.Node // P's record; nil and HasBase false on P's first round
@@ -126,7 +130,6 @@ type merger struct {
 	oursNew            map[string]bool // fresh m given to an unlinked add in ours
 	retitle            map[string]val
 	conflicts          []Conflict
-	deletions          int
 	deleted            string
 }
 
@@ -157,7 +160,7 @@ func Round(in Input) (Result, error) {
 	for _, k := range slices.Sorted(maps.Keys(keys)) {
 		m.mergeOne(k)
 	}
-	if in.HasBase && len(m.base) > 5 && 2*m.deletions > len(m.base) {
+	if in.HasBase && len(m.base) > 5 && 2*m.gone() > len(m.base) {
 		return Result{}, ErrWrongTree
 	}
 	// Undoing a move can put a node back under a parent the merge dropped,
@@ -320,7 +323,6 @@ func (m *merger) mergeOne(k string) {
 			return
 		}
 		// P deleted it: that is a move into _deleted, merged like any edit.
-		m.deletions++
 		vo := b.v
 		if _, ok := m.ours[b.v.parent]; ok || b.v.parent == "" {
 			vo.parent = m.deletedM()
@@ -404,6 +406,20 @@ func (m *merger) merge3(k string, b, o, t val, id string, oIndex, tIndex int) {
 	}
 	n := m.put(k, r, id, index, id != "" && fp != fromTheirs, fp == fromTheirs)
 	n.oursParent = o.parent
+}
+
+// gone counts the base nodes the round would move to _deleted or remove:
+// those missing from ours, and those live in base but missing from theirs.
+func (m *merger) gone() int {
+	n := 0
+	for k := range m.base {
+		_, inO := m.ours[k]
+		_, inT := m.theirs[k]
+		if !inO || !inT && !m.inDeleted(k) {
+			n++
+		}
+	}
+	return n
 }
 
 // inDeleted reports whether base node k is _deleted or inside it.

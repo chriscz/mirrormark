@@ -40,6 +40,10 @@ a folder name. One profile's folders may not be inside each other.
 - Deleting a bookmark in a union moves it to a `_deleted` folder inside the
   union, in every profile. Restore it by moving it out. Delete it from
   `_deleted` to remove it everywhere.
+- A round that would delete or purge more than half of a union (of more than
+  five bookmarks and folders) syncs nothing for that union, because a browser
+  that has not loaded its bookmarks or a damaged file is far likelier. Empty a
+  large `_deleted` in parts.
 - When two profiles change the same bookmark differently, you get both,
   titled for example `GitHub (chrome/personal)` and `GitHub (chrome/work)`.
   For folders, the change that reached the files first wins.
