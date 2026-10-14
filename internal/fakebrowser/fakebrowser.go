@@ -212,6 +212,10 @@ func (b *Browser) apply(op merge.Op) merge.OpResult {
 				return merge.OpResult{Error: "move into itself"}
 			}
 		}
+		// Detach, then insert at index among what is left. Chrome counts a
+		// move's index within the parent as it was before the move, so a
+		// move inside one parent lands one place off here. The merge never
+		// sends such a move: reordering stays local.
 		b.detach(n)
 		b.insert(p, n, index)
 		return merge.OpResult{OK: true}

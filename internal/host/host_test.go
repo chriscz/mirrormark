@@ -3,6 +3,7 @@ package host_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"os"
@@ -98,11 +99,14 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 			ho.Poll = o.poll
 		}
 	}
+	exited := make(chan struct{})
 	go func() {
 		e.done <- host.Run(ctx, hr, hw, ho)
 		hw.Close()
+		close(exited)
 	}()
-	t.Cleanup(func() { cancel(); ew.Close() })
+	// Wait for the host, so it does not write into a removed temp dir.
+	t.Cleanup(func() { cancel(); ew.Close(); <-exited })
 	go func() {
 		for {
 			m, err := host.ReadMsg(er)
@@ -555,4 +559,130 @@ func TestWrongTreeIsReportedOnce(t *testing.T) {
 	if m := a.errors()[0]; !strings.Contains(m.Message, "work") {
 		t.Fatalf("message does not name the union: %+v", m)
 	}
+}
+
+// An applied message with too few results is a failed batch.
+func TestShortAnswerWritesNothing(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	addProfile(t, p, "b")
+	writeConfig(t, p, workUnion)
+	bb := fakebrowser.New()
+	bb.Add(bb.Add("1", "Work", ""), "X", "https://x/")
+	start(t, p, "b", bb, extOpts{})
+	eventually(t, "b's first write", func() bool {
+		d, err := db.LoadDB(p.ProfileFile("b"))
+		return err == nil && d.Unions["work"] != nil
+	})
+	ab := fakebrowser.New()
+	ab.Add("1", "Work", "")
+	a := start(t, p, "a", ab, extOpts{short: true})
+	m := a.firstError()
+	if m.Code != "apply-failed" || !strings.Contains(m.Message, "answered 0 of 1") {
+		t.Fatalf("error %+v", m)
+	}
+	d, err := db.LoadDB(p.ProfileFile("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Unions["work"] != nil {
+		t.Fatalf("a wrote a record from a short answer: %+v", d.Unions["work"])
+	}
+}
+
+// When the browser closes the port the host returns nil and frees the
+// profile for the next connection.
+func TestEOFStopsCleanlyAndFreesTheLock(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	e := start(t, p, "a", fakebrowser.New(), extOpts{})
+	eventually(t, "hello", func() bool { return db.Connected(p, "a", time.Time{}) })
+	e.w.Close()
+	select {
+	case err := <-e.done:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("host did not stop")
+	}
+	unlock, err := db.TryLock(p.ProfileLock("a"))
+	if err != nil {
+		t.Fatalf("profile lock still held: %v", err)
+	}
+	unlock()
+}
+
+// A message of an unknown type is ignored; one that is not JSON stops the
+// host with an error and frees the profile.
+func TestMalformedMessages(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	e := start(t, p, "a", fakebrowser.New(), extOpts{})
+	eventually(t, "hello", func() bool { return db.Connected(p, "a", time.Time{}) })
+	e.send(host.Msg{V: 1, Type: "bogus"})
+	select {
+	case err := <-e.done:
+		t.Fatalf("host stopped on an unknown type: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	frame := binary.NativeEndian.AppendUint32(nil, 5)
+	if _, err := e.w.Write(append(frame, "{oops"...)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-e.done:
+		if err == nil || !strings.Contains(err.Error(), "bad message") {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("host did not stop")
+	}
+	unlock, err := db.TryLock(p.ProfileLock("a"))
+	if err != nil {
+		t.Fatalf("profile lock still held: %v", err)
+	}
+	unlock()
+}
+
+// A tree that comes before hello has no profile to sync; it is ignored.
+func TestTreeBeforeHelloIsIgnored(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	writeConfig(t, p, "format: 1\nunions:\n  work:\n    a: toolbar/Work\n")
+	log := &logBuf{}
+	e := start(t, p, "a", fakebrowser.New(), extOpts{log: log, noHello: true})
+	e.sendTree()
+	eventually(t, "the debug line", func() bool {
+		return strings.Contains(log.String(), `level=DEBUG msg="tree before hello ignored"`)
+	})
+	if applies, rounds := e.count(); applies != 0 || rounds != 0 {
+		t.Fatalf("%d applies and %d rounds before hello", applies, rounds)
+	}
+	e.send(host.Msg{V: 1, Type: "hello", DB: "a", Browser: "chrome/test"})
+	e.sendTree()
+	eventually(t, "the member folder", func() bool { return e.has("Work") })
+}
+
+// Rounds never overlap: a host waits for the global lock before it reads
+// files or sends ops.
+func TestRoundWaitsForTheGlobalLock(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	writeConfig(t, p, "format: 1\nunions:\n  work:\n    a: toolbar/Work\n")
+	unlock, err := db.Lock(p.GlobalLock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	e := start(t, p, "a", fakebrowser.New(), extOpts{})
+	t.Cleanup(release) // before the host's cleanup waits for it to stop
+	eventually(t, "hello", func() bool { return db.Connected(p, "a", time.Time{}) })
+	time.Sleep(300 * time.Millisecond)
+	if applies, rounds := e.count(); applies != 0 || rounds != 0 {
+		t.Fatalf("%d applies and %d rounds while another round held the lock", applies, rounds)
+	}
+	release()
+	eventually(t, "the member folder", func() bool { return e.has("Work") })
 }
