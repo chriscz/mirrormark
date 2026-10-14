@@ -121,7 +121,7 @@ type merger struct {
 	base, ours, theirs map[string]entry
 	theirsKids         map[string][]string
 	browser            map[string]bnode // P's browser before the round, by id
-	browserOrder       []string
+	browserOrder       []string         // children before their parent
 	out, dropped       map[string]*node
 	oursNew            map[string]bool // fresh m given to an unlinked add in ours
 	retitle            map[string]val
@@ -213,8 +213,8 @@ func flatten(ns []*db.Node) map[string]entry {
 func (m *merger) indexBrowser(ns []*db.Node, parent string) {
 	for _, n := range ns {
 		m.browser[n.ID] = bnode{title: n.Title, url: n.URL, parent: parent}
-		m.browserOrder = append(m.browserOrder, n.ID)
 		m.indexBrowser(n.Children, n.ID)
+		m.browserOrder = append(m.browserOrder, n.ID)
 	}
 }
 
@@ -570,7 +570,10 @@ func (m *merger) build(parent string, kids map[string][]string) []*db.Node {
 
 // ops turns P's browser into tree: creates and moves top-down, so a parent
 // exists before its children, then updates, then removes last, so nothing
-// still needed is inside a removed folder.
+// still needed is inside a removed folder. Every node that goes gets its own
+// remove, children before their folder, because a remove is non-recursive:
+// if a move out of a folder failed, removing the folder fails too instead
+// of taking the node with it.
 func (m *merger) ops(tree []*db.Node) []Op {
 	var seq, upd, rem []Op
 	kept := map[string]bool{}
@@ -606,8 +609,7 @@ func (m *merger) ops(tree []*db.Node) []Op {
 	}
 	walk(m.in.RootID, tree)
 	for _, id := range m.browserOrder {
-		b := m.browser[id]
-		if !kept[id] && (b.parent == m.in.RootID || kept[b.parent]) {
+		if b := m.browser[id]; !kept[id] {
 			rem = append(rem, Op{Op: "remove", ID: id, Expect: &Expect{Title: new(b.title), URL: new(b.url)}})
 		}
 	}

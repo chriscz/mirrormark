@@ -3,6 +3,7 @@
 package fakebrowser
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 
@@ -74,7 +75,22 @@ func (b *Browser) Move(id, parentID string) {
 	b.detach(n)
 	b.insert(b.nodes[parentID], n, -1)
 }
-func (b *Browser) Remove(id string) {
+
+// Remove removes a bookmark or an empty folder, and refuses a folder that
+// holds anything, as chrome.bookmarks.remove does.
+func (b *Browser) Remove(id string) error {
+	n := b.nodes[id]
+	if len(n.kids) > 0 {
+		return errors.New("folder not empty")
+	}
+	b.detach(n)
+	b.forget(n)
+	return nil
+}
+
+// RemoveTree removes a node with everything inside it, as a user deleting a
+// folder does.
+func (b *Browser) RemoveTree(id string) {
 	n := b.nodes[id]
 	b.detach(n)
 	b.forget(n)
@@ -127,16 +143,22 @@ func NodeLines(ns []*db.Node) []string {
 	return out
 }
 
-// Apply runs ops one at a time, as the extension does. fail, if not nil,
-// makes op i fail without running, to simulate a browser error.
+// Apply runs ops one at a time and stops at the first that fails, as the
+// extension does; the ops after it are answered "not run". fail, if not
+// nil, makes op i fail without running, to simulate a browser error.
 func (b *Browser) Apply(ops []merge.Op, fail func(i int) bool) []merge.OpResult {
 	res := make([]merge.OpResult, len(ops))
+	failed := false
 	for i, op := range ops {
-		if fail != nil && fail(i) {
+		switch {
+		case failed:
+			res[i] = merge.OpResult{Error: "not run"}
+		case fail != nil && fail(i):
 			res[i] = merge.OpResult{Error: "injected"}
-			continue
+		default:
+			res[i] = b.apply(op)
 		}
-		res[i] = b.apply(op)
+		failed = failed || !res[i].OK
 	}
 	return res
 }
@@ -197,7 +219,9 @@ func (b *Browser) apply(op merge.Op) merge.OpResult {
 		if n == nil || *op.Expect.Title != n.title || *op.Expect.URL != n.url {
 			return stale
 		}
-		b.Remove(op.ID)
+		if err := b.Remove(op.ID); err != nil {
+			return merge.OpResult{Error: err.Error()}
+		}
 		return merge.OpResult{OK: true}
 	}
 	return merge.OpResult{Error: "unknown op " + op.Op}

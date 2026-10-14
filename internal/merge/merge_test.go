@@ -167,7 +167,7 @@ func news(b *fakebrowser.Browser, root string) { b.Add(root, "News", "https://lw
 
 func TestDeleteMovesToDeleted(t *testing.T) {
 	f := newFixture(t, news)
-	f.b.Remove(f.b.Find(f.root, "News"))
+	f.b.RemoveTree(f.b.Find(f.root, "News"))
 	res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
 	f.want("/_deleted/", "/_deleted/News https://lwn.net/")
 	if n := find(res.Tree, "News"); n.M != "m-News" {
@@ -177,7 +177,7 @@ func TestDeleteMovesToDeleted(t *testing.T) {
 
 func TestDeleteKeepsTheirRename(t *testing.T) {
 	f := newFixture(t, news)
-	f.b.Remove(f.b.Find(f.root, "News"))
+	f.b.RemoveTree(f.b.Find(f.root, "News"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node { ns[0].Title = "LWN"; return ns }))
 	f.want("/_deleted/", "/_deleted/LWN https://lwn.net/")
 }
@@ -189,7 +189,7 @@ func TestDeletedFolderKeepsItsSubtree(t *testing.T) {
 		b.Add(root, "A", "https://a/")
 		b.Add(root, "B", "https://b/")
 	})
-	f.b.Remove(f.b.Find(f.root, "Dev"))
+	f.b.RemoveTree(f.b.Find(f.root, "Dev"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
 	f.want("/A https://a/", "/B https://b/", "/_deleted/", "/_deleted/Dev/", "/_deleted/Dev/Go https://go.dev/")
 }
@@ -246,7 +246,7 @@ func inDeleted(b *fakebrowser.Browser, root string) {
 
 func TestOurPurgeRemovesIt(t *testing.T) {
 	f := newFixture(t, inDeleted)
-	f.b.Remove(f.b.Find(f.b.Find(f.root, "_deleted"), "Old"))
+	f.b.RemoveTree(f.b.Find(f.b.Find(f.root, "_deleted"), "Old"))
 	res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
 	f.want("/Keep https://keep/", "/_deleted/")
 	if find(res.Tree, "Old") != nil {
@@ -268,14 +268,14 @@ func TestTheirPurgeRemovesItHere(t *testing.T) {
 
 func TestEditBeatsPurge(t *testing.T) {
 	f := newFixture(t, inDeleted)
-	f.b.Remove(f.b.Find(f.b.Find(f.root, "_deleted"), "Old"))
+	f.b.RemoveTree(f.b.Find(f.b.Find(f.root, "_deleted"), "Old"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node { find(ns, "Old").Title = "Older"; return ns }))
 	f.want("/Keep https://keep/", "/_deleted/", "/_deleted/Older https://old/")
 }
 
 func TestRemovingDeletedFolderPurgesItsContents(t *testing.T) {
 	f := newFixture(t, inDeleted)
-	f.b.Remove(f.b.Find(f.root, "_deleted"))
+	f.b.RemoveTree(f.b.Find(f.root, "_deleted"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
 	f.want("/Keep https://keep/")
 }
@@ -323,7 +323,7 @@ func TestWrongTreeGuard(t *testing.T) {
 		}
 	})
 	for i := range 5 {
-		f.b.Remove(f.b.Find(f.root, fmt.Sprintf("B%d", i)))
+		f.b.RemoveTree(f.b.Find(f.root, fmt.Sprintf("B%d", i)))
 	}
 	_, err := merge.Round(merge.Input{Base: f.base, HasBase: true, Ours: f.b.Children(f.root),
 		Theirs: f.base, RootID: f.root, Label: me, NewM: freshMs()})
@@ -334,7 +334,7 @@ func TestWrongTreeGuard(t *testing.T) {
 
 func TestRetryAfterPartialFailureDoesNotDuplicate(t *testing.T) {
 	f := newFixture(t, func(b *fakebrowser.Browser, root string) { gh(b, root); news(b, root) })
-	f.b.Remove(f.b.Find(f.root, "News"))
+	f.b.RemoveTree(f.b.Find(f.root, "News"))
 	f.b.SetURL(f.b.Find(f.root, "GitHub"), "https://github.com/orgs/a")
 	theirs := f.theirs(func(ns []*db.Node) []*db.Node { ns[0].URL = "https://github.com/orgs/b"; return ns })
 	res, err := merge.Round(merge.Input{Base: f.base, HasBase: true, Ours: f.b.Children(f.root),
@@ -342,8 +342,9 @@ func TestRetryAfterPartialFailureDoesNotDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every create lands and every other op fails, as if the browser
-	// stopped answering mid-batch. Base stays as it was: nothing was written.
+	// Every create lands, then the first other op fails and the batch stops,
+	// as if the browser stopped answering. Base stays as it was: nothing was
+	// written.
 	f.b.Apply(res.Ops, func(i int) bool { return res.Ops[i].Op != "create" })
 	f.round(theirs)
 	f.want("/GitHub (chrome/personal) https://github.com/orgs/a", "/GitHub (chrome/work) https://github.com/orgs/b",
@@ -369,7 +370,7 @@ func TestNewBookmarkTakesItsSourcePosition(t *testing.T) {
 
 func TestDeletedFolderTakesTheirNewBookmark(t *testing.T) {
 	f := newFixture(t, func(b *fakebrowser.Browser, root string) { b.Add(b.Add(root, "Dev", ""), "Go", "https://go.dev/") })
-	f.b.Remove(f.b.Find(f.root, "Dev"))
+	f.b.RemoveTree(f.b.Find(f.root, "Dev"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node {
 		ns[0].Children = append(ns[0].Children, &db.Node{Title: "Rust", URL: "https://rust-lang.org/", M: "m-t1", By: other})
 		return ns
@@ -454,7 +455,7 @@ func TestWrongTreeGuardThreshold(t *testing.T) {
 			}
 		})
 		for i := range c.removed {
-			f.b.Remove(f.b.Find(f.root, fmt.Sprintf("B%d", i)))
+			f.b.RemoveTree(f.b.Find(f.root, fmt.Sprintf("B%d", i)))
 		}
 		f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
 	}
@@ -464,7 +465,7 @@ func TestOurPurgeKeepsAFolderTheyAddedTo(t *testing.T) {
 	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
 		b.Add(b.Add(b.Add(root, "_deleted", ""), "Dev", ""), "Go", "https://go.dev/")
 	})
-	f.b.Remove(f.b.Find(f.b.Find(f.root, "_deleted"), "Dev"))
+	f.b.RemoveTree(f.b.Find(f.b.Find(f.root, "_deleted"), "Dev"))
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node {
 		d := find(ns, "Dev")
 		d.Children = append(d.Children, &db.Node{Title: "Rust", URL: "https://rust-lang.org/", M: "m-t1", By: other})
@@ -491,4 +492,67 @@ func TestCycleUndoKeepsAParentTheyPurged(t *testing.T) {
 	}))
 	f.want("/_deleted/", "/_deleted/A/", "/_deleted/A/Y/", "/_deleted/A/Y/y1 https://y1/",
 		"/_deleted/A/Y/X/", "/_deleted/A/Y/X/x1 https://x1/")
+}
+
+// Their purge of F comes with a move of K out of F. If the move fails, the
+// remove of F must not take K with it, and the retry finishes the job.
+func TestFailedMoveOutOfARemovedFolderKeepsTheNode(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
+		b.Add(b.Add(b.Add(root, "_deleted", ""), "F", ""), "K", "https://k/")
+	})
+	theirs := f.theirs(func(ns []*db.Node) []*db.Node {
+		d := ns[0]
+		k := d.Children[0].Children[0]
+		d.Children = nil
+		return append(ns, k)
+	})
+	res, err := merge.Round(merge.Input{Base: f.base, HasBase: true, Ours: f.b.Children(f.root),
+		Theirs: theirs, RootID: f.root, Label: me, NewM: freshMs()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.b.Apply(res.Ops, func(i int) bool { return res.Ops[i].Op == "move" })
+	f.want("/_deleted/", "/_deleted/F/", "/_deleted/F/K https://k/")
+	f.round(theirs)
+	f.want("/K https://k/", "/_deleted/")
+}
+
+// Removes are non-recursive and leaf-first, as with bookmarks.remove: a
+// folder goes only once it is empty.
+func TestRemovesTakeContentsBeforeTheirFolder(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) {
+		g := b.Add(b.Add(b.Add(root, "_deleted", ""), "F", ""), "G", "")
+		b.Add(g, "a", "https://a/")
+		b.Add(g, "b", "https://b/")
+	})
+	d := f.b.Find(f.root, "_deleted")
+	if r := f.b.Apply([]merge.Op{{Op: "remove", ID: f.b.Find(d, "F"), Expect: &merge.Expect{Title: new("F"), URL: new("")}}}, nil); r[0].OK {
+		t.Fatal("removed a folder that is not empty")
+	}
+	res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { ns[0].Children = nil; return ns }))
+	var got []string
+	for _, op := range res.Ops {
+		got = append(got, op.Op+" "+*op.Expect.Title)
+	}
+	if want := []string{"remove a", "remove b", "remove G", "remove F"}; !slices.Equal(got, want) {
+		t.Fatalf("ops %q, want %q", got, want)
+	}
+	f.want("/_deleted/")
+}
+
+// After a failed op the rest of the batch does not run, as in the extension.
+func TestApplyStopsAtTheFirstFailure(t *testing.T) {
+	b := fakebrowser.New()
+	ops := []merge.Op{
+		{Op: "create", Ref: "r1", Parent: "1", Title: new("A"), URL: new("https://a/")},
+		{Op: "update", ID: "99", Title: new("x"), Expect: &merge.Expect{Title: new("x"), URL: new("")}},
+		{Op: "create", Ref: "r2", Parent: "1", Title: new("B"), URL: new("https://b/")},
+	}
+	res := b.Apply(ops, nil)
+	if !res[0].OK || res[1].OK || res[2].OK || res[2].Error != "not run" {
+		t.Fatalf("results %+v", res)
+	}
+	if got := b.Lines("1"); !slices.Equal(got, []string{"/A https://a/"}) {
+		t.Fatalf("browser %q", got)
+	}
 }
