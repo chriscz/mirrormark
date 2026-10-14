@@ -77,7 +77,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if *udd == "" {
 		*udd, err = chrome.DefaultUserDataDir()
 	} else {
-		*udd, err = filepath.Abs(*udd)
+		*udd, err = resolveDir(*udd)
 	}
 	if err != nil {
 		return fail(err)
@@ -151,6 +151,21 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from Chrome first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), p.LogFile())
 	}
 	return code
+}
+
+// resolveDir returns dir's absolute path with symlinks resolved, so one
+// directory always maps to the same database files however it is named. A
+// directory that does not exist yet keeps its absolute path.
+func resolveDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if errors.Is(err, fs.ErrNotExist) {
+		return abs, nil
+	}
+	return real, err
 }
 
 // writeSystemFiles writes Chrome's two root-owned files. If this process

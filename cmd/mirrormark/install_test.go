@@ -361,6 +361,30 @@ func TestInstallStopsWhenSudoFails(t *testing.T) {
 	}
 }
 
+// A data directory named through a symlink is the same directory, so it
+// must map to the same database files.
+func TestInstallResolvesASymlinkedDataDir(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	udd := chromeData(t)
+	link := filepath.Join(t.TempDir(), "chrome")
+	if err := os.Symlink(udd, link); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	for _, dir := range []string{link, udd} {
+		if code := run([]string{"install", "--user-data-dir", dir, "--profile", "Work"}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+		}
+	}
+	dbs, _ := db.LoadAll(p)
+	if len(dbs) != 1 || dbs["chrome-work"] == nil || dbs["chrome-work"].Profile.Path != filepath.Join(udd, "Profile 1") {
+		t.Fatalf("databases %v", dbs)
+	}
+}
+
 func TestInstallRejectsAnUnknownProfile(t *testing.T) {
 	testHome(t)
 	_, calls := fakeSystem(t)
