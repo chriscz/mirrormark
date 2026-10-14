@@ -23,7 +23,7 @@
 - Native host name: `com.github.chriscz.mirrormark`. Extension permissions: `bookmarks`, `nativeMessaging`, `storage`; no host permissions; no web-accessible resources.
 - Paths (XDG, defaults shown): config `~/.config/mirrormark/config.yaml`; data `~/.local/share/mirrormark/` (`profiles/<id>.yaml`, `profiles/<id>.lock`, `backups/<id>/<YYYY-MM-DD>.yaml`, `lock`, `extension/`, `extension.pem`, `mirrormark.crx`); state `~/.local/state/mirrormark/` (`log`). The host touches `profiles/<id>.lock` on each `hello`; its mtime is how `install` and the e2e tests see that a profile connected. YAML and key files mode `0600`, directories `0700`, CRX `0644`.
 - Timings: extension sends a tree after 0.5 s without bookmark events; host polls files every 1 s; host waits 10 s for a batch to apply; at most 500 ops per `apply` message (messages to the extension must stay under 1 MB).
-- Wrong-tree guard: a round that would move more than half of a member folder's base nodes to `_deleted`, when the member folder held more than 5 base nodes, writes nothing and reports `db-mismatch`.
+- Wrong-tree guard: a round in which more than half of the base nodes are gone from ours (purges included) or are live in base but gone from theirs, when base holds more than 5 nodes, writes nothing and reports `db-mismatch`.
 - Backups: before the first write of each day; keep the newest 30 per profile.
 - Default ids and labels: database id `chrome-<slug of profile name>`, label `chrome/<slug>`, with `-2`, `-3`… appended when taken. Slug: lower case, runs of characters other than `a-z0-9` become `-`, trimmed.
 - URLs match exactly (no normalisation). Paths resolve in Chrome's account folders when they exist (`syncing: true`), else the local ones. A folder conflict lets theirs win and logs it.
@@ -115,7 +115,7 @@ func NewM() string
 // internal/fakebrowser (task 3, Tree added in task 4)
 func New() *Browser   // ids "1" Bookmarks bar, "2" Other bookmarks, "3" Mobile bookmarks
 func (b *Browser) Add(parentID, title, url string) string   // url "" makes a folder
-func (b *Browser) Rename(id, title string); SetURL(id, url string); Move(id, parentID string); Remove(id string)
+func (b *Browser) Rename(id, title string); SetURL(id, url string); Move(id, parentID string); Remove(id string); RemoveTree(id string)
 func (b *Browser) Find(parentID, title string) string
 func (b *Browser) Children(id string) []*db.Node
 func (b *Browser) Lines(id string) []string
@@ -1203,7 +1203,7 @@ The heart of the project. Test first: write each test, watch it fail, then make 
 
 **Interfaces:**
 - Consumes: `db.Node`.
-- Produces: `merge.Round`, `merge.Input`, `merge.Result`, `merge.Op`, `merge.Expect`, `merge.OpResult`, `merge.Conflict`, `merge.ErrWrongTree`, `merge.DeletedTitle`, `merge.NewM`; `fakebrowser.New`, `Add`, `Rename`, `SetURL`, `Move`, `Remove`, `Find`, `Children`, `Lines`, `Apply`, `NodeLines`.
+- Produces: `merge.Round`, `merge.Input`, `merge.Result`, `merge.Op`, `merge.Expect`, `merge.OpResult`, `merge.Conflict`, `merge.ErrWrongTree`, `merge.DeletedTitle`, `merge.NewM`; `fakebrowser.New`, `Add`, `Rename`, `SetURL`, `Move`, `Remove`, `RemoveTree`, `Find`, `Children`, `Lines`, `Apply`, `NodeLines`.
 
 **Semantics to implement** (each has a test below):
 
@@ -1216,11 +1216,11 @@ The heart of the project. Test first: write each test, watch it fail, then make 
 - A base node missing from ours and inside `_deleted` (or `_deleted` itself): P purged it. Removed if theirs did not change it; else theirs wins and it is recreated.
 - A base node missing from theirs: another member purged it. Removed from P if ours did not change it; else ours wins.
 - A removed node with a kept descendant is kept. A kept node whose parent exists nowhere goes to `_deleted`.
-- Cycles: undo the move that came from theirs.
-- Guard: with base, more than 5 base nodes, and deletions × 2 > base count → `ErrWrongTree`.
+- Cycles: undo the move that came from theirs, then keep parents again, until neither changes anything. Every merged node must reach the member folder; if one does not, `Round` returns an error instead of dropping it.
+- Guard: with base and more than 5 base nodes, count base nodes missing from ours (inside `_deleted` too) or, outside `_deleted` in base, missing from theirs; count × 2 > base count → `ErrWrongTree`.
 - Retry: a node the round would create is linked to an identical new node (same title and URL, not linked to anything else) already in P's browser under the same parent. After a round that failed part-way, this is how creates that did land are recognised, so the retry does not duplicate them.
 - Order: nodes P's browser already holds under the same parent keep their order; other nodes are inserted at their source index (clamped).
-- Ops: DFS over the merged tree. `create` (Ref = the node's `m`, Parent = parent browser id or parent `m` if that parent is created in the same round) and `move` (Expect.Parent = current browser parent) in DFS order, then `update` (Expect title and URL), then `remove` of top-most browser nodes no longer in the tree (Expect title and URL). The member folder's browser id is `Input.RootID`.
+- Ops: DFS over the merged tree. `create` (Ref = the node's `m`, Parent = parent browser id or parent `m` if that parent is created in the same round) and `move` (Expect.Parent = current browser parent) in DFS order, then `update` (Expect title and URL), then `remove` of every browser node no longer in the tree, children before their folder (Expect title and URL). A remove is non-recursive, like `bookmarks.remove`: the fake browser refuses to remove a non-empty folder, and `Apply` stops at the first failed op and answers the rest `not run`, as the extension does. The member folder's browser id is `Input.RootID`.
 
 - [ ] **Step 1: Write the fake browser** `internal/fakebrowser/fakebrowser.go`
 
@@ -4173,7 +4173,8 @@ async function sendTree() {
 async function onMessage(p, m) {
   if (m.type === "apply") {
     const results = [];
-    for (const op of m.ops) results.push(await applyOp(op)); // one at a time: order matters
+    // One at a time, and none after a failure: each op assumes the earlier ones landed.
+    for (const op of m.ops) results.push(results.some((r) => !r.ok) ? { ok: false, error: "not run" } : await applyOp(op));
     p.postMessage({ v: V, type: "applied", batch: m.batch, results });
     const failed = results.find((r) => !r.ok);
     await setStatus({ error: failed ? failed.error : null });
@@ -4226,8 +4227,9 @@ async function applyOp(op) {
       case "remove": {
         const [n] = await chrome.bookmarks.get(op.id);
         if (n.title !== op.expect.title || (n.url ?? "") !== op.expect.url) return { ok: false, error: "stale" };
-        if (n.url) await chrome.bookmarks.remove(op.id);
-        else await chrome.bookmarks.removeTree(op.id);
+        // Never removeTree: the host removes a folder's contents first, so a
+        // folder that is not empty holds something the round meant to keep.
+        await chrome.bookmarks.remove(op.id);
         return { ok: true };
       }
     }
