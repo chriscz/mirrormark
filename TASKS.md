@@ -40,6 +40,111 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **Found:** the final fix wave, 2026-10-15.
 - **Fix:** rotate on write as well as on start.
 
+### `DefaultRoot` never tries `~/.config/mozilla/firefox` under another `$XDG_CONFIG_HOME`
+
+- **Where:** `internal/firefox/profiles.go`, `DefaultRoot()`.
+- **What:** when `$XDG_CONFIG_HOME` is set, it looks only in
+  `$XDG_CONFIG_HOME/mozilla/firefox`, then falls back to the legacy
+  `~/.mozilla/firefox`. Whether Firefox itself honours `$XDG_CONFIG_HOME`
+  for its profiles root is not verified.
+- **Effect:** if Firefox ignores `$XDG_CONFIG_HOME` and keeps its profiles
+  in `~/.config/mozilla/firefox`, `install` lands on the legacy root and
+  finds no profiles or the wrong ones. `--user-data-dir` works around it.
+- **Found:** the final review of the Firefox work, 2026-10-15.
+- **Fix:** settle it in the desktop check below; if Firefox ignores the
+  variable, try `~/.config/mozilla/firefox` too.
+
+### A nameless `[ProfileN]` in `profiles.ini` gets an empty name
+
+- **Where:** `internal/firefox/profiles.go`, `Profiles()`.
+- **What:** a profile section with a `Path=` but no `Name=` is listed with
+  an empty name, instead of falling back to the name the scan would give it
+  (what follows the directory's first `.`).
+- **Effect:** `install` prints an empty profile name, and the database id
+  slug comes from the directory. Rare: Firefox always writes `Name=`.
+- **Found:** review of the profile listing, 2026-10-15.
+- **Fix:** when `Name` is empty, name the profile as the scan does.
+
+### `--purge` cannot finish while a database names an unknown browser
+
+- **Where:** `cmd/mirrormark/install.go`, `finishUninstall()`.
+- **What:** a database whose `browser:` is neither `chrome` nor `firefox`
+  (only possible by editing the file) counts as another browser's, so
+  `--purge` keeps the config, log and data directory and says that
+  uninstalling "their browser" with `--purge` deletes them. No uninstall
+  exists for that browser.
+- **Effect:** the message is a dead end; the user has to delete the files
+  by hand. The shared files are kept, which is safe.
+- **Found:** review of per-browser purge, 2026-10-15.
+- **Fix:** name the databases whose browser is unknown and tell the user to
+  move them out of the profiles directory, or delete them, first.
+
+### One unreadable `user.js` blocks Firefox's uninstall for every profile
+
+- **Where:** `cmd/mirrormark/install.go`, `uninstallFirefox()`.
+- **What:** a `user.js` that exists but cannot be read stops uninstall
+  before it changes anything, for every Firefox profile.
+- **Effect:** fails safe: nothing is removed, and the error names the file.
+  The user must fix that one file before any profile is uninstalled.
+- **Found:** review of Firefox's uninstall, 2026-10-15.
+- **Fix:** none needed for safety; optionally carry on with the other
+  profiles and report the unreadable one at the end, exiting non-zero.
+
+### The Firefox e2e tests use fixed BiDi ports
+
+- **Where:** `e2e/env.go` (ports 9301 and 9302), `e2e/bidi.go`,
+  `launchFirefox()`.
+- **What:** each Firefox instance listens for BiDi on a fixed port.
+- **Effect:** a stale Firefox from an earlier run, or anything else on the
+  port, makes `session.new` fail loudly; it cannot pass falsely.
+- **Found:** review of the BiDi driver, 2026-10-15.
+- **Fix:** start Firefox with `--remote-debugging-port 0` and read the port
+  it picks.
+
+### The BiDi handshake has no deadline
+
+- **Where:** `e2e/bidi.go`, `handshake()`.
+- **What:** the TCP dial and the WebSocket upgrade have no deadline;
+  `bidiCall` sets one only after the session is up.
+- **Effect:** a Firefox that accepts the connection but never answers
+  hangs the test until the 60-minute `go test` timeout.
+- **Found:** review of the BiDi driver, 2026-10-15.
+- **Fix:** dial with a timeout and set a deadline on the connection for the
+  handshake.
+
+### The BiDi client ignores control frames and `id: null` errors
+
+- **Where:** `e2e/bidi.go`, `recv()` and `bidiCall()`.
+- **What:** `recv` treats ping and close frames as data, and `bidiCall`
+  skips an error reply with `id: null` as if it were an event.
+- **Effect:** both end in the 30 s deadline error rather than a clear one;
+  neither gives a wrong result.
+- **Found:** review of the BiDi driver, 2026-10-15.
+- **Fix:** answer pings, return on close, and return an `id: null` error.
+
+### No round check after Firefox restarts
+
+- **Where:** `e2e/install_test.go`, `TestFirefoxInstallAndBind`, after the
+  restart.
+- **What:** after Chrome restarts, the test waits for `roundDone`; after
+  Firefox restarts, it checks only the hello and the log.
+- **Effect:** a coverage gap: a Firefox host that connects but cannot
+  finish a round after a restart would not fail this test (the sync tests
+  would still catch most such breakage).
+- **Found:** review of the Firefox e2e tests, 2026-10-15.
+- **Fix:** call `roundDone` after the Firefox restart too.
+
+### `TestFirefoxUninstall`'s `extensions.json` check passes if the entry is absent
+
+- **Where:** `e2e/firefox_test.go`, `TestFirefoxUninstall`.
+- **What:** the check fails only if mirrormark's entry is present and
+  active. If Firefox never listed it, the check passes vacuously.
+- **Effect:** the XPI and prefs checks still carry the test, so a broken
+  uninstall is still caught; this one check proves less than it seems.
+- **Found:** review of the Firefox e2e tests, 2026-10-15.
+- **Fix:** before uninstalling, read `extensions.json` and require an
+  active mirrormark entry.
+
 ## Manual checks still to do
 
 - Run `mirrormark install` from the README on a real Linux desktop with
@@ -47,3 +152,13 @@ Each entry says where, what, its effect, how it was found and the fix.
   directories writable, so the e2e tests never run `sudo`). Check that the
   data piped to `sudo install -D -m 0644 /dev/stdin <target>` gets through
   while `sudo` asks for a password, and that `uninstall`'s `sudo rm` works.
+- Run the README's Firefox steps on a real Linux desktop with Firefox
+  Developer Edition installed the usual way: a profile that has been used,
+  under `~/.config/mozilla/firefox` or `~/.mozilla/firefox`, with
+  `LastPlatformDir` from a real install. Run the first `install` with
+  Firefox open, then bind a running profile over the desktop's D-Bus.
+  Check whether `$XDG_CONFIG_HOME` moves Firefox's profiles root (see the
+  `DefaultRoot` entry above). Try an upgrade: replace the binary, run
+  `install --browser firefox` again, restart Firefox and check the new
+  build runs. Then uninstall after real use. Phase 5 is done when this run
+  is recorded.
