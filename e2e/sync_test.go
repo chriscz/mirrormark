@@ -140,6 +140,29 @@ func TestDeleteRestoreAndPurge(t *testing.T) {
 	settled(t, e, nil, "/_deleted/", "/GitHub "+gh)
 }
 
+// TestLargeFolderDelete deletes a folder that holds most of the union. It is
+// an ordinary delete, not a broken tree: the folder reaches _deleted in both
+// profiles, and settled checks that the wrong-tree guard did not trip.
+func TestLargeFolderDelete(t *testing.T) {
+	e := synced(t)
+	e.A.Mkdir(t, work+"/Big")
+	want := []string{"/Big/", "/GitHub " + gh}
+	for i := range 8 {
+		url := fmt.Sprintf("https://example.com/%d", i)
+		e.A.Add(t, work+"/Big", fmt.Sprint(i), url)
+		want = append(want, fmt.Sprintf("/Big/%d %s", i, url))
+	}
+	both(t, e, want...)
+
+	e.A.Remove(t, work+"/Big/")
+	for i, l := range want {
+		if strings.HasPrefix(l, "/Big/") {
+			want[i] = "/_deleted" + l
+		}
+	}
+	settled(t, e, nil, append(want, "/_deleted/")...)
+}
+
 // TestConflictingEditsMakeSuffixedCopies gives one bookmark a different URL
 // in each browser before either sees the other's. To make that certain the
 // test holds the global lock, which every round takes before it reads or

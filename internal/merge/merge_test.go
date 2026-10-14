@@ -612,6 +612,71 @@ func TestWrongTreeGuardCountsWhatTheirsLacks(t *testing.T) {
 	wrongTree(t, f, f.theirs(func(ns []*db.Node) []*db.Node { return ns[:1] }))
 }
 
+// bigFolder is a member folder of one bookmark and a folder of ten.
+func bigFolder(b *fakebrowser.Browser, root string) {
+	b.Add(root, "Keep", "https://keep/")
+	big := b.Add(root, "Big", "")
+	for i := range 10 {
+		b.Add(big, fmt.Sprintf("B%d", i), fmt.Sprintf("https://b/%d", i))
+	}
+}
+
+// Deleting one folder that holds most of the union is an ordinary edit: the
+// folder goes to _deleted with its contents, and the next round is quiet.
+func TestLargeFolderDeleteIsNotAWrongTree(t *testing.T) {
+	f := newFixture(t, bigFolder)
+	f.b.RemoveTree(f.b.Find(f.root, "Big"))
+	res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
+	want := []string{"/Keep https://keep/", "/_deleted/", "/_deleted/Big/"}
+	for i := range 10 {
+		want = append(want, fmt.Sprintf("/_deleted/Big/B%d https://b/%d", i, i))
+	}
+	f.want(want...)
+	// Record the round as the host does, with the ids of the nodes it made.
+	var ids func(tree, browser []*db.Node)
+	ids = func(tree, browser []*db.Node) {
+		for i, n := range tree {
+			n.ID = browser[i].ID
+			ids(n.Children, browser[i].Children)
+		}
+	}
+	ids(res.Tree, f.b.Children(f.root))
+	f.base = res.Tree
+	if res := f.round(f.theirs(func(ns []*db.Node) []*db.Node { return ns })); len(res.Ops) != 0 {
+		t.Fatalf("the round after the delete has ops %+v", res.Ops)
+	}
+}
+
+// A browser that has not loaded its bookmarks shows an empty member folder,
+// however few top-level nodes base has.
+func TestWrongTreeGuardEmptyFolder(t *testing.T) {
+	f := newFixture(t, bigFolder)
+	for _, n := range f.b.Children(f.root) {
+		f.b.RemoveTree(n.ID)
+	}
+	wrongTree(t, f, f.theirs(func(ns []*db.Node) []*db.Node { return ns }))
+}
+
+// A profile bound to the wrong database holds a member folder whose browser
+// ids match nothing in base.
+func TestWrongTreeGuardWrongBinding(t *testing.T) {
+	f := newFixture(t, bigFolder)
+	other := f.b.Add("2", "Elsewhere", "")
+	f.b.Add(other, "X", "https://x/")
+	f.b.Add(other, "Y", "https://y/")
+	res, err := merge.Round(merge.Input{Base: f.base, HasBase: true, Ours: f.b.Children(other),
+		Theirs: f.theirs(func(ns []*db.Node) []*db.Node { return ns }), RootID: other, Label: me, NewM: freshMs()})
+	if !errors.Is(err, merge.ErrWrongTree) || len(res.Ops) != 0 {
+		t.Fatalf("err %v ops %+v, want ErrWrongTree and no ops", err, res.Ops)
+	}
+}
+
+// A theirs that lacks a whole folder counts every node in it.
+func TestWrongTreeGuardTruncatedTheirs(t *testing.T) {
+	f := newFixture(t, bigFolder)
+	wrongTree(t, f, f.theirs(func(ns []*db.Node) []*db.Node { return ns[:1] }))
+}
+
 // Their purge of what P already holds in _deleted is not a wrong tree,
 // however much of the folder it is.
 func TestTheirLargePurgeOfDeletedIsApplied(t *testing.T) {

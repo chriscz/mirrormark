@@ -29,12 +29,9 @@
 // and a node whose parent is gone everywhere moves to _deleted.
 //
 // When the merged parents form a cycle, the move that came from theirs is
-// undone. A round is refused with ErrWrongTree when base holds more than
-// five nodes and more than half of them are gone from ours, purges included,
-// or are live in base but gone from theirs: an unloaded browser, a wrong
-// binding or a truncated file is far likelier than such a delete. Theirs is
-// always a whole published state, since rounds hold a global lock, so what
-// it lacks was purged or the file is damaged.
+// undone. A round is refused with ErrWrongTree when ours or theirs looks
+// like an unloaded browser, a wrong binding or a damaged file rather than
+// edits (see wrongTree). Deleting a folder, however large, is an edit.
 //
 // The result is the merged tree and the ops that turn P's browser into it.
 // Sibling order is not merged: nodes the browser already holds keep their
@@ -62,11 +59,13 @@ import (
 const DeletedTitle = "_deleted"
 
 // ErrWrongTree means the round would move most of a member folder into
-// _deleted or remove it. That is far more often a browser that has not
-// loaded its bookmarks, a reset profile, a wrong binding or a damaged file
-// than a real mass delete.
-var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle +
-	" or be purged; is a database file truncated, or this profile bound to the wrong one?")
+// _deleted or remove it in a way that is far more often a browser that has
+// not loaded its bookmarks, a reset profile, a wrong binding or a damaged
+// file than a real mass delete.
+var ErrWrongTree = errors.New("db-mismatch: this round would move most of the member folder to " + DeletedTitle +
+	" or purge it, which looks like an unloaded browser, a wrong binding or a damaged database file, so nothing was synced; " +
+	"to delete that much, move the bookmarks into " + DeletedTitle + " yourself, or delete their folder; " +
+	"if the database is wrong, move it aside and run mirrormark install again")
 
 type Input struct {
 	Base    []*db.Node // P's record; nil and HasBase false on P's first round
@@ -166,7 +165,7 @@ func Round(in Input) (Result, error) {
 	for _, k := range slices.Sorted(maps.Keys(keys)) {
 		m.mergeOne(k)
 	}
-	if in.HasBase && len(m.base) > 5 && 2*m.gone() > len(m.base) {
+	if m.wrongTree() {
 		return Result{}, ErrWrongTree
 	}
 	// Undoing a move can put a node back under a parent the merge dropped,
@@ -429,18 +428,41 @@ func (m *merger) merge3(k string, b, o, t val, id string, oIndex, tIndex int) {
 	n.oursParent = o.parent
 }
 
-// gone counts the base nodes the round would move to _deleted or remove:
-// those missing from ours, and those live in base but missing from theirs.
-func (m *merger) gone() int {
-	n := 0
-	for k := range m.base {
+// wrongTree reports whether ours or theirs looks like the wrong tree rather
+// than edits, once base holds more than five nodes: ours is empty, as in a
+// browser that has not loaded its bookmarks; or most of base is gone from
+// ours and most of ours is not in base, as in a profile bound to another
+// profile's database; or more than half of base would go. For that count a
+// node gone from ours counts only where its parent is still there, so
+// deleting a folder counts once however much it holds, and a node live in
+// base and gone from theirs counts each time, since theirs is a whole
+// published state and lacks a node only if it was purged or the file is
+// damaged.
+func (m *merger) wrongTree() bool {
+	if !m.in.HasBase || len(m.base) <= 5 {
+		return false
+	}
+	if len(m.ours) == 0 {
+		return true
+	}
+	gone, missing, fresh := 0, 0, 0
+	for k, e := range m.base {
 		_, inO := m.ours[k]
 		_, inT := m.theirs[k]
-		if !inO || !inT && !m.inDeleted(k) {
-			n++
+		_, parentInO := m.ours[e.v.parent]
+		if !inO {
+			missing++
+		}
+		if !inO && (parentInO || e.v.parent == "") || !inT && !m.inDeleted(k) {
+			gone++
 		}
 	}
-	return n
+	for k := range m.ours {
+		if _, ok := m.base[k]; !ok {
+			fresh++
+		}
+	}
+	return 2*gone > len(m.base) || 2*missing > len(m.base) && 2*fresh > len(m.ours)
 }
 
 // inDeleted reports whether base node k is _deleted or inside it.

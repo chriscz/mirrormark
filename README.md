@@ -131,10 +131,17 @@ a folder name. One profile's folders may not be inside each other.
 - Deleting a bookmark in a union moves it to a `_deleted` folder inside the
   union, in every profile. Restore it by moving it out. Delete it from
   `_deleted` to remove it everywhere.
-- A round that would delete or purge more than half of a union (of more than
-  five bookmarks and folders) syncs nothing for that union, because a browser
-  that has not loaded its bookmarks or a damaged file is far likelier. Empty a
-  large `_deleted` in parts.
+- A guard stops a round that looks like a broken tree rather than your
+  edits, in a union of more than five bookmarks and folders: an empty member
+  folder (a browser that has not loaded its bookmarks), a member folder that
+  holds almost nothing the profile's database knows (a profile bound to the
+  wrong database), or a database file that lacks more than half of the union
+  (a damaged file). It also stops a round that deletes or purges more than
+  half of the union, but a deleted folder counts once, however much it holds.
+  The union then syncs nothing and the popup shows `db-mismatch` (see
+  [below](#a-union-reports-db-mismatch)). To be sure a large delete goes
+  through, move the bookmarks into `_deleted` instead of deleting them, and
+  empty a large `_deleted` by deleting the `_deleted` folder itself.
 - When two profiles change the same bookmark differently, you get both,
   titled for example `GitHub (chrome/personal)` and `GitHub (chrome/work)`.
   For folders, the change that reached the files first wins. Deleting a
@@ -184,12 +191,24 @@ database file the host cannot write.
   the profile's own, so `install` does not make another. Fix the file or
   move it out of `~/.local/share/mirrormark/profiles/`.
 
-### A profile refuses a union after a large delete elsewhere
+### A union reports `db-mismatch`
 
-If most of a union went to `_deleted` and was emptied while one profile was
-closed, that profile reports `db-mismatch` every round when it opens: from
-its record, the change looks like a broken file. To let it join again as a
-new member, reset its record:
+The guard refused the round, and refuses every round until the cause is
+gone; nothing in that union syncs meanwhile. The usual causes:
+
+- **You deleted more than half of the union one bookmark at a time, or
+  emptied the member folder.** The other profiles still hold the bookmarks.
+  Put them back with Undo (Ctrl+Z) in the bookmark manager, or by resetting
+  the record as below, then move them into `_deleted`, or into one folder
+  that you then delete.
+- **Most of a union went to `_deleted` and was emptied while this profile
+  was closed.** From its record, the change looks like a broken file. Reset
+  the record.
+- **The profile syncs as the wrong database**, shown in the popup. Run
+  `mirrormark install --profile "<profile>"` to bind it to its own.
+
+To reset a profile's record, so that it joins the union again as a new
+member:
 
 1. Close Chrome in that profile.
 2. Move its database file aside, for example
