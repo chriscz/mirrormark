@@ -13,9 +13,9 @@ var BindWait = 4 * time.Second
 // bindTries is how often Bind opens the page before it gives up.
 const bindTries = 3
 
-// Retry starts bin with args up to three times, each in its own session so
-// that a browser it starts outlives mirrormark, and after each waits up to
-// BindWait for bound to report a hello since that attempt started. It
+// Retry starts bin with args up to bindTries times, each in its own session
+// so that a browser it starts outlives mirrormark, and after each waits up
+// to BindWait for bound to report a hello since that attempt started. It
 // retries because a browser can open the page before the extension loads.
 func Retry(bin string, args []string, bound func(since time.Time) bool) (bool, error) {
 	for range bindTries {

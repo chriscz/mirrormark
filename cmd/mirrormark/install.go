@@ -253,14 +253,11 @@ func installFirefox(p db.Paths, root string, picks []string, stdout, stderr io.W
 	if err != nil {
 		return fail(err)
 	}
-	ready := chrome.FilesCurrent(files)
-	if !ready {
+	if !chrome.FilesCurrent(files) {
 		fmt.Fprintln(stdout, firefoxSafety)
 		if err := chrome.WriteFiles(files); err != nil {
 			return fail(err)
 		}
-	}
-	if !ready {
 		fmt.Fprintln(stdout, "Restart Firefox in these profiles if it is running (close every window), then run mirrormark install --browser firefox again to bind them.")
 		return 0
 	}
@@ -386,10 +383,10 @@ func listProfiles(all []chrome.Profile) string {
 	return strings.Join(s, ", ")
 }
 
-// ensureDB returns the database id of the browser profile at path, creating its file first
-// if none points at the profile yet. It stops if any database file cannot
-// be read: that file may be this profile's, and a second one would make
-// the profile a new member without the user knowing.
+// ensureDB returns the database id of the browser profile at path,
+// creating its file first if none points at the profile yet. It stops if
+// any database file cannot be read: that file may be this profile's, and a
+// second one would make the profile a new member without the user knowing.
 func ensureDB(p db.Paths, browser, path string, c chrome.Profile) (string, error) {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
