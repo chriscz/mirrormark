@@ -134,13 +134,20 @@ func (e *Env) label(id string) string {
 // the first rounds to create the folders.
 func (e *Env) Union(t *testing.T) {
 	t.Helper()
+	e.Share(t)
+	eventually(t, 10*time.Second, "member folders", func() bool {
+		return e.A.Lines(t, "toolbar/Work") != nil && e.B.Lines(t, "toolbar/Work") != nil
+	})
+}
+
+// Share writes the config that shares toolbar/Work of both profiles as
+// union "work".
+func (e *Env) Share(t *testing.T) {
+	t.Helper()
 	cfg := fmt.Sprintf("format: 1\nunions:\n  work:\n    %s: toolbar/Work\n    %s: toolbar/Work\n", e.DBA, e.DBB)
 	if err := db.WriteAtomic(e.Paths.ConfigFile(), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, 10*time.Second, "member folders", func() bool {
-		return e.A.Lines(t, "toolbar/Work") != nil && e.B.Lines(t, "toolbar/Work") != nil
-	})
 }
 
 func eventually(t *testing.T, within time.Duration, what string, ok func() bool) {

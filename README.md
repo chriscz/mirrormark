@@ -125,6 +125,9 @@ a folder name. One profile's folders may not be inside each other.
 ## How syncing behaves
 
 - A union holds everything any member holds, at the same relative paths.
+- An edit shows in the other running profiles within a second or two. A
+  profile whose Chrome was closed catches up as soon as Chrome opens it,
+  without any window or the popup open.
 - Deleting a bookmark in a union moves it to a `_deleted` folder inside the
   union, in every profile. Restore it by moving it out. Delete it from
   `_deleted` to remove it everywhere.
@@ -214,6 +217,11 @@ The end-to-end tests start two Google Chrome instances under Xvfb in the
 dev image, install mirrormark into them with `mirrormark install` and drive
 them over the DevTools protocol. They run one at a time, because they share
 Chrome's system directories, which only the dev image lets your user write.
+Besides installing and binding, they share a folder between the two
+instances and check that each kind of edit, a delete, restore and purge, a
+conflict, the first sync of two filled folders and a closed browser's catch-up
+reach both, with no warning in the host's log. Each edit must reach the
+other running Chrome within 3 seconds; the tests log how long each took.
 Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
