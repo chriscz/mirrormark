@@ -34,6 +34,17 @@ A path starts with `toolbar`, `other` or `mobile`, or with the title Chrome
 shows for that folder, such as `Bookmarks bar`. Write `\/` for a slash inside
 a folder name. One profile's folders may not be inside each other.
 
+## How syncing behaves
+
+- A union holds everything any member holds, at the same relative paths.
+- Deleting a bookmark in a union moves it to a `_deleted` folder inside the
+  union, in every profile. Restore it by moving it out. Delete it from
+  `_deleted` to remove it everywhere.
+- When two profiles change the same bookmark differently, you get both,
+  titled for example `GitHub (chrome/personal)` and `GitHub (chrome/work)`.
+  For folders, the change that reached the files first wins.
+- Reordering bookmarks inside a folder stays local.
+
 ## Development
 
 Everything builds and tests in a Docker image; nothing is installed on your
