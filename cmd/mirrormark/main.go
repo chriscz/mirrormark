@@ -57,6 +57,9 @@ func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
+	// Every profile's host appends to this one log; keep it bounded. Two
+	// hosts starting at once may both rotate, and so lose the old log.
+	rotateErr := rotate(p.LogFile())
 	f, err := os.OpenFile(p.LogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintln(stderr, "mirrormark:", err)
@@ -64,9 +67,24 @@ func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	defer f.Close()
 	log := slog.New(slog.NewTextHandler(f, nil)).With("pid", os.Getpid())
+	if rotateErr != nil {
+		log.Warn("cannot rotate the log", "err", rotateErr)
+	}
 	if err := host.Run(context.Background(), stdin, stdout, host.Options{Paths: p, Log: log}); err != nil {
 		log.Warn("host stopped", "err", err)
 		return 1
 	}
 	return 0
+}
+
+// maxLog is the size above which a starting host moves the log to log.1,
+// replacing the previous one.
+const maxLog = 1 << 20
+
+func rotate(path string) error {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxLog {
+		return nil
+	}
+	return os.Rename(path, path+".1")
 }

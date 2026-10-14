@@ -13,7 +13,7 @@ Status: in development. Google Chrome on Linux comes first.
 | `~/.config/mirrormark/config.yaml` | Your unions. You write it. |
 | `~/.local/share/mirrormark/profiles/<id>.yaml` | One database per bound profile. You may edit its `profile:` block; mirrormark writes the rest. |
 | `~/.local/share/mirrormark/backups/<id>/` | One copy of each database a day, the newest 30. For reading only. |
-| `~/.local/state/mirrormark/log` | The host's log. |
+| `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.
 Database and backup files are readable only by you (mode 0600); they hold
