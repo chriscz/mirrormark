@@ -2,7 +2,7 @@
 
 - Status: draft
 - Author(s): Chris Coetzee, Claude
-- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15)
+- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15; Brave and LibreWolf designed 2026-10-15)
 - Links: none yet. Repository: `github.com/chriscz/mirrormark` (MPL-2.0).
 
 ## Problem
@@ -13,7 +13,7 @@ People who use more than one browser, such as Chrome for one profile and LibreWo
 
 mirrormark is a WebExtension plus a small Go program. The user has fixed these choices: YAML files are the only database and config; conflicts are merged into suffixed copies such as `GitHub (chrome/personal)` and `GitHub (chrome/work)`, never resolved by picking a winner; deleting a bookmark inside a union moves it to a `_deleted` folder; Google Chrome on Linux comes first and the Firefox family follows; everything builds and tests in a Docker image.
 
-This RFC describes the smallest version that works: two or more Chrome profiles on Linux (Phases 1 to 4), then Firefox Developer Edition profiles joining the same unions (Section 8, Phase 5). What it leaves out is listed under [Later](#later).
+This RFC describes the smallest version that works: two or more Chrome profiles on Linux (Phases 1 to 4), then Firefox Developer Edition profiles joining the same unions (Section 8, Phase 5), then Brave and LibreWolf as variants of those two installs (Section 9, Phase 6). What it leaves out is listed under [Later](#later).
 
 **The bookmarks API.** Chrome exposes `bookmarks.getTree`, `get`, `create`, `update`, `move`, `remove` and change events [R5] [R6]. Node ids are stable but local to one profile, so mirrormark keeps its own ids. Chrome names its top-level folders by `folderType` (Chrome 134+). Firefox has the same API under `chrome.*`, with fixed ids for its top-level folders instead of `folderType`, and separators [R5].
 
@@ -22,7 +22,7 @@ This RFC describes the smallest version that works: two or more Chrome profiles 
 ## Goals
 
 1. **Unions stay the same.** After sync, every member folder of a union holds the same bookmarks and subfolders with the same titles and URLs.
-2. **Several Chrome profiles on Linux**, and Firefox Developer Edition profiles in the same unions, in a design the rest of the Firefox family can join later.
+2. **Several Chrome profiles on Linux**, and Firefox Developer Edition, Brave and LibreWolf profiles in the same unions, in a design other browsers of both families can join later.
 3. **Merge, never drop.** When two profiles change the same thing differently, both versions survive as suffixed copies.
 4. **Nothing is lost.** Sync removes a bookmark only after the user removes it from `_deleted`.
 5. **Near-immediate.** A change in one running profile shows in another running profile within a few seconds.
@@ -301,6 +301,51 @@ An open native port keeps a Firefox event page alive as it keeps a Chrome servic
 - binding reuses `bind.html` and the lock-file confirmation, with the UUID read from `prefs.js`;
 - `uninstall` puts the two safety prefs back.
 
+### 9. Brave and LibreWolf
+
+Brave installs as Chrome does, and LibreWolf as Firefox Developer Edition does. We propose no new install route: each package gets a small description of each browser it supports, and the existing install, bind and uninstall code reads its paths, names and checks from it. Each point below was checked in Docker in the Brave spike (`0001_local-bookmark-sync-host.d/brave-install-spike.md`, Brave 1.97.57 on Chromium 155) or the LibreWolf spike (`librewolf-install-spike.md`, LibreWolf 158.0-1 from the official tarball) unless it says otherwise.
+
+**One description per browser.** Only these values differ between the browsers of one family:
+
+| | Chrome | Brave | Firefox Developer Edition | LibreWolf |
+| --- | --- | --- | --- | --- |
+| `--browser`, `browser:` | `chrome` | `brave` | `firefox` | `librewolf` |
+| Profiles | `$XDG_CONFIG_HOME/google-chrome` (default `~/.config/…`) | `$XDG_CONFIG_HOME/BraveSoftware/Brave-Browser` | `$XDG_CONFIG_HOME/mozilla/firefox` if it holds `profiles.ini`, else `~/.mozilla/firefox` | `$XDG_CONFIG_HOME/librewolf/librewolf` if it holds `profiles.ini`, else `~/.librewolf` |
+| Binary | `google-chrome` | `brave-browser` | `<LastPlatformDir>/firefox` | `<LastPlatformDir>/librewolf` |
+| External extension file | `/usr/share/google-chrome/extensions/<id>.json` | `/opt/brave.com/brave/extensions/<id>.json` | | |
+| Recognised by | | | channel `aurora` in `channel-prefs.js` | `Name=LibreWolf` in `<LastPlatformDir>/application.ini` |
+
+Everything else is shared within a family: Chrome and Brave share the key, the CRX, the extension id and the system host manifest; Developer Edition and LibreWolf share the XPI, the three `user.js` lines and their resets, the per-user host manifest, the UUID lookup and the bind URL.
+
+**Brave.** Brave reads external extension files from its executable's directory, `/opt/brave.com/brave/extensions/`, and native host manifests only from Chrome's `/etc/opt/chrome/native-messaging-hosts/`, whether or not Chrome is installed. The extension id depends only on the key, so one host manifest with one `allowed_origins` entry serves both browsers. Brave installs the CRX enabled and without a prompt, in existing profiles and in profiles created later. Its `Local State` has the same `profile.info_cache` as Chrome's, and binding runs `brave-browser` with Chrome's arguments and Chrome's three tries: the first open in a profile after the install loses the same race to the extension. Brave's user agent is Chrome's, so the hello says `chrome/155.0.0.0`; the host does not need to tell the two apart, because the database id carries the profile's identity. `/usr/share/chromium/extensions/` also works in Brave but reaches Chromium too, so we use Brave's own directory.
+
+**Shared Chromium files.** `install --browser brave` packs the same CRX and writes Brave's external file and the host manifest, with `sudo` as for Chrome. Every external file names that one CRX and its exact version, so a Chrome file left at the old version after an upgrade would stop Chrome installing the new build. So `install` for either browser also rewrites the other's external file if it is present, writes only the files that changed, asks the user to restart the browser it installs into, and says that the other picks up the new build at its next start. `uninstall --browser brave` removes Brave's external file. It removes the CRX, the unpacked extension and the host manifest only if no other Chromium browser's external file is still in place, and otherwise says which browser still uses them. `--purge` deletes Brave's databases and backups, and the key only if no other Chromium browser has its external file in place or a database left; the same rules apply to Chrome with Brave as the other browser.
+
+**What a Brave or Chrome user sees.** Both browsers show a "Safety Check" card on their extensions page saying they cannot verify where mirrormark comes from (branded Chrome 155 shows it for the same install); the extension stays on. Brave restores the last session at start, where Chrome opens a new tab, so a `bind.html` tab left from a failed try opens again at the next start and binds the profile again. Every try of one `install` opens the same database id, so this rebinds to the same database.
+
+**LibreWolf.** LibreWolf is a release build, but it is built without `MOZ_REQUIRE_SIGNING` and honours `xpinstall.signatures.required`, which settles the conflicting reports [R14] for 158.0-1; none of the three prefs is locked, and their defaults are Firefox's (`true`, 15), so uninstall's resets are right. The Developer Edition route works unchanged: the XPI in the profile's `extensions` folder, the three `user.js` lines, the host manifest in `~/.mozilla/native-messaging-hosts/` (LibreWolf reads it after `~/.librewolf/native-messaging-hosts/` and `/usr/lib/librewolf/native-messaging-hosts/`, so a manifest there takes precedence [R8]), the UUID from `prefs.js`, and `<bin> --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>`, cold or into a running LibreWolf over D-Bus. Its `channel-prefs.js` says `release`, so the channel cannot tell it from release Firefox; `application.ini`'s `Name=LibreWolf` can. Its user agent stays `Firefox/158.0` under `resistFingerprinting`, so its hello says `firefox/158.0`. LibreWolf clears cookies and cache at shutdown by default, but the binding in `storage.local` survived clean restarts.
+
+**Which Gecko profiles install accepts.** The Developer Edition-only gate becomes "the browser asked for": `--browser firefox` takes only profiles whose browser is on the `aurora` channel, `--browser librewolf` only profiles whose browser's `application.ini` says `Name=LibreWolf`. Any other Gecko browser, release Firefox among them, is still refused before anything is written, and the message names the two that work.
+
+**Shared Gecko files.** Developer Edition and LibreWolf read one host manifest. `uninstall --browser librewolf` removes the XPI and resets the prefs in LibreWolf's profiles, and removes the host manifest only if no Developer Edition profile named by a database still holds the XPI; the same applies the other way round. As for Chromium, it is the files still in place that decide, not the databases, which an uninstall without `--purge` leaves behind.
+
+**Profiles that have never run.** A first LibreWolf start creates two profiles, and the second, `default`, never runs, so it has no `compatibility.ini` and `install` cannot tell which browser it belongs to. When the user named no `--profile`, `install` now skips such a profile with one line (`skipped: default: it has never run; …`) and goes on with the rest; when the user named it, `install` refuses as before. If every profile is skipped, `install` stops. The same code serves Developer Edition, so this applies there too.
+
+**Ids and labels.** A Brave profile's database id is `brave-<slug>` and its label `brave/<slug>`, so a conflict copy reads `GitHub (brave/personal)`; a LibreWolf profile's are `librewolf-<slug>` and `librewolf/<slug>`. `browser` in the profile block is `brave` or `librewolf`. `mirrormark install` and `uninstall` accept `--browser chrome`, `brave`, `firefox` or `librewolf`, and `--purge` works per browser as before.
+
+**Not supported.** Only the packagings the spikes ran are supported: Brave stable from Brave's `.deb` (`/opt/brave.com/brave`) and LibreWolf from its official tarball. Brave Beta and Nightly have other binaries and data directories; Flatpak and Snap browsers restrict native messaging (Later). LibreWolf from its Debian/Ubuntu repository, AppImage or AUR runs from another directory; `install` may well work with it, since it reads the directory from `compatibility.ini`, but nobody has tried. The README lists these as untested.
+
+**Decisions taken for the user.** The user was away when this section was written; each of these is the smallest safe choice and awaits sign-off:
+
+- Brave and LibreWolf are descriptions in the existing Chrome and Firefox packages, not new install paths;
+- Brave shares Chrome's key, CRX, id and system host manifest, and writes its external file to `/opt/brave.com/brave/extensions/`;
+- shared files go with the last browser that still has its own file in place (the external file for Chromium, the XPI for Gecko); the Chromium key also stays while another Chromium browser's databases remain;
+- `install` for one Chromium browser refreshes the other's external file, so an upgrade does not leave it naming an old version;
+- databases are `browser: brave` / `librewolf`, ids `brave-<slug>` / `librewolf-<slug>`, labels `brave/<slug>` / `librewolf/<slug>`; the host does not tell browsers apart from the hello;
+- LibreWolf takes the Developer Edition route unchanged, recognised by `application.ini`, and every other Gecko browser is still refused before anything is written;
+- profiles that have never run are skipped with a note unless named, in Developer Edition too;
+- the e2e harness keeps `remote.prefs.recommended` false: the remote agent's recommended prefs set `extensions.autoDisableScopes` to 0, which would hide whether install's prefs work.
+
 ## Alternatives considered
 
 **Per-node versions** (the previous draft). Each node carried a version `v` and the profile `by` that made it, and a `purged` list with 90-day expiry recorded real deletions. A three-way merge against each profile's own last file gives the same answers with less state: base tells a removal from a node a profile never had, so no purge list is needed and a long-closed profile no longer brings purged bookmarks back; per-field merging replaces whole-node versions, so a title edit and a URL edit no longer conflict. The global lock already gives the total order the versions stood in for, and `seq` records it.
@@ -322,6 +367,12 @@ An open native port keeps a Firefox event page alive as it keeps a Chrome servic
 **Installing into Firefox with `policies.json`.** It works, but it needs root, reaches every profile of every user and marks Firefox as managed. The per-profile XPI needs none of that.
 
 **Pinning the extension's UUID in `user.js`.** It would make bind URLs known in advance, but the pref holds every add-on's UUID, so setting it gives other add-ons new UUIDs and loses their storage.
+
+**Separate install code for Brave and LibreWolf.** Copying the Chrome and Firefox paths would let each browser drift, and the spikes found nothing in either browser that the existing code does not already do with other paths and names. A description per browser keeps one install, one bind and one uninstall per family.
+
+**Brave's file in `/usr/share/chromium/extensions/`.** Brave reads it too, and it sits outside Brave's package tree, but Chromium reads it as well, so it would install mirrormark into a browser the user did not ask for.
+
+**Telling Brave from Chrome in the hello.** Brave reports Chrome's user agent, and the host has no use for the difference: the database id says which profile connected. `install` knows the browser and writes it into the database file.
 
 **Editing the browsers' own bookmark files.** Chrome rewrites `Bookmarks` from memory, so edits made while it runs are lost.
 
@@ -347,6 +398,11 @@ An open native port keeps a Firefox event page alive as it keeps a Chrome servic
 - **Firefox upgrades are unchecked.** An upgrade replaces the XPI in each profile; that Firefox picks up a changed XPI at its next start (with `startupScanScopes` 1) was not checked in the spike, and Phase 5's e2e does not check it either. If Firefox kept the old build it would go on running it, and the host refuses an old build only when the protocol version changed (`unsupported-version` in the log).
 - **Undocumented Firefox files.** `profiles.ini`, `compatibility.ini`, `channel-prefs.js` and the UUID map in `prefs.js` are not documented interfaces. The new profile switcher's profiles are found by scanning for `prefs.js`, and get the directory's name rather than the one Firefox shows.
 - **URLs Firefox refuses.** A Chrome bookmark whose URL Firefox will not store (perhaps `chrome://` or `file:` URLs; not checked) fails its `create` in Firefox every round, which stalls that Firefox profile like any failing write. Phase 5 does not check which schemes Firefox refuses; the stalled profile logs the failing op.
+- **Brave's file lives in Brave's package tree.** Whether a Brave upgrade or removal leaves `/opt/brave.com/brave/extensions/` alone was not checked. If an upgrade removed the file, Brave would remove mirrormark at its next start, and running `install --browser brave` again would put it back.
+- **Brave's own features were not tried with mirrormark:** Brave Sync (whether it changes `syncing` or the bookmark ids), the policy route, and CDP with the default data directory.
+- **A restored bind tab from an older install.** If the user moved a Brave profile's database aside and installed again, a failed tab from before could open at the next start and bind the old id; the popup then reports `db-missing`, and running `install` again fixes it.
+- **LibreWolf's future and other packagings.** A later LibreWolf could turn on `MOZ_REQUIRE_SIGNING` or lock one of the three prefs; `install` would still write them, and the add-on would not load (`not bound`). Only the tarball in `/opt/librewolf` and LibreWolf's default sanitize settings were run; a user who makes LibreWolf clear more at shutdown may lose the binding at each restart, which the popup reports as unbound.
+- **A host manifest in `~/.librewolf/native-messaging-hosts/`** wins over mirrormark's in `~/.mozilla/`. A user who put one there for mirrormark by hand would have to keep it current.
 - **Same-user programs are trusted.** They can rewrite the YAML files, as they could the browsers' own files.
 
 ## Rollout
@@ -366,14 +422,18 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Tests:** unit tests for profile listing, the channel check, the files `install` writes, reading the UUID and binding; round tests with a Firefox-shaped tree and a union under `menu`. E2e, driven over WebDriver BiDi by a standard-library Go client: install and bind two Firefox profiles, bind a closed one, rebind, restart; edits, delete, restore and purge, a conflict, a first sync and a closed browser's catch-up, each between two Firefox profiles and between Firefox and Chrome; separators left alone and a purged folder that holds one; uninstall deactivating the add-on and restoring the prefs.
    - **Exit:** all pass, and the README's Firefox steps are run once by hand on a desktop with Developer Edition. That manual run is still to do; it is the one check left for this phase.
 
+6. **Brave and LibreWolf** (Section 9). Refactors first, with Chrome and Firefox unchanged: each package describes its browsers, and install, bind and uninstall read from the description. Then a profile that has never run is skipped unless named. Then Brave, install and uninstall in one commit with the shared-file rules, and LibreWolf likewise, so no prefix turns a profile's checks off without the uninstall that turns them back on. Then the dev image gains Brave 1.97.57 and LibreWolf 158.0-1, and the e2e tests run in them.
+   - **Tests:** unit tests for each browser's data directory or profile root (with and without `$XDG_CONFIG_HOME`), the files `install` writes, recognising LibreWolf and refusing other Gecko browsers, skipping a never-run profile, and that uninstalling Brave keeps the shared host manifest and CRX while Chrome is installed, and the other way round (and the same for the two Gecko browsers). E2e: install and bind a Chrome and a Brave profile with one id, then uninstall Brave and check Chrome still reaches its host; the same for a LibreWolf and a Developer Edition profile; and the five sync tests between Brave and LibreWolf.
+   - **Exit:** all pass with Chrome's and Firefox's tests unchanged, and the README's Brave and LibreWolf steps are run once by hand on a desktop.
+
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
 ## Later
 
 Each is its own RFC or stack once the Chrome version works.
 
-- **Release Firefox and the rest of the family.** A signed XPI through `web-ext sign` [R13] for release Firefox, Nightly and ESR; LibreWolf (`~/.librewolf/`, its host directory [R8], its signature checks: conflicting reports [R14]); reading the new profile switcher's names; tags and keywords. Open: whose addons.mozilla.org account signs.
-- **Chromium and Brave.** Their profile directories, `--load-extension` [R12] and preferences-file directories.
+- **Release Firefox and the rest of the family.** A signed XPI through `web-ext sign` [R13] for release Firefox, Nightly and ESR; reading the new profile switcher's names; tags and keywords. Open: whose addons.mozilla.org account signs.
+- **Chromium, Brave Beta and Nightly.** Their profile directories and external extension directories; Chromium also honours `--load-extension` [R12].
 - **`mirrormark export`** of a database or backup to a bookmarks HTML file both families import.
 - **`mirrormark preview <union>`**, printing what a union would become before a member is added.
 - **Flatpak and Snap browsers**, which restrict native messaging.
@@ -388,11 +448,12 @@ Each is its own RFC or stack once the Chrome version works.
 - Each example in Section 4 gives the tree shown, in every member.
 - In the property tests and the Phase 4 e2e, no bookmark goes missing except by purge, and a round with no user changes writes nothing.
 - Two Firefox Developer Edition profiles, and a Firefox and a Chrome profile, in one union meet the same 3-second target, and each example in Section 4 gives the tree shown across the two browsers (Phase 5 e2e).
+- A Brave and a LibreWolf profile in one union meet the same 3-second target, and each example in Section 4 gives the tree shown across the two (Phase 6 e2e).
 - `mirrormark install` takes a fresh Chrome profile on Linux to a bound extension using only the steps it prints, and binds an already bound profile again to the same database (tested in the dev image). A used profile on the developer's desktop Chrome, with real `sudo`, is the manual check that remains.
 
 ## Security, privacy, operational impact
 
-- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary. For Firefox nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks); only the gecko id in the per-user host manifest can start the host.
+- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary. For Brave the same `sudo install` writes Brave's file into `/opt/brave.com/brave/extensions/`. For Firefox and LibreWolf nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks); only the gecko id in the per-user host manifest can start the host.
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes a browser's databases and backups, and the last browser's purge deletes the rest.
 - **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the host restarts.
 
@@ -435,3 +496,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — Firefox plan trimmed: same-parent moves are not converted, since the merge never sends them; a Chrome member with a `menu` path is skipped like any missing top-level folder; Phase 5's e2e no longer probes URL schemes or XPI upgrades, which stay listed as risks.
 - 2026-10-15 — Firefox install and uninstall as built: install turns uninstall's reset lines back in place and appends only missing prefs; writes keep a symlinked or private `user.js` as it is; databases are created before any profile is touched; uninstall writes `user.js` first, skips an unchanged one and says when it found no Firefox profile; `--purge` is per browser, and the shared files go with the last browser's databases.
 - 2026-10-15 — after the final review of Phase 5: the dev image and e2e now cover Firefox over BiDi and D-Bus; the profiles root follows `$XDG_CONFIG_HOME`; the extension removes a purged folder's separators only when nothing else is inside; Phase 5's manual desktop run is recorded as still to do.
+- 2026-10-15 — Brave and LibreWolf designed as Section 9 and Phase 6 after two spikes: each is a description in the existing Chrome or Firefox package, not a new install path; Brave shares Chrome's key, CRX and host manifest, and LibreWolf takes the Developer Edition route, recognised by `application.ini`; shared files go with the last browser that still has its own file in place; profiles that have never run are skipped unless named.
