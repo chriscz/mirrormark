@@ -201,8 +201,8 @@ func TestSameTitleAddsConflict(t *testing.T) {
 		return append(ns, &db.Node{Title: "Mail", URL: "https://gmail.com/", M: "m-t1", By: other})
 	}))
 	f.want("/Mail (chrome/personal) https://fastmail.com/", "/Mail (chrome/work) https://gmail.com/")
-	if len(res.Conflicts) != 1 {
-		t.Fatalf("conflicts %+v", res.Conflicts)
+	if want := (merge.Conflict{Ours: "Mail https://fastmail.com/", Theirs: "Mail https://gmail.com/"}); !slices.Equal(res.Conflicts, []merge.Conflict{want}) {
+		t.Fatalf("conflicts %+v, want both versions as each side had them", res.Conflicts)
 	}
 }
 
@@ -603,4 +603,30 @@ func TestTheirLargePurgeOfDeletedIsApplied(t *testing.T) {
 	f := newFixture(t, bigDeleted)
 	f.round(f.theirs(func(ns []*db.Node) []*db.Node { ns[0].Children = nil; return ns }))
 	f.want("/L0 https://l/0", "/L1 https://l/1", "/L2 https://l/2", "/L3 https://l/3", "/_deleted/")
+}
+
+// The batch landed but no file was written, say because a later op failed:
+// the retry finds its own suffix on our copy and must not add a second.
+func TestRetryAfterConflictLandedKeepsOneSuffix(t *testing.T) {
+	f := newFixture(t, gh)
+	f.b.SetURL(f.b.Find(f.root, "GitHub"), "https://a/")
+	theirs := f.theirs(func(ns []*db.Node) []*db.Node { ns[0].URL = "https://b/"; return ns })
+	f.round(theirs)
+	res := f.round(theirs)
+	f.want("/GitHub (chrome/personal) https://a/", "/GitHub (chrome/work) https://b/")
+	if n := find(res.Tree, "GitHub (chrome/personal)"); n.Suffix != me {
+		t.Fatalf("our copy %+v should carry our suffix", n)
+	}
+}
+
+// The same for two adds with one title.
+func TestRetryAfterAddConflictLandedKeepsOneSuffix(t *testing.T) {
+	f := newFixture(t, func(*fakebrowser.Browser, string) {})
+	f.b.Add(f.root, "Mail", "https://fastmail.com/")
+	theirs := f.theirs(func(ns []*db.Node) []*db.Node {
+		return append(ns, &db.Node{Title: "Mail", URL: "https://gmail.com/", M: "m-t1", By: other})
+	})
+	f.round(theirs)
+	f.round(theirs)
+	f.want("/Mail (chrome/personal) https://fastmail.com/", "/Mail (chrome/work) https://gmail.com/")
 }

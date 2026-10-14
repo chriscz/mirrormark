@@ -16,7 +16,9 @@
 //
 // A node new on both sides with the same parent, title and URL is one node.
 // Two new bookmarks with the same parent and title but different URLs
-// conflict as above. Anything else new on one side is added to the other.
+// conflict as above; here titles compare without a suffix mirrormark added,
+// so a third profile's add of the same title is suffixed like the first two.
+// Anything else new on one side is added to the other.
 //
 // Removing a node from the member folder is not a deletion: the node moves
 // into a _deleted folder inside the member folder, and that move merges like
@@ -270,15 +272,21 @@ func (m *merger) matchAdd(n *db.Node, fresh *[]string) string {
 		}
 	}
 	if n.URL != "" {
+		// Titles compare without the suffixes mirrormark added: theirs may be
+		// a copy from another conflict, and ours may carry our suffix from a
+		// round whose update landed but whose file was never written.
+		ours := strings.TrimSuffix(n.Title, " ("+m.in.Label+")")
 		for i, k := range *fresh {
-			if t := m.theirs[k].v; !t.folder && t.title == n.Title {
-				*fresh = slices.Delete(*fresh, i, i+1)
-				m.retitle[k] = suffixed(t, t.by)
-				o := suffixed(val{title: n.Title, suffix: n.Suffix}, m.in.Label)
-				n.Title, n.Suffix, n.By = o.title, o.suffix, m.in.Label
-				m.conflicts = append(m.conflicts, Conflict{Ours: n.Title + " " + n.URL, Theirs: t.title + " " + t.url})
-				return m.in.NewM()
+			t := m.theirs[k].v
+			if bt := bare(t); t.folder || bt != n.Title && bt != ours {
+				continue
 			}
+			*fresh = slices.Delete(*fresh, i, i+1)
+			m.conflicts = append(m.conflicts, Conflict{Ours: n.Title + " " + n.URL, Theirs: t.title + " " + t.url})
+			m.retitle[k] = suffixed(t, t.by)
+			o := suffixed(val{title: ours}, m.in.Label)
+			n.Title, n.Suffix, n.By = o.title, o.suffix, m.in.Label
+			return m.in.NewM()
 		}
 	}
 	n.By = m.in.Label
@@ -287,13 +295,18 @@ func (m *merger) matchAdd(n *db.Node, fresh *[]string) string {
 	return k
 }
 
+// bare is v's title without the suffix mirrormark added.
+func bare(v val) string {
+	if v.suffix == "" {
+		return v.title
+	}
+	return strings.TrimSuffix(v.title, " ("+v.suffix+")")
+}
+
 // suffixed retitles v as "<title> (<label>)", replacing a suffix mirrormark
 // added before instead of stacking a second one.
 func suffixed(v val, label string) val {
-	if v.suffix != "" {
-		v.title = strings.TrimSuffix(v.title, " ("+v.suffix+")")
-	}
-	v.title += " (" + label + ")"
+	v.title = bare(v) + " (" + label + ")"
 	v.suffix = label
 	return v
 }
@@ -375,6 +388,10 @@ func (m *merger) merge3(k string, b, o, t val, id string, oIndex, tIndex int) {
 		if !b.folder {
 			// Both survive: theirs keeps m, P's browser node becomes the copy.
 			m.put(k, suffixed(t, t.by), "", tIndex, false, true)
+			if o.suffix == "" && o.title == suffixed(b, m.in.Label).title {
+				// Our copy's retitle landed in a round that wrote no file.
+				o.suffix = m.in.Label
+			}
 			ov := suffixed(o, m.in.Label)
 			ov.by = m.in.Label
 			m.put(m.in.NewM(), ov, id, oIndex, id != "", false)
