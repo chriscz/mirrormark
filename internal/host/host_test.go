@@ -1,6 +1,7 @@
 package host_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,16 +27,39 @@ type ext struct {
 	b       *fakebrowser.Browser
 	w       *io.PipeWriter
 	o       extOpts
-	errs    []host.Msg
+	errs    []host.Msg     // errors, and the problems in status messages
+	status  []host.Problem // the last status message's problems
+	rounds  int            // status messages, one per round
 	applies int
 	done    chan error
 }
 
 type extOpts struct {
-	silent bool                // never answer apply
-	fail   func(merge.Op) bool // make these ops fail in the browser
-	poll   time.Duration       // the host's poll interval; default 20 ms
-	real   bool                // use the host's default timings
+	silent  bool                // never answer apply
+	short   bool                // answer apply with one result too few
+	fail    func(merge.Op) bool // make these ops fail in the browser
+	poll    time.Duration       // the host's poll interval; default 20 ms
+	real    bool                // use the host's default timings
+	log     *logBuf             // the host's log, at debug level; default discarded
+	noHello bool                // send neither hello nor the first tree
+}
+
+// logBuf is a log the test reads while the host writes it.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func paths(t *testing.T) db.Paths {
@@ -64,6 +89,9 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &ext{t: t, b: b, w: ew, o: o, done: make(chan error, 1)}
 	ho := host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if o.log != nil {
+		ho.Log = slog.New(slog.NewTextHandler(o.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	if !o.real {
 		ho.Timeout, ho.Poll = 300*time.Millisecond, 20*time.Millisecond
 		if o.poll != 0 {
@@ -92,17 +120,30 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 				e.mu.Lock()
 				res := e.b.Apply(m.Ops, func(i int) bool { return e.o.fail != nil && e.o.fail(m.Ops[i]) })
 				e.mu.Unlock()
+				if e.o.short {
+					res = res[:len(res)-1]
+				}
 				e.send(host.Msg{V: 1, Type: "applied", Batch: m.Batch, Results: res})
 				e.sendTree()
 			case "error":
 				e.mu.Lock()
 				e.errs = append(e.errs, m)
 				e.mu.Unlock()
+			case "status":
+				e.mu.Lock()
+				for _, p := range m.Problems {
+					e.errs = append(e.errs, host.Msg{Type: "status", Code: p.Code, Message: p.Message})
+				}
+				e.status = m.Problems
+				e.rounds++
+				e.mu.Unlock()
 			}
 		}
 	}()
-	e.send(host.Msg{V: 1, Type: "hello", DB: dbID, Browser: "chrome/test"})
-	e.sendTree()
+	if !o.noHello {
+		e.send(host.Msg{V: 1, Type: "hello", DB: dbID, Browser: "chrome/test"})
+		e.sendTree()
+	}
 	return e
 }
 
@@ -152,6 +193,19 @@ func (e *ext) errors() []host.Msg {
 
 func (e *ext) hasError(code string) bool {
 	return slices.ContainsFunc(e.errors(), func(m host.Msg) bool { return m.Code == code })
+}
+
+func (e *ext) count() (applies, rounds int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.applies, e.rounds
+}
+
+// healthy reports whether the last round found no problem.
+func (e *ext) healthy() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.rounds > 0 && len(e.status) == 0
 }
 
 func (e *ext) firstError() host.Msg {
@@ -246,6 +300,22 @@ func TestSecondHostForOneDatabaseIsRefused(t *testing.T) {
 	}
 }
 
+// A lock file that cannot be locked at all is not another host holding it.
+func TestUnusableLockFileIsALockError(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	if err := os.Mkdir(p.ProfileLock("a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e := start(t, p, "a", fakebrowser.New(), extOpts{})
+	if m := e.firstError(); m.Code != "db-lock-error" || m.Type != "error" {
+		t.Fatalf("error %+v", m)
+	}
+	if err := <-e.done; err == nil {
+		t.Fatal("host kept running")
+	}
+}
+
 func TestOtherVersionIsRefused(t *testing.T) {
 	p := paths(t)
 	addProfile(t, p, "a")
@@ -284,9 +354,11 @@ func TestSilentBrowserWritesNothing(t *testing.T) {
 	}
 }
 
-// An op that fails every time writes no file, shows in the popup, and is
-// retried at the poll interval rather than as fast as the browser answers.
-func TestFailingOpIsReportedAndNotRetriedHot(t *testing.T) {
+// An op that fails every time writes no file and shows in the popup. It is
+// retried at the poll, not as fast as the browser answers, and after three
+// failures in a row only every few seconds. The log gets its warnings once.
+// A round that succeeds clears the popup and the back-off.
+func TestFailingOpBacksOffAndRecovers(t *testing.T) {
 	p := paths(t)
 	addProfile(t, p, "a")
 	addProfile(t, p, "b")
@@ -295,30 +367,28 @@ func TestFailingOpIsReportedAndNotRetriedHot(t *testing.T) {
 	bw := bb.Add("1", "Work", "")
 	bb.Add(bw, "X", "https://x/")
 	bb.Add(bw, "Y", "https://y/")
-	start(t, p, "b", bb, extOpts{})
+	b := start(t, p, "b", bb, extOpts{})
 	eventually(t, "b's first write", func() bool {
 		d, err := db.LoadDB(p.ProfileFile("b"))
 		return err == nil && d.Unions["work"] != nil
 	})
-	// One of the two creates lands, the other always fails.
+	// One of the creates lands, the others fail while failing is set.
+	var failing atomic.Bool
+	failing.Store(true)
 	ab := fakebrowser.New()
 	ab.Add("1", "Work", "")
-	a := start(t, p, "a", ab, extOpts{poll: 100 * time.Millisecond, fail: func(op merge.Op) bool {
-		return op.Op == "create" && op.Title != nil && *op.Title == "Y"
+	log := &logBuf{}
+	a := start(t, p, "a", ab, extOpts{log: log, fail: func(op merge.Op) bool {
+		return failing.Load() && op.Op == "create" && op.Title != nil && (*op.Title == "Y" || *op.Title == "Z")
 	}})
 	m := a.firstError()
 	if m.Code != "apply-failed" || !strings.Contains(m.Message, "injected") {
 		t.Fatalf("error %+v", m)
 	}
-	a.mu.Lock()
-	a.applies = 0
-	a.mu.Unlock()
-	time.Sleep(time.Second)
-	a.mu.Lock()
-	n := a.applies
-	a.mu.Unlock()
-	if n < 3 || n > 15 {
-		t.Fatalf("%d batches in 1 s with a 100 ms poll", n)
+	eventually(t, "three tries", func() bool { n, _ := a.count(); return n >= 3 })
+	time.Sleep(500 * time.Millisecond) // 25 polls
+	if n, _ := a.count(); n != 3 {
+		t.Fatalf("%d batches; want 3 before the 5 s back-off", n)
 	}
 	d, err := db.LoadDB(p.ProfileFile("a"))
 	if err != nil {
@@ -327,6 +397,121 @@ func TestFailingOpIsReportedAndNotRetriedHot(t *testing.T) {
 	if d.Unions["work"] != nil {
 		t.Fatalf("a wrote a record although an op failed: %+v", d.Unions["work"])
 	}
+	if n := strings.Count(log.String(), "msg=\"op failed\""); n != 1 {
+		t.Fatalf("op failed logged %d times:\n%s", n, log)
+	}
+
+	// A changed file starts a round despite the back-off; this one succeeds.
+	failing.Store(false)
+	writeConfig(t, p, workUnion+"\n")
+	eventually(t, "a clean round", a.healthy)
+	if !strings.Contains(log.String(), "warning stopped repeating") {
+		t.Fatalf("the log does not say how often the warning repeated:\n%s", log)
+	}
+
+	// The back-off starts over: three quick tries again.
+	failing.Store(true)
+	before, _ := a.count()
+	b.edit(func(br *fakebrowser.Browser) { br.Add(br.Find("1", "Work"), "Z", "https://z/") })
+	eventually(t, "three quick tries", func() bool { n, _ := a.count(); return n >= before+3 })
+}
+
+func TestRetryDelay(t *testing.T) {
+	want := []time.Duration{0, 0, 0, 5 * time.Second, 5 * time.Second, 5 * time.Second, 30 * time.Second, 30 * time.Second}
+	for f, w := range want {
+		if got := host.RetryDelay(f); got != w {
+			t.Errorf("after %d failures: %v, want %v", f, got, w)
+		}
+	}
+}
+
+// The popup shows a problem until a round finds none.
+func TestProblemStaysUntilFixed(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	writeConfig(t, p, "format: 1\nunions:\n  work:\n    a: toolbar/Work\n    c: toolbar/Work\n")
+	ab := fakebrowser.New()
+	ab.Add("1", "Work", "")
+	a := start(t, p, "a", ab, extOpts{})
+	eventually(t, "union-skipped", func() bool { return a.hasError("union-skipped") })
+	a.sendTree() // another round, still skipped
+	_, rounds := a.count()
+	eventually(t, "the next round", func() bool { _, r := a.count(); return r > rounds })
+	if a.healthy() {
+		t.Fatal("a round that still skips the union reported no problem")
+	}
+	addProfile(t, p, "c")
+	eventually(t, "a clean round", a.healthy)
+}
+
+// The poll notices a file whose size changed although its mtime did not.
+func TestPollNoticesSizeChange(t *testing.T) {
+	p := paths(t)
+	addProfile(t, p, "a")
+	writeConfig(t, p, "format: 1\nunions:\n  work:\n    a: toolbar/Work\n")
+	a := start(t, p, "a", fakebrowser.New(), extOpts{})
+	eventually(t, "a's first write", func() bool {
+		d, err := db.LoadDB(p.ProfileFile("a"))
+		return err == nil && d.Unions["work"] != nil
+	})
+	info, err := os.Stat(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Swap the file in whole, so the poll never sees a new mtime.
+	tmp := p.ConfigFile() + ".new"
+	if err := os.WriteFile(tmp, []byte("format: 1\nunions: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tmp, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, p.ConfigFile()); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "config-invalid", func() bool { return a.hasError("config-invalid") })
+}
+
+// When the database file cannot be written after the browser made the
+// round's changes, the popup says so and the round is retried.
+func TestDatabaseWriteFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to read-only directories")
+	}
+	p := paths(t)
+	addProfile(t, p, "a")
+	addProfile(t, p, "b")
+	writeConfig(t, p, workUnion)
+	bb := fakebrowser.New()
+	bb.Add(bb.Add("1", "Work", ""), "X", "https://x/")
+	start(t, p, "b", bb, extOpts{})
+	eventually(t, "b's first write", func() bool {
+		d, err := db.LoadDB(p.ProfileFile("b"))
+		return err == nil && d.Unions["work"] != nil
+	})
+	// a's hello needs its lock file, which a read-only directory cannot gain.
+	if err := os.WriteFile(p.ProfileLock("a"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p.ProfilesDir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p.ProfilesDir(), 0o700) })
+	ab := fakebrowser.New()
+	ab.Add("1", "Work", "")
+	a := start(t, p, "a", ab, extOpts{})
+	eventually(t, "db-write-failed", func() bool { return a.hasError("db-write-failed") })
+	if a.hasError("apply-failed") {
+		t.Fatalf("reported as apply-failed too: %+v", a.errors())
+	}
+	if err := os.Chmod(p.ProfilesDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, p, workUnion+"\n") // a round now, whatever the back-off
+	eventually(t, "a's write", func() bool {
+		d, err := db.LoadDB(p.ProfileFile("a"))
+		return err == nil && d.Unions["work"] != nil
+	})
 }
 
 func TestUnreadableMemberSkipsTheUnion(t *testing.T) {

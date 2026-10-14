@@ -142,7 +142,9 @@ func Make(in Input) Plan {
 		next.Unions[name] = &db.Member{Path: path, ID: folder.ID, Children: res.Tree}
 	}
 	if len(ensure) > 0 {
-		p.Ops, p.EnsureOnly = ensure, true
+		// The merges' ops wait for the next round, which makes them again
+		// with their conflicts; reporting these now would report them twice.
+		p.Ops, p.Conflicts, p.EnsureOnly = ensure, nil, true
 	}
 	p.next = &next
 	return p

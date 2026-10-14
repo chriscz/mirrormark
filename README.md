@@ -60,11 +60,18 @@ a folder name. One profile's folders may not be inside each other.
 ## When something is wrong
 
 The extension's popup (the mirrormark button in Chrome's toolbar) shows
-which database the profile syncs as and the last error. Everything the
-host does, including skipped unions, conflicts and failed changes, goes to
-`~/.local/state/mirrormark/log`. A change the browser refuses stops that
-profile from saving its round; the host retries every second and reports
-the error each time until it goes through.
+which database the profile syncs as, why the host stopped if it did, and
+every problem the last round found, such as a skipped union. A problem
+stays in the popup until a round no longer finds it. Everything the host
+does, including skipped unions, conflicts and failed changes, goes to
+`~/.local/state/mirrormark/log`; a warning that repeats every round is
+logged once, then how often it repeated when it stops.
+
+A change the browser refuses stops that profile from saving its round. The
+host retries at the next poll three times, then every 5 seconds three
+times, then every 30 seconds, until the change goes through; a changed
+file starts a round sooner. A round that succeeds starts the count over. The same goes for a
+database file the host cannot write.
 
 ## Development
 

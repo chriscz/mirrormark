@@ -6,8 +6,9 @@
 // config.yaml or a database file changed. A round sends the browser its ops
 // in batches and waits for each; if any op fails or the browser does not
 // answer in time, it writes no file and the next round retries. A round
-// that failed is retried at the next poll, not on the tree that follows the
-// failed batch, so an op that always fails does not spin.
+// that failed is retried at the poll, not on the tree that follows the
+// failed batch, so an op that always fails does not spin, and after a few
+// failures in a row it waits longer (see Msg).
 package host
 
 import (
@@ -25,20 +26,38 @@ const Version = 1
 
 // Msg is every message in either direction; Type says which fields count.
 //
-// Error codes the host sends: unsupported-version, bad-db, db-missing,
-// db-locked (the host then exits); config-invalid, union-skipped,
-// db-mismatch, apply-failed (the host goes on and retries).
+// The host sends "error" only when it stops, with one of these codes:
+// unsupported-version, bad-db, db-missing (no database file), db-locked
+// (another host uses the database), db-lock-error (the lock file cannot be
+// locked).
+//
+// After every round the host sends "status" with the problems the round
+// found, none when it synced cleanly, so the popup shows only what is still
+// wrong. Their codes: config-invalid, db-missing (the database file cannot
+// be read), union-skipped, db-mismatch, apply-failed (the browser did not
+// make every change), db-write-failed (the browser made them but the
+// database file could not be written), db-lock-error (the lock that keeps
+// rounds apart cannot be taken). A round with apply-failed, db-write-failed
+// or db-lock-error is retried at the next poll, three times, then every 5 s
+// three times, then every 30 s until one succeeds.
 type Msg struct {
-	V       int              `json:"v"`
-	Type    string           `json:"type"`
-	DB      string           `json:"db,omitempty"`
-	Browser string           `json:"browser,omitempty"`
-	Nodes   []round.TreeNode `json:"nodes,omitempty"`
-	Batch   int              `json:"batch,omitempty"`
-	Ops     []merge.Op       `json:"ops,omitempty"`
-	Results []merge.OpResult `json:"results,omitempty"`
-	Code    string           `json:"code,omitempty"`
-	Message string           `json:"message,omitempty"`
+	V        int              `json:"v"`
+	Type     string           `json:"type"`
+	DB       string           `json:"db,omitempty"`
+	Browser  string           `json:"browser,omitempty"`
+	Nodes    []round.TreeNode `json:"nodes,omitempty"`
+	Batch    int              `json:"batch,omitempty"`
+	Ops      []merge.Op       `json:"ops,omitempty"`
+	Results  []merge.OpResult `json:"results,omitempty"`
+	Code     string           `json:"code,omitempty"`
+	Message  string           `json:"message,omitempty"`
+	Problems []Problem        `json:"problems,omitempty"`
+}
+
+// Problem is one thing a round could not do.
+type Problem struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // Chrome limits messages to the extension to 1 MB. Messages from it may be

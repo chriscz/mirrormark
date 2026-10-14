@@ -137,13 +137,11 @@ async function onMessage(p, m) {
       results.push(r);
     }
     post(p, { v: V, type: "applied", batch: m.batch, results });
-    if (failed) {
-      await setStatus({ error: `apply-failed: ${failed.error}` });
-    } else {
-      backoff = MIN_BACKOFF;
-      await setStatus({ error: null });
-    }
     await sendTree();
+  } else if (m.type === "status") {
+    // The end of a round: the host runs, and these are all that is wrong.
+    backoff = MIN_BACKOFF;
+    await setStatus({ error: null, problems: m.problems ?? [] });
   } else if (m.type === "error") {
     // The host exits after some errors; don't restart it every few seconds.
     backoff = MAX_BACKOFF;

@@ -59,6 +59,29 @@ func TestMissingMemberFolderIsCreatedFirst(t *testing.T) {
 	}
 }
 
+// A plan that only creates member folders reports no conflicts: the next
+// round makes the merges' ops again and reports theirs.
+func TestEnsureOnlyPlanReportsNoConflicts(t *testing.T) {
+	defer round.SetMerge(func(merge.Input) (merge.Result, error) {
+		return merge.Result{Conflicts: []merge.Conflict{{Ours: "A https://a/", Theirs: "B https://a/"}}}, nil
+	})()
+	b := fakebrowser.New()
+	w := b.Add("1", "Work", "")
+	a := profile("a")
+	a.Unions = map[string]*db.Member{"work": {Seq: 1, Path: "toolbar/Work", ID: w}}
+	cfg := &db.Config{Format: 1, Unions: map[string]map[string]string{
+		"work":    {"a": "toolbar/Work"},
+		"reading": {"a": "other/Reading"},
+	}}
+	p := round.Make(round.Input{Config: cfg, Self: a, Live: live(t, b), NewM: merge.NewM})
+	if !p.EnsureOnly || len(p.Ops) != 1 {
+		t.Fatalf("plan %+v, want one folder create", p)
+	}
+	if len(p.Conflicts) != 0 {
+		t.Fatalf("an ensure-only plan reported conflicts: %+v", p.Conflicts)
+	}
+}
+
 func TestFirstRoundRecordsTheUnion(t *testing.T) {
 	b := fakebrowser.New()
 	w := b.Add("1", "Work", "")

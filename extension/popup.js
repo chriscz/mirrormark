@@ -5,5 +5,6 @@ chrome.storage.local.get(["db", "status"]).then(({ db, status }) => {
     return;
   }
   $("db").textContent = `Syncs as ${db}.`;
-  if (status?.error) $("error").textContent = status.error;
+  const problems = (status?.problems ?? []).map((p) => `${p.code}: ${p.message}`);
+  $("error").textContent = [status?.error, ...problems].filter(Boolean).join("\n");
 });
