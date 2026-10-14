@@ -46,7 +46,9 @@ a folder name. One profile's folders may not be inside each other.
   large `_deleted` in parts.
 - When two profiles change the same bookmark differently, you get both,
   titled for example `GitHub (chrome/personal)` and `GitHub (chrome/work)`.
-  For folders, the change that reached the files first wins.
+  For folders, the change that reached the files first wins. Deleting a
+  bookmark that another profile moved meanwhile counts as such a change: the
+  moved copy stays where it went, and yours lands in `_deleted`.
 - Reordering bookmarks inside a folder stays local.
 
 ## Development

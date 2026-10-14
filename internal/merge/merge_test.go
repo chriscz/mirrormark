@@ -663,3 +663,14 @@ func TestBrowserOrderMatchesTheTree(t *testing.T) {
 		t.Fatalf("order %q", got)
 	}
 }
+
+// A delete is a move to _deleted, so deleting a bookmark another profile
+// moved meanwhile is a parent conflict: both copies stay, the moved one where
+// they put it and ours in _deleted.
+func TestDeleteAgainstTheirMoveKeepsBoth(t *testing.T) {
+	f := newFixture(t, func(b *fakebrowser.Browser, root string) { b.Add(root, "Dev", ""); gh(b, root) })
+	f.b.RemoveTree(f.b.Find(f.root, "GitHub"))
+	f.round(f.theirs(func(ns []*db.Node) []*db.Node { ns[0].Children = []*db.Node{ns[1]}; return ns[:1] }))
+	f.want("/Dev/", "/Dev/GitHub (chrome/work) https://github.com/",
+		"/_deleted/", "/_deleted/GitHub (chrome/personal) https://github.com/")
+}
