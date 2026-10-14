@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -80,6 +81,31 @@ func TestEnsureDBStopsAtAnUnreadableDatabase(t *testing.T) {
 	}
 	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
 		t.Fatalf("created %v", dbs)
+	}
+}
+
+// A file mirrormark cannot check for is not a taken id: counting it as one
+// would try the next id for ever.
+func TestEnsureDBStopsWhenItCannotCheckAnID(t *testing.T) {
+	skipIfRoot(t)
+	p := db.Paths{Data: t.TempDir()}
+	os.MkdirAll(p.ProfilesDir(), 0o700)
+	// Listable but not searchable: the folder reads as empty and every
+	// stat in it fails with a permission error.
+	os.Chmod(p.ProfilesDir(), 0o400)
+	t.Cleanup(func() { os.Chmod(p.ProfilesDir(), 0o700) })
+	done := make(chan error, 1)
+	go func() {
+		_, err := ensureDB(p, "/u/a", chrome.Profile{Dir: "Default", Name: "X"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("err %v, want a permission error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureDB did not return")
 	}
 }
 

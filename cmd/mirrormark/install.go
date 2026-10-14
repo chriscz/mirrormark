@@ -247,8 +247,12 @@ func ensureDB(p db.Paths, udd string, c chrome.Profile) (string, error) {
 	}
 	id, label := "chrome-"+base, "chrome/"+base
 	for n := 2; ; n++ {
-		if _, err := os.Stat(p.ProfileFile(id)); errors.Is(err, fs.ErrNotExist) {
+		_, err := os.Stat(p.ProfileFile(id))
+		if errors.Is(err, fs.ErrNotExist) {
 			break
+		}
+		if err != nil {
+			return "", err
 		}
 		id, label = fmt.Sprintf("chrome-%s-%d", base, n), fmt.Sprintf("chrome/%s-%d", base, n)
 	}
