@@ -326,8 +326,10 @@ instances and check that each kind of edit, a delete, restore and purge, a
 conflict, the first sync of two filled folders and a closed browser's catch-up
 reach both, with no warning in the host's log. Each edit must reach the
 other running Chrome within 3 seconds; the tests log how long each took.
-The tests also start Firefox Developer Edition, with D-Bus, from the same
-image. Run `bin/dev image build` first after the `Dockerfile` changes.
+Other tests install into and bind two Firefox Developer Edition profiles,
+from the same image, and drive them over WebDriver BiDi, under Xvfb and a
+D-Bus session, which carries `install`'s bind page to a running Firefox.
+Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
 run more with, for example,

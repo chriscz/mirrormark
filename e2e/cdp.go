@@ -1,7 +1,8 @@
 //go:build e2e
 
-// Package e2e drives two real Google Chrome instances through the DevTools
-// protocol to test mirrormark from install to sync.
+// Package e2e drives real Google Chrome instances through the DevTools
+// protocol, and Firefox Developer Edition through WebDriver BiDi, to test
+// mirrormark from install to sync.
 package e2e
 
 import (

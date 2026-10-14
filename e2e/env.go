@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chriscz/mirrormark/internal/db"
+	"github.com/chriscz/mirrormark/internal/firefox"
 )
 
 var bin = os.Getenv("MIRRORMARK_BIN")
@@ -26,8 +27,8 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// Env is one test's world: a home directory, two Chrome instances with
-// their Default profiles bound to two database files.
+// Env is one test's world: a home directory and two browser instances, A
+// and B, each with one profile bound to a database file.
 type Env struct {
 	t              *testing.T
 	Home           string
@@ -40,10 +41,7 @@ type Env struct {
 	LabelA, LabelB string
 }
 
-var (
-	extIDRe = regexp.MustCompile(`Extension ID: ([a-p]{32})`)
-	boundRe = regexp.MustCompile(`bound: Default -> ([a-z0-9-]+)`)
-)
+var extIDRe = regexp.MustCompile(`Extension ID: ([a-p]{32})`)
 
 // kind is the kind of browser the instance called name is.
 func (e *Env) kind(name string) string {
@@ -54,16 +52,34 @@ func (e *Env) kind(name string) string {
 }
 
 // open loads the popup page of b's extension and attaches the tests to it.
+// Firefox serves the extension under a UUID it picks per profile and
+// records in prefs.js once the add-on is installed.
 func (e *Env) open(t *testing.T, b *Browser) {
 	t.Helper()
+	if b.Kind == "firefox" {
+		var uuid string
+		eventually(t, 15*time.Second, b.Name+"'s add-on UUID in prefs.js", func() bool {
+			uuid, _ = firefox.UUID(b.UDD)
+			return uuid != ""
+		})
+		b.open(t, "moz-extension://"+uuid+"/popup.html")
+		return
+	}
 	b.open(t, "chrome-extension://"+e.ExtID+"/popup.html")
 }
 
-// setup installs and binds as a user would: Chrome runs once (so its
-// profile list exists), install writes the files and asks for a restart,
-// Chrome restarts, and install runs again for each data directory to bind.
-func setup(t *testing.T) *Env {
+// setup is two Chrome instances.
+func setup(t *testing.T) *Env { return setupPair(t, "chrome", "chrome") }
+
+// setupPair installs and binds as a user would, with profile a in browser
+// kind ka and b in kb, "chrome" or "firefox": each browser runs once (so
+// its profile exists), install writes the files and asks for a restart,
+// the browsers restart, and install runs again for each profile to bind.
+// Two Firefox profiles share one profiles directory, as a user's would,
+// and run as two Firefox processes.
+func setupPair(t *testing.T, ka, kb string) *Env {
 	e := newEnv(t)
+	e.kinds = map[string]string{"a": ka, "b": kb}
 	e.firstInstall(t)
 	e.A, e.B = e.launch("a"), e.launch("b")
 	e.DBA, e.DBB = e.bind("a"), e.bind("b")
@@ -73,8 +89,8 @@ func setup(t *testing.T) *Env {
 	return e
 }
 
-// newEnv makes the test's home directory and the environment that Chrome
-// and mirrormark run with; neither sees the real home.
+// newEnv makes the test's home directory and the environment that the
+// browsers and mirrormark run with; none sees the real home.
 func newEnv(t *testing.T) *Env {
 	home := t.TempDir()
 	e := &Env{t: t, Home: home, Paths: db.Paths{
@@ -91,28 +107,85 @@ func newEnv(t *testing.T) *Env {
 	return e
 }
 
-// firstInstall starts and closes both Chrome instances, so their profile
-// lists exist, and runs install's first pass, which writes the system
-// files and asks for a restart.
+// firstInstall prepares both profiles and runs install's first pass,
+// which writes the files and asks for a restart: once for every Chrome
+// data directory, since it writes Chrome's system files, and once per
+// Firefox profile, since each holds its own add-on and prefs.
 func (e *Env) firstInstall(t *testing.T) {
 	t.Helper()
-	e.launch("a").Close()
-	e.launch("b").Close()
-	// Registered before install runs, so an install that fails part-way
-	// leaves nothing behind either, and run before t.TempDir's cleanup:
-	// later tests must not see this test's extension in the shared system
-	// directories.
-	t.Cleanup(func() { e.mm(t, "uninstall") })
-	out := e.mm(t, "install", "--user-data-dir", e.udd("a"))
-	m := extIDRe.FindStringSubmatch(out)
-	if m == nil || !strings.Contains(out, "Restart Chrome") {
-		t.Fatalf("first install did not ask for a restart:\n%s", out)
+	e.prepare(t, "a")
+	e.prepare(t, "b")
+	if e.kind("a") == "chrome" || e.kind("b") == "chrome" {
+		// Registered before install runs, so an install that fails part-way
+		// leaves nothing behind either, and run before t.TempDir's cleanup:
+		// later tests must not see this test's extension in the shared
+		// system directories.
+		t.Cleanup(func() { e.mm(t, "uninstall") })
 	}
-	e.ExtID = m[1]
+	chromeDone := false
+	for _, name := range []string{"a", "b"} {
+		if e.kind(name) == "chrome" {
+			if chromeDone {
+				continue // one install writes the system files for every data directory
+			}
+			chromeDone = true
+		}
+		out := e.mm(t, e.installArgs(name)...)
+		if !strings.Contains(out, "Restart ") {
+			t.Fatalf("first install did not ask for a restart:\n%s", out)
+		}
+		if e.kind(name) == "chrome" {
+			m := extIDRe.FindStringSubmatch(out)
+			if m == nil {
+				t.Fatalf("first install did not print the extension id:\n%s", out)
+			}
+			e.ExtID = m[1]
+		}
+	}
 }
 
-func (e *Env) udd(name string) string      { return filepath.Join(e.Home, "chrome-"+name) }
-func (e *Env) launch(name string) *Browser { return launch(e.t, name, e.udd(name), e.env) }
+// prepare makes the profile exist as a user's would after using the
+// browser once: Chrome's data directory with its profile list, or a Firefox
+// profile in profiles.ini with its compatibility.ini.
+func (e *Env) prepare(t *testing.T, name string) {
+	t.Helper()
+	if e.kind(name) == "firefox" {
+		dir := e.udd(name)
+		cmd := exec.Command(firefoxBin, "--headless", "-CreateProfile", name+" "+dir)
+		cmd.Env = e.env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create Firefox profile %s: %v\n%s", name, err, out)
+		}
+		// The remote agent sets "recommended" prefs for automation when a
+		// session starts; they could hide whether install's prefs work.
+		if err := os.WriteFile(filepath.Join(dir, "user.js"), []byte("user_pref(\"remote.prefs.recommended\", false);\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.launch(name).Close()
+}
+
+func (e *Env) udd(name string) string {
+	if e.kind(name) == "firefox" {
+		return filepath.Join(e.Home, "firefox", name)
+	}
+	return filepath.Join(e.Home, "chrome-"+name)
+}
+
+func (e *Env) launch(name string) *Browser {
+	if e.kind(name) == "firefox" {
+		return launchFirefox(e.t, name, e.udd(name), map[string]int{"a": 9301, "b": 9302}[name], e.env)
+	}
+	return launch(e.t, name, e.udd(name), e.env)
+}
+
+// installArgs are the arguments of an install into name's profile.
+func (e *Env) installArgs(name string) []string {
+	if e.kind(name) == "firefox" {
+		return []string{"install", "--browser", "firefox", "--profile", name}
+	}
+	return []string{"install", "--user-data-dir", e.udd(name)}
+}
 
 // mm runs the mirrormark binary as the test's user.
 func (e *Env) mm(t *testing.T, args ...string) string {
@@ -128,9 +201,16 @@ func (e *Env) mm(t *testing.T, args ...string) string {
 	return string(out)
 }
 
+// bind runs install for name's profile and returns the database it bound
+// to. install names a Chrome profile by its directory, Default, and a
+// Firefox profile by its name.
 func (e *Env) bind(name string) string {
-	out := e.mm(e.t, "install", "--user-data-dir", e.udd(name))
-	m := boundRe.FindStringSubmatch(out)
+	out := e.mm(e.t, e.installArgs(name)...)
+	profile := "Default"
+	if e.kind(name) == "firefox" {
+		profile = name
+	}
+	m := regexp.MustCompile(`bound: ` + regexp.QuoteMeta(profile) + ` -> ([a-z0-9-]+)`).FindStringSubmatch(out)
 	if m == nil {
 		e.t.Fatalf("install did not bind %s:\n%s", name, out)
 	}

@@ -142,8 +142,9 @@ func launch(t *testing.T, name, udd string, env []string) *Browser {
 	return b
 }
 
-// Close shuts Chrome down through the protocol, so it writes Local State
-// and Preferences as a user's quit would.
+// Close shuts the browser down through its driver, so it writes its files
+// (Chrome's Local State and Preferences, Firefox's prefs.js) as a user's
+// quit would.
 func (b *Browser) Close() {
 	select {
 	case <-b.done:
@@ -185,14 +186,16 @@ func (b *Browser) open(t *testing.T, url string) {
 // is a folder, "toolbar/Work/GitHub https://github.com/" a bookmark: what
 // follows the last space is a URL if it holds "://". Each
 // step must match exactly one node, so two same-titled folders, or two
-// identical bookmarks, are an error rather than a guess.
+// identical bookmarks, are an error rather than a guess. Paths and Lines
+// skip Firefox's separators; Separators lists them.
 const prelude = `
 const mm = {
-  roots: { toolbar: "bookmarks-bar", other: "other" },
+  roots: { toolbar: ["bookmarks-bar", "toolbar_____"], other: ["other", "unfiled_____"] },
+  kids: (n) => (n.children ?? []).filter((c) => c.type !== "separator"),
   one(parent, what, ok) {
-    const found = (parent.children ?? []).filter(ok);
+    const found = mm.kids(parent).filter(ok);
     if (found.length !== 1) {
-      const there = (parent.children ?? []).map((c) => c.title + (c.url ? " " + c.url : "/"));
+      const there = mm.kids(parent).map((c) => c.title + (c.url ? " " + c.url : "/"));
       throw new Error(found.length + " nodes match " + what + " among " + JSON.stringify(there));
     }
     return found[0];
@@ -200,7 +203,7 @@ const mm = {
   async folder(path, create) {
     const [root, ...segs] = path.split("/").filter(Boolean);
     const [tree] = await chrome.bookmarks.getTree();
-    let n = mm.one(tree, root, (c) => c.folderType === mm.roots[root]);
+    let n = mm.one(tree, root, (c) => (c.folderType ? c.folderType === mm.roots[root][0] : c.id === mm.roots[root][1]));
     for (const seg of segs) {
       if (create && !(n.children ?? []).some((c) => !c.url && c.title === seg)) {
         await chrome.bookmarks.create({ parentId: n.id, title: seg });
@@ -231,7 +234,7 @@ const mm = {
     }
     const out = [];
     const walk = (n, p) => {
-      for (const c of n.children ?? []) {
+      for (const c of mm.kids(n)) {
         const q = p + "/" + c.title;
         out.push(c.url ? q + " " + c.url : q + "/");
         walk(c, q);
@@ -313,6 +316,19 @@ func (b *Browser) Move(t *testing.T, ref, path string, index int) {
 		dest = fmt.Sprintf("{parentId: f.id, index: %d}", index)
 	}
 	eval[string](t, b, fmt.Sprintf("Promise.all([mm.node(%s), mm.folder(%s)]).then(([n, f]) => chrome.bookmarks.move(n.id, %s)).then(() => '')", q(ref), q(path), dest))
+}
+
+// AddSeparator puts a separator at index in the folder at path (Firefox).
+func (b *Browser) AddSeparator(t *testing.T, path string, index int) {
+	t.Helper()
+	eval[string](t, b, fmt.Sprintf("mm.folder(%s).then((f) => chrome.bookmarks.create({parentId: f.id, type: 'separator', index: %d})).then(() => '')", q(path), index))
+}
+
+// Separators lists the positions of the separators directly in the folder
+// at path.
+func (b *Browser) Separators(t *testing.T, path string) []int {
+	t.Helper()
+	return eval[[]int](t, b, "mm.folder("+q(path)+").then((f) => f.children.flatMap((c, i) => c.type === 'separator' ? [i] : []))")
 }
 
 // Remove removes the node ref names, with everything inside it.

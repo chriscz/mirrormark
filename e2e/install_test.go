@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/chrome"
 	"github.com/chriscz/mirrormark/internal/db"
 )
@@ -114,6 +115,88 @@ func TestBindStartsChrome(t *testing.T) {
 		t.Errorf("a is bound to %q, want %q", got, id)
 	}
 	roundDone(t, e.A, "a round after Chrome restarted")
+}
+
+func TestFirefoxInstallAndBind(t *testing.T) {
+	e := setupPair(t, "firefox", "firefox")
+	if e.DBA != "firefox-a" || e.DBB != "firefox-b" {
+		t.Fatalf("bound to %s and %s", e.DBA, e.DBB)
+	}
+	for _, c := range []struct {
+		b  *Browser
+		id string
+	}{{e.A, e.DBA}, {e.B, e.DBB}} {
+		if got := eval[string](t, c.b, `chrome.runtime.id`); got != extension.GeckoID {
+			t.Errorf("%s: extension id %q", c.b.Name, got)
+		}
+		if got := eval[string](t, c.b, `chrome.storage.local.get("db").then((r) => r.db)`); got != c.id {
+			t.Errorf("%s is bound to %q, want %q", c.b.Name, got, c.id)
+		}
+		d, err := db.LoadDB(e.Paths.ProfileFile(c.id))
+		if err != nil || d.Profile.Path != c.b.UDD || d.Profile.Browser != "firefox" {
+			t.Errorf("%s database %+v, %v", c.id, d, err)
+		}
+		roundDone(t, c.b, c.b.Name+" round after binding")
+	}
+	if !strings.Contains(hostLog(t, e), "browser=firefox/159.0") {
+		t.Error("no hello from firefox/159.0 in the host log")
+	}
+
+	// Binding a running profile again goes through D-Bus to the running
+	// Firefox, and the extension moves to a new host.
+	old := hostPIDs(t, e, e.DBA)
+	if out := e.mm(t, "install", "--browser", "firefox", "--profile", "a"); !strings.Contains(out, "bound: a -> "+e.DBA) {
+		t.Fatalf("second install:\n%s", out)
+	}
+	eventually(t, 10*time.Second, "a new host for a", func() bool { return len(hostPIDs(t, e, e.DBA)) == len(old)+1 })
+	eventually(t, 10*time.Second, "the old host to exit", func() bool { return exited(old[len(old)-1]) })
+
+	// A restart keeps the binding: the event page starts with the profile.
+	before := time.Now()
+	e.A.Close()
+	e.A = e.launch("a")
+	eventually(t, 15*time.Second, "a hello after restart", func() bool { return db.Connected(e.Paths, e.DBA, before) })
+	if log := hostLog(t, e); strings.Contains(log, "level=WARN") || strings.Contains(log, "level=ERROR") {
+		t.Errorf("the host warned:\n%s", log)
+	}
+}
+
+// TestFirefoxBindStartsFirefox: install starts a profile's Firefox itself
+// when it is closed, waits for the UUID and binds it.
+func TestFirefoxBindStartsFirefox(t *testing.T) {
+	e := newEnv(t)
+	e.kinds = map[string]string{"a": "firefox", "b": "firefox"}
+	e.firstInstall(t)
+	t.Cleanup(func() { stopFirefox(t, e.udd("a")) })
+	id := e.bind("a")
+	stopFirefox(t, e.udd("a"))
+	e.A = e.launch("a")
+	e.open(t, e.A)
+	if got := eval[string](t, e.A, `chrome.storage.local.get("db").then((r) => r.db)`); got != id {
+		t.Errorf("a is bound to %q, want %q", got, id)
+	}
+}
+
+// stopFirefox quits a Firefox the test did not start, as stopChrome does.
+// The profile's lock is a symlink to "<ip>:+<pid>".
+func stopFirefox(t *testing.T, dir string) {
+	t.Helper()
+	lock := filepath.Join(dir, "lock")
+	target, err := os.Readlink(lock)
+	if err != nil {
+		return // never started
+	}
+	pid, err := strconv.Atoi(target[strings.LastIndexByte(target, '+')+1:])
+	if err != nil {
+		t.Fatalf("%s: %v", lock, err)
+	}
+	if exited(pid) {
+		return
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("stop Firefox %d: %v", pid, err)
+	}
+	eventually(t, 20*time.Second, "Firefox to exit", func() bool { return exited(pid) })
 }
 
 // noSandbox puts a google-chrome first on PATH for the Chrome that
