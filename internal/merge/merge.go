@@ -65,7 +65,8 @@ const DeletedTitle = "_deleted"
 // _deleted or remove it. That is far more often a browser that has not
 // loaded its bookmarks, a reset profile, a wrong binding or a damaged file
 // than a real mass delete.
-var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle + " or be removed")
+var ErrWrongTree = errors.New("db-mismatch: more than half of the member folder would move to " + DeletedTitle +
+	" or be purged; is a database file truncated, or this profile bound to the wrong one?")
 
 type Input struct {
 	Base    []*db.Node // P's record; nil and HasBase false on P's first round
