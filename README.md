@@ -187,7 +187,15 @@ machine except Docker.
 
     bin/dev run make             # format check, vet, unit tests, build
     bin/dev run make check-race  # the unit tests under the race detector
+    bin/dev run make check-e2e   # end-to-end tests in real Chrome
+    bin/dev run make check-e2e RUN=TestInstallAndBind  # one of them
     bin/dev shell                # a shell in the dev container
+
+The end-to-end tests start two Google Chrome instances under Xvfb in the
+dev image, install mirrormark into them with `mirrormark install` and drive
+them over the DevTools protocol. They run one at a time, because they share
+Chrome's system directories, which only the dev image lets your user write.
+Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
 run more with, for example,
