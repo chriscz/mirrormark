@@ -204,11 +204,17 @@ Not verified:
 - Which URLs Firefox refuses or rewrites (see Bookmarks).
 - The reconnect alarm in a Firefox event page, and an event page with no
   port open being woken by a bookmark event.
-- BiDi (`--remote-debugging-port`) and D-Bus remoting in the same
-  instance, and `--remote-debugging-port 0`.
+- `--remote-debugging-port 0`.
 - Whether `$XDG_CONFIG_HOME` moves Firefox's profiles root.
-- Undoing the prefs on uninstall, and a real desktop session (the spike ran
-  only in Docker).
+- A real desktop session (the spike ran only in Docker).
+
+Verified later by the Phase 5 e2e tests, in Docker:
+
+- BiDi (`--remote-debugging-port`) and D-Bus remoting in the same instance
+  (`install` binds a running Firefox that the tests drive over BiDi).
+- Undoing the prefs on uninstall (`TestFirefoxUninstall`: after a restart
+  the add-on is no longer active in `extensions.json`, and `prefs.js` no
+  longer turns signature checks off).
 
 ## Consequences
 
