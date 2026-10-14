@@ -5,9 +5,11 @@
 // The extension stays dormant until bind.html#<database id> stores the
 // profile's binding in chrome.storage.local. It then connects to the native
 // host, says hello, and sends the whole bookmark tree after hello, after each
-// batch it applies, and after 0.5 s without bookmark events. It runs each
-// apply batch's ops in order, stops at the first failure and answers the
-// rest "not run". The popup shows the binding and the last error.
+// batch it applies, and after 0.5 s without bookmark events. At the first
+// bookmark event of a burst it sends "changed", so the host waits for that
+// tree. It runs each apply batch's ops in order, stops at the first failure
+// and answers the rest "not run". The popup shows the binding, why the host
+// stopped if it did, and the problems the last round found.
 //
 // manifest.json holds the version; Version reads it from there.
 package extension
