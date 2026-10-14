@@ -24,7 +24,19 @@ import (
 var (
 	sysroot = ""
 	runSudo = sudo
+	geteuid = os.Geteuid
 )
+
+// refuseRoot reports, and says, whether this runs as root. As root, the
+// key, the extension and the databases would be root's, in root's home,
+// where the user's Chrome cannot read them.
+func refuseRoot(cmd, why string, stderr io.Writer) bool {
+	if geteuid() != 0 {
+		return false
+	}
+	fmt.Fprintf(stderr, "mirrormark: run %s as yourself, not as root%s\n", cmd, why)
+	return true
+}
 
 type multiFlag []string
 
@@ -65,10 +77,8 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
-	// As root, the key, the CRX and the databases would land in root's home,
-	// where the user's Chrome cannot read them.
-	if os.Geteuid() == 0 {
-		return fail(errors.New("run install as yourself, not as root; it uses sudo only to copy two files into place"))
+	if refuseRoot("install", "; it uses sudo only to copy two files into place", stderr) {
+		return 1
 	}
 	p, err := db.DefaultPaths()
 	if err != nil {
@@ -301,6 +311,9 @@ func cmdUnpack(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mirrormark: usage: mirrormark unpack [DIR]")
 		return 2
 	}
+	if refuseRoot("unpack", "", stderr) {
+		return 1
+	}
 	p, err := db.DefaultPaths()
 	if err == nil {
 		var ext chrome.Extension
@@ -327,6 +340,9 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	purge := fl.Bool("purge", false, "also delete the config, databases, backups, key and log")
 	if fl.Parse(args) != nil {
 		return 2
+	}
+	if refuseRoot("uninstall", "; it uses sudo only to remove two files", stderr) {
+		return 1
 	}
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)

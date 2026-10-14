@@ -385,6 +385,24 @@ func TestInstallResolvesASymlinkedDataDir(t *testing.T) {
 	}
 }
 
+// As root, the commands would work in root's home, not the user's.
+func TestCommandsRefuseToRunAsRoot(t *testing.T) {
+	p := testHome(t)
+	_, calls := fakeSystem(t)
+	old := geteuid
+	t.Cleanup(func() { geteuid = old })
+	geteuid = func() int { return 0 }
+	for _, args := range [][]string{{"install", "--user-data-dir", chromeData(t)}, {"uninstall"}, {"unpack"}, {"unpack", t.TempDir()}} {
+		var out, errb bytes.Buffer
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 1 || !strings.Contains(errb.String(), "not as root") {
+			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
+		}
+	}
+	if _, err := os.Stat(p.Data); err == nil || len(*calls) != 0 {
+		t.Fatalf("changed something as root: %v, sudo %v", err, *calls)
+	}
+}
+
 func TestInstallRejectsAnUnknownProfile(t *testing.T) {
 	testHome(t)
 	_, calls := fakeSystem(t)
