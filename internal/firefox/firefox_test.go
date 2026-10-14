@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/chrome"
@@ -165,5 +166,60 @@ func TestUUIDFromPrefs(t *testing.T) {
 			`user_pref("extensions.webextensions.uuids", "{\"other@example.com\":\"0f0f0f0f-1111-4222-8333-444444444444\",\"mirrormark@chriscz.github.io\":\"5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f40\"}");`+"\n"), 0o600)
 	if u, err := UUID(dir); u != "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f40" || err != nil {
 		t.Fatalf("%q %v", u, err)
+	}
+}
+
+const testUUID = "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f40"
+
+// fakeFirefox logs each call; with $FAKE_INSTALL set it writes the UUID on
+// the first call, and every bind URL touches $dir/bound.
+func fakeFirefox(t *testing.T, profileDir string) (bin, log string) {
+	dir := t.TempDir()
+	bin, log = filepath.Join(dir, "firefox"), filepath.Join(dir, "calls")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\n" +
+		"[ -n \"$FAKE_INSTALL\" ] && printf '%s\\n' 'user_pref(\"extensions.webextensions.uuids\", \"{\\\"mirrormark@chriscz.github.io\\\":\\\"" + testUUID + "\\\"}\");' > \"" + profileDir + "/prefs.js\"\n" +
+		"case \"$*\" in *bind.html*) touch \"" + dir + "/bound\";; esac\n"
+	os.WriteFile(bin, []byte(script), 0o755)
+	old, oldWait := chrome.BindWait, UUIDWait
+	chrome.BindWait, UUIDWait = 300*time.Millisecond, 2*time.Second
+	t.Cleanup(func() { chrome.BindWait, UUIDWait = old, oldWait })
+	return bin, log
+}
+
+func boundFile(bin string) func(time.Time) bool {
+	return func(time.Time) bool { _, err := os.Stat(filepath.Join(filepath.Dir(bin), "bound")); return err == nil }
+}
+
+func TestBindStartsFirefoxForTheUUIDThenOpensThePage(t *testing.T) {
+	t.Setenv("FAKE_INSTALL", "1")
+	dir := t.TempDir()
+	bin, log := fakeFirefox(t, dir)
+	if err := Bind(bin, dir, "firefox-work", boundFile(bin)); err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := os.ReadFile(log)
+	want := "--profile " + dir + " about:blank\n--profile " + dir + " about:blank moz-extension://" + testUUID + "/bind.html#firefox-work\n"
+	if string(calls) != want {
+		t.Fatalf("calls:\n%s", calls)
+	}
+}
+
+func TestBindWithoutUUIDSaysToRestart(t *testing.T) {
+	dir := t.TempDir()
+	bin, _ := fakeFirefox(t, dir)
+	err := Bind(bin, dir, "firefox-work", boundFile(bin))
+	if err == nil || !strings.Contains(err.Error(), "restart Firefox") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestBindGivesUpWhenThePageNeverConfirms(t *testing.T) {
+	t.Setenv("FAKE_INSTALL", "1")
+	dir := t.TempDir()
+	bin, log := fakeFirefox(t, dir)
+	err := Bind(bin, dir, "firefox-work", func(time.Time) bool { return false })
+	calls, _ := os.ReadFile(log)
+	if err == nil || bytes.Count(calls, []byte("bind.html")) != 3 {
+		t.Fatalf("err %v, calls:\n%s", err, calls)
 	}
 }
