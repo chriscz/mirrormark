@@ -26,6 +26,7 @@
 - **Bind URL fragment:** `#<db>.<token>`.
 - **Error code** for a wrong origin, a database with no token, a malformed nonce or a wrong proof: `bad-token`.
 - **The challenge, exactly.** Extension → host `{"v", "type": "hello", "db", "nonce": nonce_e, "browser"}`; host → extension `{"v", "type": "challenge", "nonce": nonce_s, "proof": proof_s}`, sent only when the database exists, its `origin` is the connection's and it has a `token`; extension → host `{"v", "type": "proof", "proof": proof_e}`, sent only after the extension checked `proof_s`. `proof_s = hex(HMAC-SHA256(key, "server:" + port + ":" + nonce_e))` and `proof_e = hex(HMAC-SHA256(key, "extension:" + nonce_s))`, where `key` is the token's 64 hex digits as ASCII bytes (never hex-decoded), `port` is the listening port in decimal, and nonces are 32 bytes of `crypto/rand` (`crypto.getRandomValues` in the extension) as 64 lowercase hex digits. Hex is always lowercase. The host compares with `hmac.Equal`; the extension with `!==`, since each attempt has a new nonce. The host takes the database's lock and touches the lock file only after a right `proof_e`. The token is never sent on the socket.
+- **Hello wait:** a connection has `helloWait` (10 s) from the upgrade to a right `proof_e`. Until then its socket has a read deadline; when it runs out the server closes the connection without touching any file. The proof clears the deadline.
 - **Unit path:** `filepath.Join(filepath.Dir(p.Config), "systemd", "user", "mirrormark.service")`, which is `$XDG_CONFIG_HOME/systemd/user/mirrormark.service`, or `~/.config/systemd/user/…` when that is unset. `ExecStart=<selfPath()> serve`, `Restart=on-failure`, `WantedBy=default.target`.
 - **Not running, exactly:** the popup text `mirrormark is not running. Start it with \`systemctl --user start mirrormark\`, or run \`mirrormark serve\`.`
 - **Log lines the e2e tests read:** `msg=listening`, `msg=connected … conn=<n> db=<id>`, `msg=disconnected … conn=<n>`.
@@ -47,7 +48,7 @@ internal/host/
   protocol.go         Conn, encode/decode, Msg.Nonce/Proof (Tasks 1, 3); Stream,
                       ReadMsg, WriteMsg go (Task 7)
   host.go             Run(ctx, Conn, Options); the challenge (Tasks 1, 3)
-  server.go           Listen, Serve, admit, wsConn (Task 3)
+  server.go           Listen, Serve, admit, wsConn, helloWait (Task 3)
   server_test.go
 internal/db/
   types.go            Profile.Origin, Profile.Token (Task 3)
@@ -1271,8 +1272,8 @@ Review then added `SetReadDeadline` and `fix(rfc-0001): grow WebSocket buffers w
 ### Task 3: `mirrormark serve`
 
 **Files:**
-- Create: `extension/ports.json`, `internal/host/server.go`, `internal/host/server_test.go`
-- Modify: `extension/embed.go`, `extension/embed_test.go`, `internal/db/types.go`, `internal/db/paths.go`, `internal/host/protocol.go`, `internal/host/host.go`, `cmd/mirrormark/main.go`, `cmd/mirrormark/main_test.go`, `README.md`
+- Create: `extension/ports.json`, `internal/host/server.go`, `internal/host/server_test.go`, `internal/host/server_internal_test.go`
+- Modify: `extension/embed.go`, `extension/embed_test.go`, `internal/firefox/firefox_test.go`, `internal/db/types.go`, `internal/db/paths.go`, `internal/db/paths_test.go`, `internal/host/export_test.go`, `internal/host/protocol.go`, `internal/host/host.go`, `cmd/mirrormark/main.go`, `cmd/mirrormark/main_test.go`, `README.md`
 
 **Interfaces:**
 - Consumes: Task 1 (`Conn`, `encode`, `decode`), Task 2 (`ws`).
@@ -1313,6 +1314,8 @@ func TestPorts(t *testing.T) {
 }
 ```
 
+`ports.json` is now one of the extension's files, so `TestUnpackWritesFilesAndKey` and `internal/firefox`'s `TestXPIHoldsTheExtensionWithoutAKey` list it too.
+
 - [ ] **Step 2: The profile block and the lock.** In `types.go`'s `Profile`:
 
 ```go
@@ -1347,7 +1350,15 @@ In `host.go`, `state` gains `pending pending`, and `handle` gains `case "proof":
 }
 ```
 
-`accept(id, browser string) error` is the rest of today's `hello` unchanged: `TryLock`, the lock file's mtime, `s.self`, the `connected` log line. Then:
+`accept(id, browser string) error` is the rest of today's `hello` unchanged: `TryLock`, the lock file's mtime, `s.self`, the `connected` log line. After `s.self` is set it ends the hello wait of a connection that has one:
+
+```go
+	// A connection that limits how long an unproven peer may take learns
+	// that this one is through.
+	if c, ok := s.conn.(interface{ proven() }); ok {
+		c.proven()
+	}
+``` Then:
 
 ```go
 // pending is a hello waiting for the extension's proof.
@@ -1423,6 +1434,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -1504,9 +1516,12 @@ func challenged(t *testing.T, c *ws.Conn, port, id, token string) string {
 	return m.Nonce
 }
 
-// next returns the next message other than a ping.
+// next returns the next message other than a ping. A server that sends
+// nothing within 5 s fails the test rather than hanging it.
 func next(t *testing.T, c *ws.Conn) host.Msg {
 	t.Helper()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
 	for {
 		b, err := c.Read()
 		if err != nil {
@@ -1559,6 +1574,21 @@ func TestServeChallengesOnlyForABinding(t *testing.T) {
 			t.Errorf("%s: got %+v, want %s", c.id, m, c.code)
 		}
 	}
+}
+
+// A proof with no challenge waiting is ignored: it cannot stop the host,
+// and the hello after it still gets a challenge.
+func TestServeIgnoresAProofBeforeTheHello(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, "t1")
+	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	c, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, host.Msg{Type: "proof", Proof: strings.Repeat("0", 64)})
+	challenged(t, c, port, "a", "t1")
 }
 
 func TestServeRefusesAWrongProof(t *testing.T) {
@@ -1682,7 +1712,71 @@ func TestListenTakesTheFirstFreePort(t *testing.T) {
 		t.Fatal("listened on a taken port")
 	}
 }
+
+// A connection that never proves itself is dropped once the hello wait
+// ends, before it takes any database's lock.
+func TestServeDropsASilentConnection(t *testing.T) {
+	host.SetHelloWait(t, 100*time.Millisecond)
+	p := paths(t)
+	bound(t, p, "a", origin, "t1")
+	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	silent, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One that says hello but never answers the challenge is dropped too.
+	halfway, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenged(t, halfway, port, "a", "t1")
+	for name, c := range map[string]*ws.Conn{"silent": silent, "no proof": halfway} {
+		closed := make(chan error, 1)
+		go func() {
+			_, err := c.Read()
+			closed <- err
+		}()
+		select {
+		case err := <-closed:
+			if err != io.EOF {
+				t.Errorf("%s: %v, want the server's close", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: still open after the hello wait", name)
+		}
+	}
+	for _, f := range []string{p.ProfileLock("a"), p.GlobalLock()} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s: %v, want no file", f, err)
+		}
+	}
+}
+
+// The hello wait ends with the proof: a proven connection may stay quiet.
+func TestServeKeepsAProvenQuietConnection(t *testing.T) {
+	host.SetHelloWait(t, 100*time.Millisecond)
+	p := paths(t)
+	bound(t, p, "a", origin, "t1")
+	bound(t, p, "b", origin, "t2")
+	writeConfig(t, p, workUnion)
+	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	c, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonceS := challenged(t, c, port, "a", "t1")
+	send(t, c, host.Msg{Type: "proof", Proof: mac("t1", "extension:"+nonceS)})
+	time.Sleep(300 * time.Millisecond)
+	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+	if m := next(t, c); m.Type != "apply" {
+		t.Fatalf("got %+v", m)
+	}
+}
 ```
+
+`export_test.go` gains `SetHelloWait(t, d)`, which shortens `helloWait` until the test ends; its restore is registered before `serve`'s cleanup, so it runs after Serve has stopped and the race detector stays quiet. `server_internal_test.go` checks that a `wsConn.Read` cut short by the server's own close returns `io.EOF`.
 
 - [ ] **Step 5: Run** `bin/dev run go test -count=1 ./internal/host/` → FAIL (`host.Listen` undefined).
 
@@ -1695,8 +1789,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1705,6 +1801,12 @@ import (
 	"github.com/chriscz/mirrormark/internal/db"
 	"github.com/chriscz/mirrormark/internal/ws"
 )
+
+// helloWait is how long a connection may take from the upgrade to a right
+// proof. A program that connects and says nothing is dropped after it,
+// rather than holding a connection open for ever. A variable so that tests
+// can shorten it.
+var helloWait = 10 * time.Second
 
 // Listen listens on 127.0.0.1 on the first of ports it can bind.
 func Listen(ports []int) (net.Listener, error) {
@@ -1732,13 +1834,24 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 		return err
 	}
 	var conns atomic.Int64
+	// hosts counts the running handlers. mu and closing keep a handler that
+	// starts while Serve shuts down from adding to hosts during Wait.
 	var hosts sync.WaitGroup
+	var mu sync.Mutex
+	closing := false
 	srv := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Counted from the start, so Serve waits for a host that is
 			// still writing its database file when ctx ends.
+			mu.Lock()
+			if closing {
+				mu.Unlock()
+				http.Error(w, "shutting down", http.StatusServiceUnavailable)
+				return
+			}
 			hosts.Add(1)
+			mu.Unlock()
 			defer hosts.Done()
 			log := o.Log.With("conn", conns.Add(1))
 			origin, ok := admit(r, ln.Addr().String(), o.Paths)
@@ -1752,11 +1865,17 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 				log.Warn("bad handshake", "err", err)
 				return
 			}
+			// Until it proves itself, a connection has helloWait to do so.
+			sock.SetReadDeadline(time.Now().Add(helloWait))
 			c := newWSConn(sock, o.Ping)
 			ho := o
 			ho.Log, ho.Origin, ho.Port = log, origin, port
 			err = Run(ctx, c, ho)
 			c.close()
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Warn("dropped a connection that did not prove itself in time", "wait", helloWait)
+				return
+			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				log.Warn("host stopped", "err", err)
 				return
@@ -1769,6 +1888,9 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 		srv.Close() // stops accepting; hijacked connections end with their hosts
 	}()
 	err = srv.Serve(ln)
+	mu.Lock()
+	closing = true
+	mu.Unlock()
 	hosts.Wait()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -1802,9 +1924,10 @@ func admit(r *http.Request, addr string, p db.Paths) (string, bool) {
 // messages arrive, and the extension answers each ping with an extension
 // API call, which keeps a Gecko event page running too.
 type wsConn struct {
-	sock *ws.Conn
-	stop chan struct{}
-	once sync.Once
+	sock   *ws.Conn
+	stop   chan struct{}
+	once   sync.Once
+	closed atomic.Bool // close has been called
 }
 
 func newWSConn(sock *ws.Conn, ping time.Duration) *wsConn {
@@ -1829,6 +1952,11 @@ func newWSConn(sock *ws.Conn, ping time.Duration) *wsConn {
 func (c *wsConn) Read() (Msg, error) {
 	b, err := c.sock.Read()
 	if err != nil {
+		// A Read that our own close cut short is the end of the
+		// connection, not a failure.
+		if c.closed.Load() && errors.Is(err, net.ErrClosed) {
+			return Msg{}, io.EOF
+		}
 		return Msg{}, err
 	}
 	return decode(b)
@@ -1842,8 +1970,15 @@ func (c *wsConn) Write(m Msg) error {
 	return c.sock.Write(b)
 }
 
+// proven ends the hello wait: the host calls it once the extension has
+// proven which database it is.
+func (c *wsConn) proven() {
+	c.sock.SetReadDeadline(time.Time{}) // fails only once closed, when Read fails anyway
+}
+
 func (c *wsConn) close() {
 	c.once.Do(func() {
+		c.closed.Store(true)
 		close(c.stop)
 		c.sock.Close(1000, "")
 	})
@@ -1856,7 +1991,8 @@ Change the host package comment's first sentence to: "Package host runs sync rou
 
 ```go
 // openLog opens the log every host and the server append to, rotating it
-// first if it is large. The caller closes the file.
+// first if it is large. Two hosts starting at once may both rotate, and so
+// lose the old log. The caller closes the file.
 func openLog(p db.Paths) (*slog.Logger, *os.File, error) {
 	if err := os.MkdirAll(p.State, 0o700); err != nil {
 		return nil, nil, err
@@ -1949,7 +2085,7 @@ func TestServeRunsOncePerUser(t *testing.T) {
 }
 ```
 
-- [ ] **Step 9: README.** Under "Files", add `~/.local/share/mirrormark/serve.lock` ("Held by the running `mirrormark serve`, so one runs per user"). Under the profile block's description, the two new fields `origin` and `token` ("written by `install` when it binds the profile; do not edit"). Add `serve` to the command list. Do not describe the service yet.
+- [ ] **Step 9: README.** Under "Files", add `~/.local/share/mirrormark/serve.lock` ("Held by the running `mirrormark serve`, so one runs per user"). Under the profile block's description, the two new fields `origin` and `token` ("written by `install` when it binds the profile; do not edit"). Add `serve` after `unpack` in "Upgrade, uninstall, unpack" (the README has no other command list), saying the extension still uses the native messaging host. Do not describe the service yet.
 
 - [ ] **Step 10: Run** `bin/dev run make` → PASS; `bin/dev run make check-race` → PASS; `bin/dev run make check-e2e` → PASS (unchanged: no extension uses the server).
 
