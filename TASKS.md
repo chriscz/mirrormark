@@ -145,6 +145,17 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **Fix:** before uninstalling, read `extensions.json` and require an
   active mirrormark entry.
 
+### `TestProblemStaysUntilFixed` failed once in a full `make`
+
+- **Where:** `internal/host`, `TestProblemStaysUntilFixed`.
+- **What:** the test failed once during a full `make`, in code the change
+  being tested did not touch.
+- **Effect:** a spurious red `make`. It passed 10 times alone and in 3 more
+  full runs.
+- **Found:** a full `make` while building the profile listing, 2026-10-15.
+- **Fix:** find the timing assumption the test makes and wait for the
+  condition instead.
+
 ## Manual checks still to do
 
 - Run `mirrormark install` from the README on a real Linux desktop with
@@ -162,3 +173,9 @@ Each entry says where, what, its effect, how it was found and the fix.
   `install --browser firefox` again, restart Firefox and check the new
   build runs. Then uninstall after real use. Phase 5 is done when this run
   is recorded.
+- On the desktop Brave that showed "This page has been blocked by Brave",
+  run the README's Brave steps again: `mirrormark install --browser brave`,
+  check the listing, then `--profile` one profile and follow the messages.
+  Run it under firejail as well, to see whether firejail hides
+  `/opt/brave.com/brave/extensions/`. Firejail support itself comes later,
+  after the localhost transport. Phase 7 is done when this run is recorded.
