@@ -28,7 +28,8 @@
   - One per-user host manifest for both: `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json`. The XPI, the three `user.js` lines and `ResetPrefs` are unchanged.
 - **Shared-file rules.** Chromium: an uninstall removes the CRX, the unpacked extension and the host manifest only if no other Chromium browser's external file for the id is in place (under `sysroot`); `--purge` deletes the key only if, in addition, no other Chromium browser's database is left. Gecko: an uninstall removes the host manifest only if no database of another Gecko browser names a profile that still holds the XPI.
 - **Install writes only the browser asked for:** its external file and the shared host manifest, never another browser's file, so nothing is created under a browser that is not installed. After an upgrade the user runs `install` once per browser.
-- **Never-run Gecko profiles** (no `compatibility.ini`): skipped with `skipped: <name>: …` on stdout when no `--profile` was given; refused when named; `install` stops if every listed profile was skipped.
+- **Never-run Gecko profiles** (no `compatibility.ini`): skipped with `skipped: <name>: …` on stdout when no `--profile` was given; refused when named; `install` stops if every listed profile was skipped. (As built in Task 3. [`plan-profile-selection.md`](plan-profile-selection.md) Task 2 replaces the skip: without `--profile`, install only lists, and shows such a profile as `never run`.)
+- **Explicit profiles and one-shot binding** ([`plan-profile-selection.md`](plan-profile-selection.md)) land between Task 6 and Task 7. From Task 7 on, every install names its profiles with `--profile` (ID or number), binding opens the page once with no retries (`chrome.Open`, `chrome.BindWait` 30 s; `chrome.Retry` and `firefox.UUIDWait` are gone), and the e2e harness waits in `e.ready(name)` for the profile's files to show mirrormark ready before each bind.
 - Dev image: Brave `1.97.57`, `https://brave-browser-apt-release.s3.brave.com/pool/main/b/brave-browser/brave-browser_1.97.57_amd64.deb`, sha256 `d79919a82aa869cf5121b641afa79958730c4bdaf36a0c51ae0f9c32f9c16bb9`. LibreWolf `158.0-1`, `https://dl.librewolf.net/librewolf/158.0-1/librewolf-158.0-1-linux-x86_64-package.tar.xz`, sha256 `34bb7296feec0c6823abdfaf4fd50e47e9eada9cb4a5ed16e111a951dc9eb16c`, unpacked to `/opt/librewolf`.
 - The e2e harness keeps writing `user_pref("remote.prefs.recommended", false);` into every Gecko profile it prepares: the remote agent's recommended prefs set `extensions.autoDisableScopes` to 0.
 - E2e budget: one new sync pair only, `brave-librewolf`, plus one install test per new browser.
@@ -100,6 +101,8 @@ func (b Browser) Check(profileDir string) (bin string, err error)   // replaces 
 var ErrNeverRun error
 func (b Browser) Bind(bin, profileDir, dbID string, bound func(since time.Time) bool) error
 // unchanged: Dir, XPI, XPIPath, HostManifestPath, Files, Prefs, ResetPrefs, UUID, UUIDWait
+// (plan-profile-selection.md Task 1 then changes Bind to take the UUID, adds
+// ReadState and chrome.ReadState, and removes UUIDWait and chrome.Retry)
 
 // cmd/mirrormark
 func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, stdout, stderr io.Writer) int   // Task 2
@@ -126,10 +129,12 @@ func launchFirefox(t *testing.T, name, kind, dir string, port int, env []string)
 | 4 | `feat(rfc-0001): install into and uninstall from Brave [new feature]` |
 | 5 | `feat(rfc-0001): install into and uninstall from LibreWolf [new feature]` |
 | 6 | `build(rfc-0001): add Brave and LibreWolf to the dev image` |
+| P1 | `feat(rfc-0001): bind each profile once, only where mirrormark is ready` ([`plan-profile-selection.md`](plan-profile-selection.md) Task 1) |
+| P2 | `feat(rfc-0001): list the profiles, and install only into those named [new feature]` ([`plan-profile-selection.md`](plan-profile-selection.md) Task 2) |
 | 7 | `test(rfc-0001): install and bind Brave and LibreWolf end to end` |
 | 8 | `test(rfc-0001): run the sync tests between Brave and LibreWolf` |
 
-Tasks 1–2 change nothing a user sees except messages that now name the browser. Task 3 is a compatibility change LibreWolf needs, and applies to Developer Edition too. Tasks 4 and 5 each deliver one browser with its install, uninstall, shared-file rules, unit tests and README. Tasks 6–8 prove them end to end. Any prefix of the stack can land.
+Tasks 1–2 change nothing a user sees except messages that now name the browser. Task 3 is a compatibility change LibreWolf needs, and applies to Developer Edition too. Tasks 4 and 5 each deliver one browser with its install, uninstall, shared-file rules, unit tests and README. Tasks 6–8 prove them end to end. P1 and P2, planned in their own file after the user tried Brave on a desktop, land between Task 6 and Task 7, so Tasks 7–8 are written for their flow: an explicit `--profile` and one open per ready profile. Any prefix of the stack can land.
 
 ---
 
@@ -1437,7 +1442,7 @@ Run: `bin/dev run sh -c '/opt/librewolf/librewolf --version; grep ^Name= /opt/li
 - Modify: `e2e/env.go`, `e2e/browser.go`, `e2e/bidi.go`, `e2e/install_test.go`, `README.md` (Development)
 
 **Interfaces:**
-- Consumes: Tasks 4–6.
+- Consumes: Tasks 4–6, and P1–P2 ([`plan-profile-selection.md`](plan-profile-selection.md)): `--profile` on every install, `e.ready`, `chrome.ReadState`, `firefox.ReadState`.
 - Produces: kinds `chrome`, `brave`, `firefox`, `librewolf` for `setupPair`; `bins`, `names`, `gecko`; `launch(t, name, kind, udd, env)`, `launchFirefox(t, name, kind, dir, port, env)`.
 
 - [ ] **Step 1: The harness knows four kinds.** In `e2e/env.go`, add:
@@ -1531,11 +1536,22 @@ func (e *Env) installArgs(name string) []string {
 	if k := e.kind(name); gecko(k) {
 		return []string{"install", "--browser", k, "--profile", name}
 	}
-	return []string{"install", "--browser", e.kind(name), "--user-data-dir", e.udd(name)}
+	return []string{"install", "--browser", e.kind(name), "--user-data-dir", e.udd(name), "--profile", "Default"}
 }
 ```
 
-`bind`: `if gecko(e.kind(name)) { profile = name }`.
+`bind`: `if gecko(e.kind(name)) { profile = name }` (a Gecko profile's ID is its directory's base name, `name`, because `prepare` creates it at `<Home>/<kind>/<name>`). `ready`, from P1, reads the profile's files by family:
+
+```go
+	eventually(e.t, 40*time.Second, name+"'s files to show mirrormark ready", func() bool {
+		if gecko(e.kind(name)) {
+			s, _, err := firefox.ReadState(e.udd(name), want)
+			return err == nil && s.State == chrome.Ready
+		}
+		s, err := chrome.ReadState(filepath.Join(e.udd(name), "Default"), e.ExtID, want, true)
+		return err == nil && s.State == chrome.Ready
+	})
+```
 
 In `e2e/browser.go`: `Kind string // a key of bins`; `func launch(t *testing.T, name, kind, udd string, env []string) *Browser` with `exec.Command(bins[kind], "--user-data-dir="+udd, …)` (flags unchanged; the comment on `--no-sandbox` now says "Chromium's sandbox") and `Kind: kind`. In `e2e/bidi.go`: delete `firefoxBin`; `func launchFirefox(t *testing.T, name, kind, dir string, port int, env []string) *Browser` with `exec.Command(bins[kind], "--profile", dir, …)` and `Kind: kind`.
 
@@ -1611,7 +1627,8 @@ func TestLibreWolfInstallAndBind(t *testing.T) {
 
 - [ ] **Step 4: Run.** `bin/dev run make check-e2e RUN='TestBraveInstallAndBind|TestLibreWolfInstallAndBind'` → PASS.
   - If LibreWolf's install says it found no profile `a`, check where `-CreateProfile` registered it: `bin/dev run sh -c 'export HOME=$(mktemp -d); /opt/librewolf/librewolf --headless -CreateProfile "a $HOME/p"; find $HOME -name profiles.ini'`. If it is neither `~/.config/librewolf/librewolf` nor `~/.librewolf`, stop and report: Section 9's profile root is then wrong.
-  - If a LibreWolf profile's first start does not record the UUID within 15 s (`e.open` or `UUIDWait`), stop and report the time it took; do not raise the waits silently.
+  - If a LibreWolf profile's first start does not show the add-on ready within `e.ready`'s 40 s, or a ready profile does not report in within `chrome.BindWait` (30 s, one open), stop and report the time it took. Do not raise the waits silently, and do not add a retry.
+  - If Brave's `Preferences` does not show the extension within `e.ready`'s 40 s of the profile's start, record how long it took (the profile-state spike measured 10.3 s), and stop.
   - If `chrome.management.getSelf()` gives Brave another `installType`, record what it gives and assert that instead, with a comment.
 
 - [ ] **Step 5: README Development:** "Besides installing and binding in each of the four browsers, …". Run `bin/dev run make && bin/dev run make check-e2e` → PASS.
@@ -1634,7 +1651,7 @@ func TestLibreWolfInstallAndBind(t *testing.T) {
 var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox", "chrome"}, {"brave", "librewolf"}}
 ```
 
-- [ ] **Step 2: Run.** `bin/dev run make check-e2e RUN='/brave-librewolf'` → PASS, each latency under 3 s logged. Then the full `bin/dev run make check-e2e` → PASS; the suite grows by about a third and stays inside the 60 m timeout.
+- [ ] **Step 2: Run.** `bin/dev run make check-e2e RUN='/brave-librewolf'` → PASS, each latency under 3 s logged. The pair's setup binds through P1–P2's flow (`--profile Default` for Brave, `--profile a`/`b` for LibreWolf, `e.ready` before each bind); nothing in this task changes for it, but setup now takes up to about 20 s longer while Brave writes `Preferences`. Then the full `bin/dev run make check-e2e` → PASS; the suite grows by about a third and stays inside the 60 m timeout.
 
 - [ ] **Step 3: README Development:** "The sync tests run four times: between two Chromes, between two Firefoxes, between a Firefox and a Chrome, and between Brave and LibreWolf, as subtests named `chrome-chrome`, `firefox-firefox`, `firefox-chrome` and `brave-librewolf` …".
 
@@ -1648,7 +1665,7 @@ var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox"
 ## Risks
 
 - **Brave in the dev image.** The spike ran Brave with `--no-sandbox --no-first-run` under Xvfb but not with the harness's `--remote-debugging-pipe` and `--disable-dev-shm-usage` together; Task 7 Step 2 shows it at once.
-- **LibreWolf's slow first start** (over 10 s in the spike's container) sits close to the 15 s waits. Task 7 stops rather than widening them.
+- **LibreWolf's slow first start** (over 10 s in the spike's container) must fit in `e.ready`'s 40 s and the single 30 s bind wait. Task 7 stops rather than widening them.
 - **Test time** grows by one sync pair and two install tests, about a third. Use `RUN=` while developing.
 - **Upgrades are per browser.** Install writes only the browser asked for, so a user who upgrades and runs `install` for Chrome but not Brave keeps Brave on the old build until `install --browser brave`; the README says to run both. Accepted in the RFC.
 - **Accepted, untested:** Brave package upgrades and removal touching `/opt/brave.com/brave/extensions/`, Brave Sync, LibreWolf's other packagings and stricter sanitize settings. All stay in the RFC's risks.
