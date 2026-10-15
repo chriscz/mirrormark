@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27.2 (standard library plus `go.yaml.in/yaml/v3`); the dev image adds Brave 1.97.57 and LibreWolf 158.0-1 beside Google Chrome 155 and Firefox Developer Edition 159.0b2; e2e tests over the DevTools pipe (Chrome, Brave) and WebDriver BiDi (Developer Edition, LibreWolf).
 
-**Status:** Tasks 1–6 are done. Tasks 7–8 moved to [`plan-local-server.md`](plan-local-server.md) (Tasks 9–10), on the local-server transport.
+**Status:** Tasks 1–6 are done. Tasks 7–8 moved to [`plan-local-server.md`](plan-local-server.md) (Tasks 8–9), on the local-server transport.
 
 **Spec:** [`../0001_local-bookmark-sync-host.md`](../0001_local-bookmark-sync-host.md), Section 9 and Phase 6. Findings: [`brave-install-spike.md`](brave-install-spike.md), [`librewolf-install-spike.md`](librewolf-install-spike.md). The code this builds on is described in [`plan.md`](plan.md) and [`plan-firefox.md`](plan-firefox.md).
 
@@ -1440,7 +1440,7 @@ Run: `bin/dev run sh -c '/opt/librewolf/librewolf --version; grep ^Name= /opt/li
 
 ### Tasks 7–8: moved
 
-Tasks 7 (install and bind Brave and LibreWolf end to end) and 8 (the sync tests between Brave and LibreWolf) had not run when the user replaced native messaging with a local server. They are now Tasks 9 and 10 of [`plan-local-server.md`](plan-local-server.md), after that plan's switch to the server and its removal of native messaging. Their checks that the shared host manifest stays after an uninstall became checks that the CRX and the service stay and the other browser still syncs. The harness changes are otherwise as they were here.
+Tasks 7 (install and bind Brave and LibreWolf end to end) and 8 (the sync tests between Brave and LibreWolf) had not run when the user replaced native messaging with a local server. They are now Tasks 8 and 9 of [`plan-local-server.md`](plan-local-server.md), after that plan's switch to the server and its removal of native messaging. Their checks that the shared host manifest stays after an uninstall became checks that the CRX and the service stay and the other browser still syncs. The harness changes are otherwise as they were here.
 
 ## After the last task
 
