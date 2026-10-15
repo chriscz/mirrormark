@@ -360,8 +360,10 @@ Brave profiles in /home/u/.config/BraveSoftware/Brave-Browser:
   2  Profile 2   Test      not installed  -
   3  Profile 10  Old       removed        brave-old
 Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:
-  mirrormark install --browser brave --profile 1
+  mirrormark install --browser brave --profile "Profile 1"
 ```
+
+The example is the first profile that is not `bound` (number 0 if all are), by its ID, quoted when the shell would split it.
 
 **IDs and numbers.** A profile's ID is its directory's name: `Default` or `Profile 1` in Chrome and Brave, and the base name of the profile directory in Developer Edition and LibreWolf (such as `x1y2z3ab.default-release`). The list is sorted by ID, comparing runs of digits as numbers: `Default`, `Profile 1`, `Profile 2`, `Profile 10`. A profile's number `#` is its place in that list, from 0. In a Chromium browser where no profile was deleted, `Profile N` is then number N, so a user who confuses the two still gets the profile they meant. Numbers stay the same while the set of profiles does; IDs never change. `--profile` (repeatable) takes either. An exact ID wins over a number, and no Chromium ID is all digits. An ID that two Gecko profiles share (two absolute paths with one base name) is refused with both numbers. Names are no longer accepted, because they need not be unique and the list shows them anyway.
 
@@ -370,7 +372,7 @@ Nothing was changed. Name the profiles to install into or bind with --profile ID
 | State | Chrome and Brave (`<profile>/Preferences`) | Developer Edition and LibreWolf |
 | --- | --- | --- |
 | `never run` | no `Preferences` | no `compatibility.ini` |
-| `not <browser>` | | `compatibility.ini` names another browser (the check in Sections 8 and 9) |
+| `not <browser>` | | the check in Sections 8 and 9 refuses the profile: `compatibility.ini` names another browser, or it, its `LastPlatformDir`, or the browser's `channel-prefs.js` or `application.ini` is missing or cannot be read. The reason goes to stderr as a warning |
 | `not installed` | no `extensions.settings.<id>`, and no external file for this browser | no XPI in the profile |
 | `not installed yet` | no `extensions.settings.<id>`, and this browser's external file is in place | the XPI is there, but `extensions.json` has no entry or `prefs.js` no UUID |
 | `removed` | `<id>` in `extensions.external_uninstalls`, and no `extensions.settings.<id>` with a `path` (a copy loaded unpacked after a Remove has a `path` again, and the list may keep the id) | (Gecko deletes the XPI and keeps no record: `not installed`) |
@@ -379,6 +381,7 @@ Nothing was changed. Name the profiles to install into or bind with --profile ID
 | `old build <version>` | `manifest.version` is not the embedded extension's | `version` is not the embedded extension's |
 | `ready` | an entry with a `path`, no disable reason, this version | entry `active`, a UUID, this version |
 | `bound` | `ready`, and a database names this profile | the same |
+| `unreadable` | `Preferences` cannot be read or parsed; the error goes to stderr as a warning | `extensions.json` or `prefs.js` cannot be read or parsed; the same |
 
 Without a key in mirrormark's data directory, the extension id is unknown and every Chromium profile reads `not installed`.
 
@@ -477,7 +480,7 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Exit:** all pass with Chrome's and Firefox's tests unchanged, and the README's Brave and LibreWolf steps are run once by hand on a desktop.
 
 7. **Explicit profiles and binding once** (Section 10), landing before Phase 6's end-to-end tests, which then use it. First, `install` reads each named profile's state from its files, opens the bind page once only where the extension is ready, and says why elsewhere. Then `install` without `--profile` lists the profiles and changes nothing, and `--profile` takes an ID or a number.
-   - **Tests:** unit tests that read each state in the profile-state spike from fixture files, for both families; that a profile that is not ready gets its message and no open; that each ready profile gets one open and a silent one ends in `not bound` after the wait; that a listing writes no file and starts no `sudo`; and the numeric-aware order and selection by ID and number. E2e: the existing Chrome and Firefox install tests with `--profile`, and a profile named before the browser installed the extension is reported not ready, then binds after a restart.
+   - **Tests:** unit tests that read each state in the profile-state spike from fixture files, for both families; that a profile that is not ready gets its message and no open; that each ready profile gets one open and a silent one ends in `not bound` after the wait; that a listing writes no file, starts no `sudo` and no browser, for Brave before and after an install and for Developer Edition with never-run and other-browser profiles; and the numeric-aware order and selection by ID and number (an exact ID beats a number, a number too large for any profile is refused as one). E2e: the existing Chrome and Firefox install tests with `--profile`, a listing of a bound Chrome profile, and a profile named before the browser installed the extension is reported not ready, then binds after a restart.
    - **Exit:** all pass, and the README's steps are run again on the desktop Brave that showed "blocked by Brave".
 
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
@@ -554,3 +557,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — Brave and LibreWolf plan trimmed: `install` no longer refreshes the other Chromium browser's external file or writes only changed files; upgrades run `install` once per browser. The e2e checks that the shared host manifest stays after an uninstall instead of restarting the other browser.
 - 2026-10-15 — after the user tried Brave on a desktop: `install` without `--profile` lists the profiles with their state and writes nothing; `--profile` takes an ID or a number, not a name; `install` reads each profile's extension state from its own files and opens the bind page once, only where the extension is ready, with no retries; the never-run skip goes. Both are the user's decisions (Section 10).
 - 2026-10-15 — while implementing: a Chromium profile reads `removed` only while its `extensions.settings.<id>` has no `path`, so a copy loaded unpacked after a Remove is not reported as removed for ever.
+- 2026-10-15 — profile listing as built: the example line gives the first unbound profile's quoted ID; a new `unreadable` state for a profile whose files cannot be parsed; `not <browser>` covers any refusal by the browser check, with the reason on stderr.
