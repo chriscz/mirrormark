@@ -81,10 +81,10 @@ func (b Browser) DefaultRoot() (string, error) {
 	return filepath.Join(home, b.HomeRoot), nil
 }
 
-// Profiles lists root's profiles, sorted by ID, numbers as numbers: those in profiles.ini,
-// with Dir as the file gives it (relative to root, or absolute), and every
-// other directory in root that holds a prefs.js, named by what follows its
-// first ".". Firefox's new profile switcher lists its profiles only in an
+// Profiles lists root's profiles, sorted by ID, numbers as numbers: those
+// in profiles.ini, with Dir as the file gives it (relative to root, or
+// absolute), and every other directory in root that holds a prefs.js,
+// named by what follows its first ".". Firefox's new profile switcher lists its profiles only in an
 // SQLite file, which this does not read, but each one has a prefs.js.
 func (b Browser) Profiles(root string) ([]chrome.Profile, error) {
 	var out []chrome.Profile

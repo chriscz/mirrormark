@@ -39,6 +39,10 @@ func TestChoose(t *testing.T) {
 		{[]string{"2", "0", "Profile 2"}, []string{"Profile 2", "Default"}, ""},
 		{[]string{"Work"}, nil, `no profile "Work"; run mirrormark install to list them`},
 		{[]string{"3"}, nil, `no profile number 3; run mirrormark install to list them`},
+		{[]string{"99999999999999999999"}, nil, `no profile number 99999999999999999999; run mirrormark install to list them`},
+		{[]string{"+1"}, nil, `no profile "+1"; run mirrormark install to list them`},
+		{[]string{"-1"}, nil, `no profile "-1"; run mirrormark install to list them`},
+		{[]string{"1", "Profile 1"}, []string{"Profile 1"}, ""},
 	} {
 		got, err := choose(all, c.picks, "mirrormark install")
 		var dirs []string
@@ -54,6 +58,12 @@ func TestChoose(t *testing.T) {
 		if err != nil || !slices.Equal(dirs, c.want) {
 			t.Errorf("%q: %q, %v", c.picks, dirs, err)
 		}
+	}
+	// An exact ID wins over a number: a Gecko profile may live in a
+	// directory named "1".
+	gecko := []chrome.Profile{{Dir: "/p/0"}, {Dir: "/p/1"}, {Dir: "/p/x"}}
+	if got, err := choose(gecko[1:], []string{"1"}, "mirrormark install --browser firefox"); err != nil || len(got) != 1 || got[0].Dir != "/p/1" {
+		t.Errorf("ID 1 against number 1: %+v, %v", got, err)
 	}
 	dup := []chrome.Profile{{Dir: "/a/x.default"}, {Dir: "/b/x.default"}}
 	if _, err := choose(dup, []string{"x.default"}, "mirrormark install --browser firefox"); err == nil || err.Error() != `2 profiles have the ID "x.default" (numbers 0, 1); name one by its number` {
@@ -613,8 +623,8 @@ func TestInstallWithoutProfileListsAndWritesNothing(t *testing.T) {
 	if out.String() != want || errb.Len() != 0 {
 		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
 	}
-	if entries, _ := os.ReadDir(p.Data); len(entries) != 0 || len(*sudoCalls) != 0 {
-		t.Fatalf("wrote %v, sudo %v", entries, *sudoCalls)
+	if _, err := os.Stat(p.Data); !errors.Is(err, fs.ErrNotExist) || len(*sudoCalls) != 0 {
+		t.Fatalf("data dir %v, sudo %v", err, *sudoCalls)
 	}
 	if _, err := os.Stat(p.ConfigFile()); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("config: %v", err)
@@ -711,8 +721,12 @@ func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
 		"  3  xgamma.gamma  gamma  never run                      -\n" +
 		"Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n" +
 		"  mirrormark install --browser firefox --profile xalpha.alpha\n"
-	if out.String() != want || errb.Len() != 0 {
-		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
+	if out.String() != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
+	}
+	// The listing says why delta looks like another browser's.
+	if w := "mirrormark: warning: xdelta.delta: it was last run by a browser on the release channel"; !strings.HasPrefix(errb.String(), w) || strings.Count(errb.String(), "\n") != 1 {
+		t.Fatalf("stderr %q, want one line starting %q", errb.String(), w)
 	}
 	for _, n := range []string{"alpha", "beta", "delta", "gamma"} {
 		mustBeGone(t, "listing", filepath.Join(root, "x"+n+"."+n, "user.js"), filepath.Join(root, "x"+n+"."+n, "extensions"))

@@ -256,6 +256,9 @@ func listGecko(p db.Paths, b firefox.Browser, root, list string, profiles []chro
 			states[i] = chrome.ProfileState{State: chrome.NeverRun}.String()
 			continue
 		} else if err != nil {
+			// Another browser's profile, or one whose files Check cannot
+			// read; the warning says which.
+			fmt.Fprintf(stderr, "mirrormark: warning: %s: %v\n", c.ID(), err)
 			states[i] = "not " + b.Name
 			continue
 		}
@@ -561,11 +564,12 @@ func choose(all []chrome.Profile, picks []string, list string) ([]chrome.Profile
 		}
 		if len(hits) == 0 {
 			// Only plain digits are a number: Atoi would also take "+1".
-			n, err := strconv.Atoi(want)
-			if err != nil || strings.Trim(want, "0123456789") != "" {
+			if want == "" || strings.Trim(want, "0123456789") != "" {
 				return nil, fmt.Errorf("no profile %q; run %s to list them", want, list)
 			}
-			if n >= len(all) {
+			// Too many digits for an int is still a number, just no profile's.
+			n, err := strconv.Atoi(want)
+			if err != nil || n >= len(all) {
 				return nil, fmt.Errorf("no profile number %s; run %s to list them", want, list)
 			}
 			hits = []int{n}
