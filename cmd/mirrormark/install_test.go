@@ -246,6 +246,34 @@ func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
 	return log
 }
 
+// chromiumReady writes the Preferences a Chromium browser has once it has
+// installed and enabled the extension in the profile.
+func chromiumReady(t *testing.T, profileDir, id string) {
+	t.Helper()
+	v, err := extension.Version()
+	must(t, err)
+	must(t, os.MkdirAll(profileDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(profileDir, "Preferences"), []byte(`{"extensions":{"settings":{"`+id+`":{"path":"`+id+`/`+v+`_0","location":2,"disable_reasons":[],"manifest":{"version":"`+v+`"}}}}}`), 0o600))
+}
+
+// geckoReady writes the extensions.json and prefs.js a Gecko browser has
+// once it has installed the add-on in the profile.
+func geckoReady(t *testing.T, profileDir, uuid string) {
+	t.Helper()
+	v, err := extension.Version()
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(profileDir, "extensions.json"), []byte(`{"addons":[{"id":"`+extension.GeckoID+`","active":true,"userDisabled":false,"appDisabled":false,"version":"`+v+`","location":"app-profile"}]}`), 0o600))
+	must(t, os.WriteFile(filepath.Join(profileDir, "prefs.js"), []byte(`user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"`+uuid+`\"}");`+"\n"), 0o600))
+}
+
+// braveData is chromeData with four profiles.
+func braveData(t *testing.T) string {
+	udd := t.TempDir()
+	os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"info_cache":{
+		"Default":{"name":"Personal"},"Profile 1":{"name":"Work"},"Profile 2":{"name":"Old"},"Profile 3":{"name":"Off"}}}}`), 0o600)
+	return udd
+}
+
 func chromeData(t *testing.T) string {
 	udd := t.TempDir()
 	os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"info_cache":{
@@ -309,7 +337,10 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	}
 
 	// After the restart: the files are current, so no sudo, and each
-	// profile is bound and confirmed.
+	// profile, which Chrome has installed the extension in, is bound with
+	// one open.
+	chromiumReady(t, filepath.Join(udd, "Default"), id)
+	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
 	out.Reset()
 	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
@@ -323,7 +354,8 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 		}
 	}
 	calls, _ := os.ReadFile(chromeLog)
-	if !bytes.Contains(calls, []byte("--profile-directory=Profile 1 chrome-extension://"+id+"/bind.html#chrome-work\n")) {
+	if want := "--user-data-dir=" + udd + " --profile-directory=Default chrome-extension://" + id + "/bind.html#chrome-personal\n" +
+		"--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://" + id + "/bind.html#chrome-work\n"; string(calls) != want {
 		t.Fatalf("chrome calls:\n%s", calls)
 	}
 
@@ -347,17 +379,94 @@ func TestInstallReportsAProfileThatDoesNotConfirm(t *testing.T) {
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
 	run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
-	// As if the extension were disabled in Default: no hello comes.
+	id := installedID(t, p)
+	chromiumReady(t, filepath.Join(udd, "Default"), id)
+	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
+	// Ready by its files, but the extension never reports in.
 	t.Setenv("FAKE_NO_HELLO", "chrome-personal")
 	out.Reset()
 	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "not bound: Default: ") || !strings.Contains(out.String(), "bound: Profile 1 -> chrome-work") {
+	if want := "not bound: Default: mirrormark did not report in within 300ms of opening the page; look at the tab Chrome opened, then run mirrormark install --user-data-dir " + udd + " --profile Default.\n"; !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "bound: Profile 1 -> chrome-work") {
 		t.Fatalf("output:\n%s", out.String())
 	}
-	if calls, _ := os.ReadFile(log); bytes.Count(calls, []byte("#chrome-personal\n")) != 3 {
+	if calls, _ := os.ReadFile(log); bytes.Count(calls, []byte("#chrome-personal\n")) != 1 {
 		t.Fatalf("chrome calls:\n%s", calls)
+	}
+}
+
+// TestInstallOpensNothingWhereMirrormarkIsNotReady: each state the
+// profile's files can be in gets its own line, and only a ready profile
+// gets the bind page.
+func TestInstallOpensNothingWhereMirrormarkIsNotReady(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	log := fakeChromeOnPath(t, p)
+	udd := braveData(t) // Default, Profile 1, Profile 2, Profile 3
+	var out, errb bytes.Buffer
+	run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
+	id := installedID(t, p)
+	chromiumReady(t, filepath.Join(udd, "Default"), id)
+	must(t, os.MkdirAll(filepath.Join(udd, "Profile 1"), 0o700))
+	must(t, os.WriteFile(filepath.Join(udd, "Profile 1", "Preferences"), []byte(`{}`), 0o600))
+	must(t, os.MkdirAll(filepath.Join(udd, "Profile 2"), 0o700))
+	must(t, os.WriteFile(filepath.Join(udd, "Profile 2", "Preferences"), []byte(`{"extensions":{"settings":{"`+id+`":{}},"external_uninstalls":["`+id+`"]}}`), 0o600))
+	chromiumReady(t, filepath.Join(udd, "Profile 3"), id)
+	prefs, _ := os.ReadFile(filepath.Join(udd, "Profile 3", "Preferences"))
+	must(t, os.WriteFile(filepath.Join(udd, "Profile 3", "Preferences"), bytes.Replace(prefs, []byte(`"disable_reasons":[]`), []byte(`"disable_reasons":[1]`), 1), 0o600))
+	os.Remove(log)
+	out.Reset()
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	for _, line := range []string{
+		"bound: Default -> brave-",
+		"not ready: Profile 1: Brave has not installed mirrormark in this profile yet. Quit Brave completely (close every window), start it again and open this profile, wait half a minute, then run mirrormark install --browser brave --user-data-dir " + udd + ` --profile "Profile 1".`,
+		"not ready: Profile 2: you removed mirrormark from this profile, and Brave will not install it there again. Run mirrormark unpack, turn on Developer mode in brave://extensions,",
+		"not ready: Profile 3: mirrormark is turned off in this profile. Turn it on in brave://extensions, wait half a minute,",
+	} {
+		if !strings.Contains(out.String(), line) {
+			t.Errorf("no %q in:\n%s", line, out.String())
+		}
+	}
+	if calls, _ := os.ReadFile(log); bytes.Count(calls, []byte("\n")) != 1 || !bytes.Contains(calls, []byte("--profile-directory=Default ")) {
+		t.Fatalf("brave calls:\n%s", calls)
+	}
+}
+
+// TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady: a Gecko profile
+// whose files do not show the add-on running gets advice, not the page.
+func TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := firefoxData(t, p, "aurora")
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	// alpha has the XPI, but Firefox has not started there since.
+	beta := filepath.Join(root, "xbeta.beta")
+	geckoReady(t, beta, "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b")
+	ext, _ := os.ReadFile(filepath.Join(beta, "extensions.json"))
+	ext = bytes.Replace(ext, []byte(`"active":true`), []byte(`"active":false`), 1)
+	ext = bytes.Replace(ext, []byte(`"appDisabled":false`), []byte(`"appDisabled":true`), 1)
+	must(t, os.WriteFile(filepath.Join(beta, "extensions.json"), ext, 0o600))
+	out.Reset()
+	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	for _, line := range []string{
+		"not ready: alpha: Firefox Developer Edition has not installed mirrormark in this profile yet. Quit Firefox Developer Edition if it runs in this profile (close every window) and start it there again, then run mirrormark install --browser firefox --profile alpha.\n",
+		"not ready: beta: Firefox Developer Edition refuses mirrormark in this profile because it is not signed. Check that the profile's user.js sets xpinstall.signatures.required to false, restart Firefox Developer Edition there, then run mirrormark install --browser firefox --profile beta.\n",
+	} {
+		if !strings.Contains(out.String(), line) {
+			t.Errorf("no %q in:\n%s", line, out.String())
+		}
+	}
+	if c, _ := os.ReadFile(calls); len(c) != 0 {
+		t.Fatalf("calls:\n%s", c)
 	}
 }
 
@@ -392,7 +501,10 @@ func TestInstallResolvesASymlinkedDataDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	for _, dir := range []string{link, udd} {
+	for i, dir := range []string{link, udd} {
+		if i == 1 { // the second run binds, so Chrome has installed it
+			chromiumReady(t, filepath.Join(udd, "Profile 1"), installedID(t, p))
+		}
 		if code := run([]string{"install", "--user-data-dir", dir, "--profile", "Work"}, strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 		}
@@ -611,7 +723,7 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 
 	// Firefox has installed the add-on and recorded its UUID.
 	for _, n := range []string{"alpha", "beta"} {
-		must(t, os.WriteFile(filepath.Join(root, "x"+n+"."+n, "prefs.js"), []byte(`user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4`+n[:1]+`\"}");`+"\n"), 0o600))
+		geckoReady(t, filepath.Join(root, "x"+n+"."+n), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4"+n[:1])
 	}
 	out.Reset()
 	if code := run([]string{"install", "--browser", "firefox", "--profile", "beta"}, strings.NewReader(""), &out, &errb); code != 0 {
@@ -1095,6 +1207,8 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 		}
 	}
 
+	chromiumReady(t, filepath.Join(udd, "Default"), id)
+	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
 	out.Reset()
 	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
@@ -1295,7 +1409,7 @@ func TestInstallIntoLibreWolfThenBind(t *testing.T) {
 	mustExist(t, "install", host)
 
 	for _, n := range []string{"alpha", "beta"} {
-		must(t, os.WriteFile(filepath.Join(root, "x"+n+"."+n, "prefs.js"), []byte(`user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4`+n[:1]+`\"}");`+"\n"), 0o600))
+		geckoReady(t, filepath.Join(root, "x"+n+"."+n), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4"+n[:1])
 	}
 	out.Reset()
 	if code := run([]string{"install", "--browser", "librewolf", "--profile", "beta"}, strings.NewReader(""), &out, &errb); code != 0 {

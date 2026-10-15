@@ -316,6 +316,9 @@ func TestLookup(t *testing.T) {
 	if Chrome.InstallCommand() != "mirrormark install" {
 		t.Fatalf("Chrome's command %q", Chrome.InstallCommand())
 	}
+	if Chrome.ExtensionsPage != "chrome://extensions" {
+		t.Fatalf("Chrome's extensions page %q", Chrome.ExtensionsPage)
+	}
 }
 
 func TestBraveDescription(t *testing.T) {
@@ -328,6 +331,9 @@ func TestBraveDescription(t *testing.T) {
 	}
 	if b, ok := Lookup("brave"); !ok || b != Brave || Brave.InstallCommand() != "mirrormark install --browser brave" {
 		t.Fatalf("lookup %+v %v", b, ok)
+	}
+	if Brave.ExtensionsPage != "brave://extensions" {
+		t.Fatalf("extensions page %q", Brave.ExtensionsPage)
 	}
 }
 
@@ -346,52 +352,47 @@ func shortBindWait(t *testing.T) {
 	t.Cleanup(func() { BindWait = old })
 }
 
-func TestRetryStopsWhenBound(t *testing.T) {
+func TestOpenStartsOnceAndWaits(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
-	ok, err := Retry(fake, []string{"x", "y"}, func(time.Time) bool {
-		data, _ := os.ReadFile(log)
-		return bytes.Count(data, []byte("\n")) >= 2
-	})
-	if err != nil || !ok {
-		t.Fatalf("ok %v, err %v", ok, err)
+	start := time.Now()
+	ok, err := Open(fake, []string{"x", "y"}, func(time.Time) bool { return false })
+	if err != nil || ok || time.Since(start) < BindWait {
+		t.Fatalf("ok %v, err %v, after %v", ok, err, time.Since(start))
 	}
-	if data, _ := os.ReadFile(log); string(data) != "x y\nx y\n" {
+	if data, _ := os.ReadFile(log); string(data) != "x y\n" {
 		t.Fatalf("calls:\n%s", data)
 	}
 }
 
-func TestBindRetriesUntilConfirmed(t *testing.T) {
+func TestBindOpensThePageOnce(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
 	udd := filepath.Join(t.TempDir(), "udd")
 	err := Chrome.Bind(fake, udd, "Profile 1", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-work", func(time.Time) bool {
 		data, _ := os.ReadFile(log)
-		return bytes.Count(data, []byte("\n")) >= 2
+		return len(data) > 0
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(log)
-	want := "--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#chrome-work\n"
-	if string(data) != want+want {
+	if want := "--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#chrome-work\n"; string(data) != want {
 		t.Fatalf("calls:\n%s", data)
 	}
 }
 
-func TestBindGivesUpAfterThreeTries(t *testing.T) {
+func TestBindSaysWhenTheExtensionDoesNotReportIn(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	udd, _ := Chrome.DefaultUserDataDir()
-	err := Chrome.Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return false })
-	if err == nil || !strings.Contains(err.Error(), "chrome://extensions") {
+	udd, _ := Brave.DefaultUserDataDir()
+	err := Brave.Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "brave-a", func(time.Time) bool { return false })
+	if err == nil || err.Error() != "mirrormark did not report in within 200ms of opening the page; look at the tab Brave opened" {
 		t.Fatalf("err %v", err)
 	}
-	data, _ := os.ReadFile(log)
 	// The default data directory is left implicit, as a user would type it.
-	want := "--profile-directory=Default chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#chrome-a\n"
-	if string(data) != want+want+want {
+	if data, _ := os.ReadFile(log); string(data) != "--profile-directory=Default chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#brave-a\n" {
 		t.Fatalf("calls:\n%s", data)
 	}
 }
@@ -414,5 +415,62 @@ func TestBindReportsAChromeThatWillNotStart(t *testing.T) {
 	err := Chrome.Bind(filepath.Join(t.TempDir(), "missing"), t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return true })
 	if err == nil {
 		t.Fatal("no error")
+	}
+}
+
+func TestReadStateFromPreferences(t *testing.T) {
+	const id = "pjjjaeommfpeolloibnafkcmkindkagl"
+	entry := func(extra string) string {
+		return `{"extensions":{"settings":{"` + id + `":{"path":"` + id + `/0.1.0_0","location":2,"manifest":{"version":"0.1.0"}` + extra + `}}}}`
+	}
+	for _, c := range []struct {
+		name, prefs string // prefs "" means no Preferences file
+		placed      bool
+		want        ProfileState
+	}{
+		{"never run", "", true, ProfileState{State: NeverRun}},
+		{"no entry, no file", `{"extensions":{"settings":{}}}`, false, ProfileState{State: NotInstalled}},
+		{"no entry yet", `{}`, true, ProfileState{State: NotInstalledYet}},
+		{"enabled", entry(`,"disable_reasons":[]`), true, ProfileState{State: Ready}},
+		{"enabled again", entry(``), true, ProfileState{State: Ready}},
+		{"turned off", entry(`,"disable_reasons":[1]`), true, ProfileState{State: TurnedOff}},
+		{"turned off, old format", entry(`,"disable_reasons":1`), true, ProfileState{State: TurnedOff}},
+		{"removed", `{"extensions":{"settings":{"` + id + `":{}},"external_uninstalls":["` + id + `"]}}`, true, ProfileState{State: Removed}},
+		{"old build", entry(``), true, ProfileState{State: OldBuild, Version: "0.1.0"}},
+		// Load unpacked after a Remove: the record of the Remove may stay.
+		{"loaded again", `{"extensions":{"settings":{"` + id + `":{"path":"/home/u/mirrormark-extension","location":4,"manifest":{"version":"0.1.0"}}},"external_uninstalls":["` + id + `"]}}`, true, ProfileState{State: Ready}},
+	} {
+		dir := t.TempDir()
+		if c.prefs != "" {
+			os.WriteFile(filepath.Join(dir, "Preferences"), []byte(c.prefs), 0o600)
+		}
+		want := "0.1.0"
+		if c.name == "old build" {
+			want = "0.2.0"
+		}
+		got, err := ReadState(dir, id, want, c.placed)
+		if err != nil || got != c.want {
+			t.Errorf("%s: %+v, %v; want %+v", c.name, got, err, c.want)
+		}
+	}
+}
+
+func TestReadStateReportsABrokenPreferences(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Preferences"), []byte("{"), 0o600)
+	if _, err := ReadState(dir, "pjjjaeommfpeolloibnafkcmkindkagl", "0.1.0", true); err == nil || !strings.Contains(err.Error(), "Preferences") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestProfileStateWords(t *testing.T) {
+	for s, w := range map[ProfileState]string{
+		{State: NeverRun}: "never run", {State: NotInstalled}: "not installed", {State: NotInstalledYet}: "not installed yet",
+		{State: Removed}: "removed", {State: TurnedOff}: "turned off", {State: Refused}: "refused",
+		{State: OldBuild, Version: "0.1.0"}: "old build 0.1.0", {State: Ready}: "ready",
+	} {
+		if s.String() != w {
+			t.Errorf("%+v: %q, want %q", s, s.String(), w)
+		}
 	}
 }

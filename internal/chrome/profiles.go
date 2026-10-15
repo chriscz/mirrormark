@@ -10,7 +10,7 @@
 //
 // Neither the extension nor the host can tell which profile they run in, so
 // install binds each profile by opening bind.html#<database id> in it from
-// the command line, and confirms the binding through the host's hello.
+// the command line, and waits for the extension to report in.
 package chrome
 
 import (
@@ -31,23 +31,24 @@ type Profile struct{ Dir, Name string }
 // each has its own data directory, command and external extensions
 // directory.
 type Browser struct {
-	Config      string // the --browser value, and browser: in a database
-	Name        string // what messages call it
-	DataDir     string // its data directory under $XDG_CONFIG_HOME or ~/.config
-	Bin         string // the command that starts it
-	ExternalDir string // where it reads external extension files at start
+	Config         string // the --browser value, and browser: in a database
+	Name           string // what messages call it
+	DataDir        string // its data directory under $XDG_CONFIG_HOME or ~/.config
+	Bin            string // the command that starts it
+	ExternalDir    string // where it reads external extension files at start
+	ExtensionsPage string // where the user turns extensions on and off
 }
 
 // Chrome is Google Chrome. On Linux it installs a CRX named by a file in
 // its external extensions directory, without a prompt, in every profile.
 var Chrome = Browser{Config: "chrome", Name: "Chrome", DataDir: "google-chrome", Bin: "google-chrome",
-	ExternalDir: "/usr/share/google-chrome/extensions"}
+	ExternalDir: "/usr/share/google-chrome/extensions", ExtensionsPage: "chrome://extensions"}
 
 // Brave is Brave stable from Brave's package. It reads external extension
 // files from its own install directory, and native host manifests from
 // Chrome's system directory, so it shares Chrome's host manifest.
 var Brave = Browser{Config: "brave", Name: "Brave", DataDir: "BraveSoftware/Brave-Browser", Bin: "brave-browser",
-	ExternalDir: "/opt/brave.com/brave/extensions"}
+	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions"}
 
 // Browsers are the Chromium-based browsers install knows.
 var Browsers = []Browser{Chrome, Brave}

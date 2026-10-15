@@ -242,18 +242,16 @@ func TestUUIDFromPrefs(t *testing.T) {
 
 const testUUID = "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f40"
 
-// fakeFirefox logs each call; with $FAKE_INSTALL set it writes the UUID on
-// the first call, and every bind URL touches $dir/bound.
+// fakeFirefox logs each call, and every bind URL touches $dir/bound.
 func fakeFirefox(t *testing.T, profileDir string) (bin, log string) {
 	dir := t.TempDir()
 	bin, log = filepath.Join(dir, "firefox"), filepath.Join(dir, "calls")
 	script := "#!/bin/sh\necho \"$@\" >> " + log + "\n" +
-		"[ -n \"$FAKE_INSTALL\" ] && printf '%s\\n' 'user_pref(\"extensions.webextensions.uuids\", \"{\\\"mirrormark@chriscz.github.io\\\":\\\"" + testUUID + "\\\"}\");' > \"" + profileDir + "/prefs.js\"\n" +
 		"case \"$*\" in *bind.html*) touch \"" + dir + "/bound\";; esac\n"
 	os.WriteFile(bin, []byte(script), 0o755)
-	old, oldWait := chrome.BindWait, UUIDWait
-	chrome.BindWait, UUIDWait = 300*time.Millisecond, 2*time.Second
-	t.Cleanup(func() { chrome.BindWait, UUIDWait = old, oldWait })
+	old := chrome.BindWait
+	chrome.BindWait = 300 * time.Millisecond
+	t.Cleanup(func() { chrome.BindWait = old })
 	return bin, log
 }
 
@@ -261,36 +259,23 @@ func boundFile(bin string) func(time.Time) bool {
 	return func(time.Time) bool { _, err := os.Stat(filepath.Join(filepath.Dir(bin), "bound")); return err == nil }
 }
 
-func TestBindStartsFirefoxForTheUUIDThenOpensThePage(t *testing.T) {
-	t.Setenv("FAKE_INSTALL", "1")
+func TestBindOpensThePageOnceWithTheUUID(t *testing.T) {
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	if err := Firefox.Bind(bin, dir, "firefox-work", boundFile(bin)); err != nil {
+	if err := Firefox.Bind(bin, dir, testUUID, "firefox-work", boundFile(bin)); err != nil {
 		t.Fatal(err)
 	}
-	calls, _ := os.ReadFile(log)
-	want := "--profile " + dir + " about:blank\n--profile " + dir + " about:blank moz-extension://" + testUUID + "/bind.html#firefox-work\n"
-	if string(calls) != want {
+	if calls, _ := os.ReadFile(log); string(calls) != "--profile "+dir+" about:blank moz-extension://"+testUUID+"/bind.html#firefox-work\n" {
 		t.Fatalf("calls:\n%s", calls)
 	}
 }
 
-func TestBindWithoutUUIDSaysToRestart(t *testing.T) {
-	dir := t.TempDir()
-	bin, _ := fakeFirefox(t, dir)
-	err := Firefox.Bind(bin, dir, "firefox-work", boundFile(bin))
-	if err == nil || !strings.Contains(err.Error(), "restart Firefox") {
-		t.Fatalf("err %v", err)
-	}
-}
-
-func TestBindGivesUpWhenThePageNeverConfirms(t *testing.T) {
-	t.Setenv("FAKE_INSTALL", "1")
+func TestBindSaysWhenTheAddonDoesNotReportIn(t *testing.T) {
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	err := Firefox.Bind(bin, dir, "firefox-work", func(time.Time) bool { return false })
+	err := LibreWolf.Bind(bin, dir, testUUID, "librewolf-work", func(time.Time) bool { return false })
 	calls, _ := os.ReadFile(log)
-	if err == nil || bytes.Count(calls, []byte("bind.html")) != 3 {
+	if err == nil || !strings.Contains(err.Error(), "look at the tab LibreWolf opened") || bytes.Count(calls, []byte("bind.html")) != 1 {
 		t.Fatalf("err %v, calls:\n%s", err, calls)
 	}
 }
@@ -395,5 +380,52 @@ func TestCheckRefusesABrowserItCannotTellApart(t *testing.T) {
 	_, profile := geckoInstall(t, "LibreWolf", "release")
 	if bin, err := (Browser{}).Check(profile); err == nil {
 		t.Fatalf("zero Browser took %s", bin)
+	}
+}
+
+func TestReadStateFromExtensionsJSON(t *testing.T) {
+	uuidPref := `user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"` + testUUID + `\"}");` + "\n"
+	addon := func(fields string) string {
+		return `{"addons":[{"id":"other@x"},{"id":"mirrormark@chriscz.github.io","location":"app-profile","version":"0.1.0",` + fields + `}]}`
+	}
+	for _, c := range []struct {
+		name       string
+		xpi        bool
+		ext, prefs string // "" means no file
+		want       chrome.ProfileState
+		wantUUID   string
+	}{
+		{"no XPI", false, "", "", chrome.ProfileState{State: chrome.NotInstalled}, ""},
+		{"XPI, not started", true, "", "", chrome.ProfileState{State: chrome.NotInstalledYet}, ""},
+		{"no entry", true, `{"addons":[{"id":"other@x"}]}`, "", chrome.ProfileState{State: chrome.NotInstalledYet}, ""},
+		{"entry, no UUID yet", true, addon(`"active":true,"userDisabled":false,"appDisabled":false`), "", chrome.ProfileState{State: chrome.NotInstalledYet}, ""},
+		{"ready", true, addon(`"active":true,"userDisabled":false,"appDisabled":false`), uuidPref, chrome.ProfileState{State: chrome.Ready}, testUUID},
+		{"turned off", true, addon(`"active":false,"userDisabled":true,"appDisabled":false`), uuidPref, chrome.ProfileState{State: chrome.TurnedOff}, testUUID},
+		{"refused", true, addon(`"active":false,"userDisabled":false,"appDisabled":true`), uuidPref, chrome.ProfileState{State: chrome.Refused}, testUUID},
+	} {
+		dir := t.TempDir()
+		if c.xpi {
+			must(t, os.MkdirAll(filepath.Join(dir, "extensions"), 0o755))
+			must(t, os.WriteFile(XPIPath(dir), []byte("xpi"), 0o644))
+		}
+		if c.ext != "" {
+			must(t, os.WriteFile(filepath.Join(dir, "extensions.json"), []byte(c.ext), 0o644))
+		}
+		if c.prefs != "" {
+			must(t, os.WriteFile(filepath.Join(dir, "prefs.js"), []byte(c.prefs), 0o644))
+		}
+		got, uuid, err := ReadState(dir, "0.1.0")
+		if err != nil || got != c.want || uuid != c.wantUUID {
+			t.Errorf("%s: %+v %q %v; want %+v %q", c.name, got, uuid, err, c.want, c.wantUUID)
+		}
+	}
+	// Another build.
+	dir := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(dir, "extensions"), 0o755))
+	must(t, os.WriteFile(XPIPath(dir), []byte("xpi"), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "extensions.json"), []byte(addon(`"active":true`)), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "prefs.js"), []byte(uuidPref), 0o644))
+	if got, _, err := ReadState(dir, "0.2.0"); err != nil || got != (chrome.ProfileState{State: chrome.OldBuild, Version: "0.1.0"}) {
+		t.Errorf("old build: %+v %v", got, err)
 	}
 }

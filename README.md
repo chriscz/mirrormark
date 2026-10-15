@@ -24,9 +24,14 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
    it starts.
-3. Run `mirrormark install` again. It opens a tab in each profile to bind it,
-   waits for the profile to answer, and prints `bound: <profile> -> <id>` or
-   `not bound: ...`.
+3. Run `mirrormark install` again. It first checks each profile's files. In
+   each profile where mirrormark is installed and turned on, it opens a tab
+   once, waits up to 30 seconds for mirrormark to report in, and prints
+   `bound: <profile> -> <id>`. For any other profile it prints
+   `not ready: <profile>: ...`, which says what to do, or
+   `not bound: <profile>: ...`. Chrome records the install in the profile
+   up to half a minute after it starts, so a `not ready` just after a
+   restart means: wait, and run it again.
 4. Export your bookmarks from Chrome (Bookmark manager, Export bookmarks) so
    you have a copy, then edit `~/.config/mirrormark/config.yaml` to share
    folders (see below). Changes appear in the other profiles within a few
@@ -123,12 +128,15 @@ Linux)](#install-google-chrome-on-linux)), with `--browser brave`:
    writes `/opt/brave.com/brave/extensions/<extension id>.json` and the same
    host manifest Chrome uses, so Chrome and Brave share one extension id.
 2. Restart Brave (`pgrep -x brave` shows none left), then run
-   `mirrormark install --browser brave` again to bind the profiles. Profile
-   ids start with `brave-`, labels with `brave/`.
+   `mirrormark install --browser brave` again to bind the profiles. As for
+   Chrome, it opens a tab once only in profiles where mirrormark is
+   installed and turned on, and prints `not ready: ...` with what to do for
+   the others. Brave too records the install up to half a minute after it
+   starts. Profile ids start with `brave-`, labels with `brave/`.
 
 Brave's extensions page may show a Safety Check card saying it can't verify
 where mirrormark comes from; mirrormark stays on. Brave reopens your last
-session when it starts, so a bind tab left from a failed try may open again
+session when it starts, so a bind tab left open may open again
 and bind the profile again to the same database; that is harmless.
 
 After upgrading mirrormark, run `mirrormark install --browser brave` as well
@@ -174,9 +182,14 @@ The binary needs a stable place, as for Chrome.
    a `skipped:` line, unless you name it with `--profile`; start Firefox in it
    once, then run `install` again to add it.
 2. Restart Firefox in those profiles if it is running (close every window).
-3. Run `mirrormark install --browser firefox` again. For each profile it
-   starts Firefox there if it is not running, opens a tab and prints
-   `bound: <profile> -> firefox-<name>`.
+3. Run `mirrormark install --browser firefox` again. It first checks each
+   profile's files. In each profile where Firefox has installed mirrormark
+   and it is turned on, it opens a tab once (starting Firefox there if it
+   is not running), waits up to 30 seconds for mirrormark to report in, and
+   prints `bound: <profile> -> firefox-<name>`. For any other profile it
+   prints `not ready: <profile>: ...`, which says what to do, or
+   `not bound: <profile>: ...`. Firefox installs the add-on when it starts
+   in the profile, so start it there once after step 2 if you have not.
 4. Export your bookmarks from Firefox (Bookmarks, Manage bookmarks, Import
    and Backup), then share folders in `config.yaml` as for Chrome (see
    [Ids, labels and the key](#ids-labels-and-the-key) and
@@ -332,12 +345,16 @@ reaches its host (see [Ids, labels and the key](#ids-labels-and-the-key)).
 
 ### Installing and binding
 
-- **`not bound: <profile>`.** The profile did not answer within three
-  tries. Check that you restarted Chrome after the first `install` and that
-  mirrormark is enabled in `chrome://extensions` in that profile, then run
-  `mirrormark install --profile "<profile>"`. A profile opened for the first
-  time since the install often needs the second or third try; `install`
-  makes them.
+- **`not ready: <profile>`.** The profile's files say mirrormark is not
+  installed there, is turned off, or is another build, so `install` opened
+  nothing there. The line says what to do and which command to run then.
+- **`not bound: <profile>`.** The profile's files say mirrormark is ready,
+  but it did not report in within 30 seconds of the tab opening. Look at the
+  tab the browser opened, then run the command the line gives.
+- **"This page has been blocked by Chrome"** (or by Brave) on a
+  `chrome-extension://` page means the extension is not loaded in that
+  profile, not that the browser blocks mirrormark. Run `mirrormark install`
+  again and follow its `not ready` line.
 - **You removed mirrormark from a profile.** Chrome remembers a **Remove**
   for good in that profile and does not install it there again, even after
   `uninstall` and `install`. (Turning it off is undone by turning it back

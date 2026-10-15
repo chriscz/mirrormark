@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,8 +87,9 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	uddFlag := *udd // as the user gave it, for the commands messages print
 	if fb, ok := firefox.Lookup(*browser); ok {
-		return installFirefox(p, fb, *udd, picks, stdout, stderr)
+		return installFirefox(p, fb, *udd, uddFlag, picks, stdout, stderr)
 	}
 	cb, ok := chrome.Lookup(*browser)
 	if !ok {
@@ -158,13 +160,30 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
 		return 0
 	}
-	fmt.Fprintln(stdout, "Opening a tab in each profile to bind it.")
+	want, err := extension.Version()
+	if err != nil {
+		return fail(err)
+	}
 	code := 0
 	for _, c := range chosen {
+		cmd := again(cb.InstallCommand(), uddFlag, c.Dir)
+		// The external file is current here, so a profile without the
+		// extension is waiting for the browser, not for mirrormark.
+		st, err := chrome.ReadState(filepath.Join(*udd, c.Dir), ext.ID, want, true)
+		if err != nil {
+			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", c.Dir, err)
+			code = 1
+			continue
+		}
+		if st.State != chrome.Ready {
+			fmt.Fprintf(stdout, "not ready: %s: %s.\n", c.Dir, chromiumAdvice(cb, st, want, cmd))
+			code = 1
+			continue
+		}
 		id := ids[c.Dir]
-		bound := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, bound); err != nil {
-			fmt.Fprintf(stdout, "not bound: %s: %v\n", c.Dir, err)
+		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
+		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, reported); err != nil {
+			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", c.Dir, err, cmd)
 			code = 1
 			continue
 		}
@@ -192,7 +211,7 @@ mirrormark uninstall --browser %s sets them back.`, b.Name, b.Config)
 // read add-ons and host manifests from the user's own directories, so no
 // sudo. It refuses profiles of any other browser before writing anything,
 // since those install only signed add-ons.
-func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, stdout, stderr io.Writer) int {
+func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []string, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
@@ -274,13 +293,28 @@ func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, 
 		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run mirrormark install --browser %s again to bind them.\n", b.Name, b.Config)
 		return 0
 	}
-	fmt.Fprintln(stdout, "Opening a tab in each profile to bind it.")
+	want, err := extension.Version()
+	if err != nil {
+		return fail(err)
+	}
 	code := 0
 	for _, tg := range targets {
+		cmd := again("mirrormark install --browser "+b.Config, udd, tg.c.Name)
+		st, uuid, err := firefox.ReadState(tg.dir, want)
+		if err != nil {
+			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", tg.c.Name, err)
+			code = 1
+			continue
+		}
+		if st.State != chrome.Ready {
+			fmt.Fprintf(stdout, "not ready: %s: %s.\n", tg.c.Name, geckoAdvice(b, st, want, cmd))
+			code = 1
+			continue
+		}
 		id := ids[tg.dir]
-		bound := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := b.Bind(tg.bin, tg.dir, id, bound); err != nil {
-			fmt.Fprintf(stdout, "not bound: %s: %v\n", tg.c.Name, err)
+		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
+		if err := b.Bind(tg.bin, tg.dir, uuid, id, reported); err != nil {
+			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", tg.c.Name, err, cmd)
 			code = 1
 			continue
 		}
@@ -290,6 +324,53 @@ func installFirefox(p db.Paths, b firefox.Browser, root string, picks []string, 
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), b.Name, p.LogFile())
 	}
 	return code
+}
+
+// again is the command that runs install for one profile again, as
+// messages tell the user to type it.
+func again(base, udd, id string) string {
+	s := base
+	if udd != "" {
+		s += " --user-data-dir " + quoteArg(udd)
+	}
+	return s + " --profile " + quoteArg(id)
+}
+
+// quoteArg puts double quotes around an argument a shell would split or
+// expand.
+func quoteArg(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") == "" {
+		return s
+	}
+	return strconv.Quote(s)
+}
+
+// chromiumAdvice says why a Chromium profile is not ready and what to do.
+func chromiumAdvice(b chrome.Browser, s chrome.ProfileState, want, again string) string {
+	switch s.State {
+	case chrome.NeverRun:
+		return fmt.Sprintf("%s has never opened this profile; open it in %s once, then run %s", b.Name, b.Name, again)
+	case chrome.Removed:
+		return fmt.Sprintf("you removed mirrormark from this profile, and %s will not install it there again. Run mirrormark unpack, turn on Developer mode in %s, choose Load unpacked and pick the folder it prints, then run %s", b.Name, b.ExtensionsPage, again)
+	case chrome.TurnedOff:
+		return fmt.Sprintf("mirrormark is turned off in this profile. Turn it on in %s, wait half a minute, then run %s", b.ExtensionsPage, again)
+	case chrome.OldBuild:
+		return fmt.Sprintf("this profile runs mirrormark %s, not %s. Quit %s completely (close every window) and start it again, then run %s", s.Version, want, b.Name, again)
+	}
+	return fmt.Sprintf("%s has not installed mirrormark in this profile yet. Quit %s completely (close every window), start it again and open this profile, wait half a minute, then run %s", b.Name, b.Name, again)
+}
+
+// geckoAdvice says why a Gecko profile is not ready and what to do.
+func geckoAdvice(b firefox.Browser, s chrome.ProfileState, want, again string) string {
+	switch s.State {
+	case chrome.TurnedOff:
+		return "mirrormark is turned off in this profile. Turn it on in about:addons, then run " + again
+	case chrome.Refused:
+		return fmt.Sprintf("%s refuses mirrormark in this profile because it is not signed. Check that the profile's user.js sets xpinstall.signatures.required to false, restart %s there, then run %s", b.Name, b.Name, again)
+	case chrome.OldBuild:
+		return fmt.Sprintf("this profile runs mirrormark %s, not %s. Quit %s in this profile (close every window) and start it there again, then run %s", s.Version, want, b.Name, again)
+	}
+	return fmt.Sprintf("%s has not installed mirrormark in this profile yet. Quit %s if it runs in this profile (close every window) and start it there again, then run %s", b.Name, b.Name, again)
 }
 
 // selfPath returns the path of this executable with symlinks resolved.

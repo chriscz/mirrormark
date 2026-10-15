@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chriscz/mirrormark/extension"
+	"github.com/chriscz/mirrormark/internal/chrome"
 	"github.com/chriscz/mirrormark/internal/db"
 	"github.com/chriscz/mirrormark/internal/firefox"
 )
@@ -203,10 +206,11 @@ func (e *Env) mm(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// bind runs install for name's profile and returns the database it bound
-// to. install names a Chrome profile by its directory, Default, and a
-// Firefox profile by its name.
+// bind waits until name's profile is ready, then runs install for it and
+// returns the database it bound to. install names a Chrome profile by its
+// directory, Default, and a Firefox profile by its name.
 func (e *Env) bind(name string) string {
+	e.ready(name)
 	out := e.mm(e.t, e.installArgs(name)...)
 	profile := "Default"
 	if e.kind(name) == "firefox" {
@@ -217,6 +221,44 @@ func (e *Env) bind(name string) string {
 		e.t.Fatalf("install did not bind %s:\n%s", name, out)
 	}
 	return m[1]
+}
+
+// ready waits until name's profile files say mirrormark is ready there,
+// which is what install checks before it opens the bind page. Chromium
+// writes Preferences up to about 20 seconds after it installs the
+// extension; Gecko within a second or two.
+func (e *Env) ready(name string) {
+	e.t.Helper()
+	want, err := extension.Version()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	eventually(e.t, 40*time.Second, name+"'s files to show mirrormark ready", func() bool {
+		if e.kind(name) == "firefox" {
+			s, _, err := firefox.ReadState(e.udd(name), want)
+			return err == nil && s.State == chrome.Ready
+		}
+		s, err := chrome.ReadState(filepath.Join(e.udd(name), "Default"), e.ExtID, want, true)
+		return err == nil && s.State == chrome.Ready
+	})
+}
+
+// mmExit runs mirrormark like mm, but returns a failing run's output and
+// exit code instead of failing the test.
+func (e *Env) mmExit(t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env, cmd.Stdin = e.env, strings.NewReader("")
+	out, err := cmd.CombinedOutput()
+	t.Logf("mirrormark %s:\n%s", strings.Join(args, " "), out)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return string(out), exit.ExitCode()
+	}
+	if err != nil {
+		t.Fatalf("mirrormark %v: %v", args, err)
+	}
+	return string(out), 0
 }
 
 func (e *Env) label(id string) string {

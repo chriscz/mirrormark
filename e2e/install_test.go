@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/chriscz/mirrormark/extension"
-	"github.com/chriscz/mirrormark/internal/chrome"
 	"github.com/chriscz/mirrormark/internal/db"
 )
 
@@ -92,23 +91,31 @@ func TestInstallAndBind(t *testing.T) {
 	})
 }
 
-// TestBindStartsChrome follows a user who closes Chrome as the first pass
-// asks and runs install again without opening it: install starts Chrome
-// itself. That is the profile's first start with the extension, when the
-// first bind tab can load before the extension and Bind has to retry.
+// TestBindStartsChrome follows a user who runs install's second pass
+// before Chrome has installed the extension in the profile: install says
+// so and opens nothing. Once Chrome has run there and closed, install
+// starts Chrome itself, opens the page once and binds.
 func TestBindStartsChrome(t *testing.T) {
 	e := newEnv(t)
 	e.firstInstall(t)
 	e.noSandbox(t)
+	out, code := e.mmExit(t, e.installArgs("a")...)
+	if code != 1 || !strings.Contains(out, "not ready: Default: Chrome has not installed mirrormark in this profile yet.") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if _, err := os.Lstat(filepath.Join(e.udd("a"), "SingletonLock")); err == nil {
+		t.Fatal("install started Chrome in a profile that was not ready")
+	}
+	// The user starts Chrome, which installs the extension, and quits it,
+	// which writes Preferences at once.
+	a := e.launch("a")
+	e.open(t, a)
+	a.Close()
 	t.Cleanup(func() { stopChrome(t, e.udd("a")) })
 	start := time.Now()
 	id := e.bind("a")
-	// Logged, not asserted: whether the first tab loses the race to the
-	// extension is up to Chrome, and no test can make it lose. The unit
-	// tests of Bind cover the retry itself.
-	t.Logf("bound in %v; retried: %v", time.Since(start).Round(time.Millisecond), time.Since(start) > chrome.BindWait)
+	t.Logf("bound in %v with one open", time.Since(start).Round(time.Millisecond))
 	stopChrome(t, e.udd("a"))
-
 	e.A = e.launch("a")
 	e.open(t, e.A)
 	if got := eval[string](t, e.A, `chrome.storage.local.get("db").then((r) => r.db)`); got != id {
@@ -161,14 +168,30 @@ func TestFirefoxInstallAndBind(t *testing.T) {
 	}
 }
 
-// TestFirefoxBindStartsFirefox: install starts a profile's Firefox itself
-// when it is closed, waits for the UUID and binds it.
+// TestFirefoxBindStartsFirefox follows a user who runs install's second
+// pass before Firefox has started in the profile since the first: install
+// says so and opens nothing. Once Firefox has run there and closed,
+// install starts Firefox itself, opens the page once and binds.
 func TestFirefoxBindStartsFirefox(t *testing.T) {
 	e := newEnv(t)
 	e.kinds = map[string]string{"a": "firefox", "b": "firefox"}
 	e.firstInstall(t)
+	out, code := e.mmExit(t, e.installArgs("a")...)
+	if code != 1 || !strings.Contains(out, "not ready: a: Firefox Developer Edition has not installed mirrormark in this profile yet.") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if firefoxPID(t, e.udd("a")) != 0 {
+		t.Fatal("install started Firefox in a profile that was not ready")
+	}
+	// The user starts Firefox, which installs the add-on and records its
+	// UUID, and quits it.
+	a := e.launch("a")
+	e.open(t, a)
+	a.Close()
 	t.Cleanup(func() { stopFirefox(t, e.udd("a")) })
+	start := time.Now()
 	id := e.bind("a")
+	t.Logf("bound in %v with one open", time.Since(start).Round(time.Millisecond))
 	stopFirefox(t, e.udd("a"))
 	e.A = e.launch("a")
 	e.open(t, e.A)
@@ -177,20 +200,31 @@ func TestFirefoxBindStartsFirefox(t *testing.T) {
 	}
 }
 
-// stopFirefox quits a Firefox the test did not start, as stopChrome does.
-// The profile's lock is a symlink to "<ip>:+<pid>".
-func stopFirefox(t *testing.T, dir string) {
+// firefoxPID is the pid of the Firefox running in the profile, or 0. The
+// profile's lock is a symlink to "<ip>:+<pid>", which Firefox leaves
+// behind when it exits.
+func firefoxPID(t *testing.T, dir string) int {
 	t.Helper()
 	lock := filepath.Join(dir, "lock")
 	target, err := os.Readlink(lock)
 	if err != nil {
-		return // never started
+		return 0 // never started
 	}
 	pid, err := strconv.Atoi(target[strings.LastIndexByte(target, '+')+1:])
 	if err != nil {
 		t.Fatalf("%s: %v", lock, err)
 	}
 	if exited(pid) {
+		return 0
+	}
+	return pid
+}
+
+// stopFirefox quits a Firefox the test did not start, as stopChrome does.
+func stopFirefox(t *testing.T, dir string) {
+	t.Helper()
+	pid := firefoxPID(t, dir)
+	if pid == 0 {
 		return
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
