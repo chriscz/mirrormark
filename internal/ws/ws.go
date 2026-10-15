@@ -318,6 +318,11 @@ func (c *Conn) payload(buf []byte, n int, mask *[4]byte) ([]byte, error) {
 	return buf, nil
 }
 
+// SetReadLimit sets the largest message Read accepts, from the next Read
+// on; a frame that claims more is refused with 1009 before its payload is
+// read. Call it between Reads, not during one.
+func (c *Conn) SetReadLimit(max int) { c.max = max }
+
 // SetReadDeadline sets when a Read that is waiting gives up, with an
 // error that matches os.ErrDeadlineExceeded. The zero time means never.
 // A Read that gave up may have stopped inside a frame, so close the

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -645,4 +646,34 @@ func FuzzRead(f *testing.F) {
 			t.Fatalf("allocated %d bytes for %d bytes of input", n, len(data))
 		}
 	})
+}
+
+// SetReadLimit changes the largest message Read takes from the next Read
+// on. A header that claims more is refused at once, before any of its
+// payload is read or buffered.
+func TestSetReadLimit(t *testing.T) {
+	addr, got := serve(t, 1<<20, func(c *ws.Conn) error {
+		c.SetReadLimit(10)
+		if m, err := c.Read(); err != nil || string(m) != "short" {
+			return fmt.Errorf("first Read: %q %v", m, err)
+		}
+		c.SetReadLimit(1 << 20)
+		if m, err := c.Read(); err != nil || len(m) != 100 {
+			return fmt.Errorf("second Read: %d bytes, %v", len(m), err)
+		}
+		c.SetReadLimit(10)
+		_, err := c.Read()
+		return err
+	})
+	nc, br := raw(t, addr)
+	frame(nc, 0x81, []byte("short"), true)
+	frame(nc, 0x81, bytes.Repeat([]byte("x"), 100), true)
+	// 1 MB claimed, masked, and no payload sent.
+	nc.Write([]byte{0x81, 0xff, 0, 0, 0, 0, 0, 0x10, 0, 0, 1, 2, 3, 4})
+	if code := closeCode(t, br); code != 1009 {
+		t.Fatalf("close code %d", code)
+	}
+	if err := wait(t, got); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("server Read: %v", err)
+	}
 }

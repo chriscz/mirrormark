@@ -1,7 +1,9 @@
 package host
 
 import (
+	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,5 +48,20 @@ func TestWSConnReadAfterOwnCloseIsEOF(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Read did not return after close")
+	}
+}
+
+// A handshake that arrives while Serve shuts down is turned away, so Serve
+// never waits for a host that started after it began to.
+func TestServerRefusesHandshakesOnceShuttingDown(t *testing.T) {
+	sv := &server{ctx: context.Background(), o: Options{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, addr: "127.0.0.1:1"}
+	sv.hosts.closeAndWait()
+	rec := httptest.NewRecorder()
+	sv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1/", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", rec.Code)
+	}
+	if sv.hosts.enter() {
+		t.Fatal("a closed group let a handler in")
 	}
 }

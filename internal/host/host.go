@@ -89,10 +89,21 @@ func Run(ctx context.Context, c Conn, o Options) error {
 	if o.Poll == 0 {
 		o.Poll = time.Second
 	}
+	// Ends the reader when Run returns, not only when the caller's ctx
+	// does: a server outlives each of its hosts.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	msgs := make(chan Msg)
 	readErr := make(chan error, 1)
+	// Until the host runs for a database, the reader takes one message at
+	// a time and waits until it is handled: the proof may change how the
+	// connection reads (a server's limit on message size), and the
+	// extension sends its tree straight after the proof. handled says
+	// whether the host now runs.
+	handled := make(chan bool)
 	go func() {
 		defer close(msgs)
+		gated := true
 		for {
 			m, err := c.Read()
 			if err != nil {
@@ -104,8 +115,17 @@ func Run(ctx context.Context, c Conn, o Options) error {
 			case <-ctx.Done():
 				return
 			}
+			if gated {
+				select {
+				case running := <-handled:
+					gated = !running
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}()
+	gated := true
 	s := &state{o: o, msgs: msgs, conn: c, files: map[string]stamp{}}
 	defer func() {
 		if s.unlock != nil {
@@ -131,6 +151,14 @@ func Run(ctx context.Context, c Conn, o Options) error {
 			}
 			if err := s.handle(m); err != nil {
 				return err
+			}
+			if gated {
+				gated = s.self == ""
+				select {
+				case handled <- !gated:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		case now := <-tick.C:
 			if s.fresh && (s.retry && !now.Before(s.next) || s.filesChanged()) {
@@ -167,16 +195,19 @@ func (s *state) handle(m Msg) error {
 	if m.V != Version {
 		return s.fail("unsupported-version", fmt.Sprintf("protocol version %d is not %d; restart the browser after upgrading mirrormark", m.V, Version))
 	}
+	// Until a hello (and, through the server, a proof) names the database,
+	// the peer is nobody: what else it sends changes nothing and is not
+	// logged in its words.
+	if s.self == "" && m.Type != "hello" && m.Type != "proof" {
+		s.o.Log.Debug("message before the host runs ignored", "type", m.Type)
+		return nil
+	}
 	switch m.Type {
 	case "hello":
 		return s.hello(m)
 	case "proof":
 		return s.proof(m)
 	case "tree":
-		if s.self == "" {
-			s.o.Log.Debug("tree before hello ignored")
-			return nil
-		}
 		live, err := round.Build(m.Nodes)
 		if err != nil {
 			s.o.Log.Warn("bad tree", "err", err)
@@ -252,8 +283,9 @@ func (s *state) accept(id, browser string) error {
 // pending is a hello waiting for the extension's proof.
 type pending struct{ db, browser, token, nonce string }
 
-// nonceRe is a nonce as both sides write it: 32 random bytes in hex.
-var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// hex32 is 32 random bytes in lowercase hex, as both sides write a nonce
+// and install writes a token.
+var hex32 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // challenge answers a hello through the server. The connection came from
 // the database's origin, but any program can send any Origin, and in
@@ -265,9 +297,14 @@ var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 func (s *state) challenge(m Msg) error {
 	d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
 	if err != nil {
-		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s: %v", m.DB, err))
+		// The details are for the log: the peer has proven nothing yet.
+		s.o.Log.Warn("cannot read the database file", "db", m.DB, "err", err)
+		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s; run mirrormark install", m.DB))
 	}
-	if d.Profile.Token == "" || d.Profile.Origin != s.o.Origin || !nonceRe.MatchString(m.Nonce) {
+	if d.Profile.Token != "" && !hex32.MatchString(d.Profile.Token) {
+		s.o.Log.Warn("the token in the database file is malformed; install writes 64 lowercase hex digits", "db", m.DB)
+	}
+	if !hex32.MatchString(d.Profile.Token) || d.Profile.Origin != s.o.Origin || !hex32.MatchString(m.Nonce) {
 		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
 	}
 	b := make([]byte, 32)

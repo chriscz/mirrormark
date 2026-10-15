@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -102,6 +103,8 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 	exited := make(chan struct{})
 	go func() {
 		e.done <- host.Run(ctx, host.Stream(hr, hw), ho)
+		// As a host process's stdin and stdout close when it exits.
+		hr.Close()
 		hw.Close()
 		close(exited)
 	}()
@@ -686,7 +689,7 @@ func TestTreeBeforeHelloIsIgnored(t *testing.T) {
 	e := start(t, p, "a", fakebrowser.New(), extOpts{log: log, noHello: true})
 	e.sendTree()
 	eventually(t, "the debug line", func() bool {
-		return strings.Contains(log.String(), `level=DEBUG msg="tree before hello ignored"`)
+		return strings.Contains(log.String(), `level=DEBUG msg="message before the host runs ignored" type=tree`)
 	})
 	if applies, rounds := e.count(); applies != 0 || rounds != 0 {
 		t.Fatalf("%d applies and %d rounds before hello", applies, rounds)
@@ -717,4 +720,33 @@ func TestRoundWaitsForTheGlobalLock(t *testing.T) {
 	}
 	release()
 	eventually(t, "the member folder", func() bool { return e.has("Work") })
+}
+
+// readers counts the goroutines that read a connection for Run.
+func readers() int {
+	buf := make([]byte, 1<<20)
+	return strings.Count(string(buf[:runtime.Stack(buf, true)]), "internal/host.Run.func1(")
+}
+
+// A host that stops on an error lets go of its connection's reader, even
+// while the server that started it goes on: a message that arrives after
+// the error must not hold a goroutine and its memory until then.
+func TestStoppedHostLeavesNoReader(t *testing.T) {
+	before := readers()
+	hr, ew := io.Pipe()
+	er, hw := io.Pipe()
+	go io.Copy(io.Discard, er)
+	done := make(chan error, 1)
+	go func() {
+		done <- host.Run(context.Background(), host.Stream(hr, hw), host.Options{Paths: paths(t), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	}()
+	host.WriteMsg(ew, host.Msg{V: host.Version, Type: "hello", DB: "nope"})
+	if err := <-done; err == nil {
+		t.Fatal("host kept running")
+	}
+	// Nothing may be left to read it, so the write may never finish.
+	go host.WriteMsg(ew, host.Msg{V: host.Version, Type: "error", Message: strings.Repeat("x", 512<<10)})
+	eventually(t, "the reader to exit", func() bool { return readers() <= before })
+	hr.Close()
+	hw.Close()
 }
