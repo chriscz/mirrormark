@@ -10,18 +10,18 @@
 
 **Spec:** [`../0001_local-bookmark-sync-host.md`](../0001_local-bookmark-sync-host.md), Section 11 and Phase 8, with its edits to Sections 1, 2, 5–9. Findings: [`localhost-transport-spike.md`](localhost-transport-spike.md).
 
-**Where this goes:** after [`plan-profile-selection.md`](plan-profile-selection.md) (done). It replaces Tasks 7–8 of [`plan-brave-librewolf.md`](plan-brave-librewolf.md), which had not run: they are Tasks 9 and 10 here, on the new transport, and that plan points here.
+**Where this goes:** after [`plan-profile-selection.md`](plan-profile-selection.md) (done). It replaces Tasks 7–8 of [`plan-brave-librewolf.md`](plan-brave-librewolf.md), which had not run: they are Tasks 8 and 9 here, on the new transport, and that plan points here.
 
 ## Global Constraints
 
 - Everything in the earlier plans' Global Constraints still holds: `bin/dev run make` only; no `any` values or unchecked type assertions; no RFC numbers, section references or `docs/rfcs/` links in code, comments, tests or build files; README updated in the same commit; every commit carries `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - **Every commit** passes `bin/dev run make` and `bin/dev run make check-e2e`.
-- **No prefix leaves users without a transport.** Tasks 1–6 change nothing the extension uses: native messaging works throughout. Task 7 switches the extension, the protocol, `install`'s bind check and the e2e harness in **one commit**, because none of them can land without the others. Task 8 removes native messaging only after that.
+- **No prefix leaves users without a transport.** Tasks 1–5 change nothing the extension uses: native messaging works throughout. Task 6 switches the extension, the protocol, `install`'s bind check and the e2e harness in **one commit**, because none of them can land without the others. Task 7 removes native messaging only after that.
 - **Ports, exactly:** `[61959, 63018, 63454]`, in `extension/ports.json`, read by `extension.Ports()` and by `background.js`. Nowhere else in production code.
 - **Bind on `127.0.0.1` only.** No other address, no `localhost`.
 - **Limits:** messages to the extension ≤ `maxOut` (1 MB), from it ≤ `maxIn` (64 MB), as today.
 - **Ping:** `{"v": <Version>, "type": "ping"}` every 20 s per connection (`Options.Ping`, default `20 * time.Second`).
-- **Protocol version** stays 1 until Task 7, which makes it 2.
+- **Protocol version** stays 1. The new extension only dials the server and the old one only uses native messaging, so no peer of one ever meets the other and a bump would never be checked.
 - **Profile block fields:** `origin` (`chrome-extension://<id>` or `moz-extension://<uuid>`, no trailing slash) and `token` (64 lowercase hex digits from 32 bytes of `crypto/rand`), both `omitempty`.
 - **Bind URL fragment:** `#<db>.<token>`.
 - **Error code** for a wrong origin, a database with no token, a malformed nonce or a wrong proof: `bad-token`.
@@ -36,32 +36,32 @@
 ```
 extension/
   ports.json          the three ports (Task 3)
-  embed.go            Ports() (Task 3); HostName goes (Task 8)
-  bind.js             stores db and token (Task 5)
-  background.js       WebSocket client (Task 7)
-  manifest.json       CSP, no nativeMessaging, 0.2.0 (Task 7)
+  embed.go            Ports() (Task 3); HostName goes (Task 7)
+  bind.js             stores db and token (Task 4)
+  background.js       WebSocket client (Task 6)
+  manifest.json       CSP, no nativeMessaging, 0.2.0 (Task 6)
 internal/ws/
   ws.go               Upgrade, Dial, Conn.Read/Write/Close (Task 2)
   ws_test.go
 internal/host/
   protocol.go         Conn, encode/decode, Msg.Nonce/Proof (Tasks 1, 3); Stream,
-                      ReadMsg, WriteMsg go (Task 8)
+                      ReadMsg, WriteMsg go (Task 7)
   host.go             Run(ctx, Conn, Options); the challenge (Tasks 1, 3)
   server.go           Listen, Serve, admit, wsConn (Task 3)
   server_test.go
 internal/db/
   types.go            Profile.Origin, Profile.Token (Task 3)
   paths.go            ServeLock (Task 3)
-  bind.go             Bind (Task 5)
+  bind.go             Bind (Task 4)
 cmd/mirrormark/
-  main.go             serve (Task 3), log rotation (Task 4); host mode goes (Task 8)
+  main.go             serve (Task 3); host mode goes (Task 7)
   service.go          unit, startServer, serverRunning, stopServer,
-                      serviceUsers (Tasks 6, 7)
-  install.go          token hand-off (Task 5), service (Task 6), bind check
-                      (Task 7), old host manifests (Task 8)
-internal/chrome/      Bind takes a token (Task 5); one system file (Task 8)
-internal/firefox/     Bind takes a token (Task 5); no host manifest (Task 8)
-e2e/                  harness starts serve (Task 7); Brave and LibreWolf (Tasks 9, 10)
+                      serviceUsers (Tasks 5, 6)
+  install.go          token hand-off (Task 4), service (Task 5), bind check
+                      (Task 6), old host manifests (Task 7)
+internal/chrome/      Bind takes a token (Task 4); one system file (Task 7)
+internal/firefox/     Bind takes a token (Task 4); no host manifest (Task 7)
+e2e/                  harness starts serve (Task 6); Brave and LibreWolf (Tasks 8, 9)
 ```
 
 ## Interfaces between tasks
@@ -73,7 +73,7 @@ type Conn interface {
 	Write(Msg) error
 }
 func Run(ctx context.Context, c Conn, o Options) error
-func Stream(r io.Reader, w io.Writer) Conn // native messaging framing; gone in Task 8
+func Stream(r io.Reader, w io.Writer) Conn // native messaging framing; gone in Task 7
 func encode(m Msg) ([]byte, error)         // JSON, refuses over maxOut
 func decode(b []byte) (Msg, error)
 
@@ -100,20 +100,20 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error
 // extension (Task 3)
 func Ports() ([]int, error)
 
-// internal/db (Tasks 3, 5)
+// internal/db (Tasks 3, 4)
 func (p Paths) ServeLock() string
 func Bind(p Paths, id, origin string) (token string, err error)
 
-// internal/chrome, internal/firefox (Task 5)
+// internal/chrome, internal/firefox (Task 4)
 func (b chrome.Browser) Bind(bin, userDataDir, profileDir, extID, dbID, token string, reported func(time.Time) bool) error
 func (b firefox.Browser) Bind(bin, profileDir, uuid, dbID, token string, reported func(time.Time) bool) error
 
-// cmd/mirrormark (Tasks 6, 7)
+// cmd/mirrormark (Tasks 5, 6)
 var runSystemctl func(args ...string) error
-func startServer(p db.Paths, self string, restart bool, stdout io.Writer) error
+func startServer(p db.Paths, self string, stdout io.Writer) error
 func stopServer(p db.Paths, users []string, stdout io.Writer) error
 func serviceUsers(p db.Paths, browser string, stderr io.Writer) []string
-func serverRunning(p db.Paths) bool // Task 7
+func serverRunning(p db.Paths) bool // Task 6
 ```
 
 ## Tasks
@@ -123,13 +123,12 @@ func serverRunning(p db.Paths) bool // Task 7
 | 1 | `refactor(rfc-0001): run the host over a message connection` |
 | 2 | `feat(rfc-0001): a standard-library WebSocket server` |
 | 3 | `feat(rfc-0001): serve extension connections on 127.0.0.1 [new feature]` |
-| 4 | `fix(rfc-0001): rotate the log while mirrormark runs [pre-existing]` |
-| 5 | `feat(rfc-0001): hand each bound profile a token` |
-| 6 | `feat(rfc-0001): run mirrormark serve as a systemd user service [new feature]` |
-| 7 | `feat(rfc-0001): connect the extension to mirrormark serve` |
-| 8 | `refactor(rfc-0001): remove native messaging` |
-| 9 | `test(rfc-0001): install and bind Brave and LibreWolf end to end` |
-| 10 | `test(rfc-0001): run the sync tests between Brave and LibreWolf` |
+| 4 | `feat(rfc-0001): hand each bound profile a token` |
+| 5 | `feat(rfc-0001): run mirrormark serve as a systemd user service [new feature]` |
+| 6 | `feat(rfc-0001): connect the extension to mirrormark serve` |
+| 7 | `refactor(rfc-0001): remove native messaging` |
+| 8 | `test(rfc-0001): install and bind Brave and LibreWolf end to end` |
+| 9 | `test(rfc-0001): run the sync tests between Brave and LibreWolf` |
 
 ---
 
@@ -1275,7 +1274,7 @@ func (c *wsConn) close() {
 }
 ```
 
-Change the host package comment's first sentence to: "Package host runs sync rounds for one extension connection, and Serve accepts the connections." Keep native messaging in the comment ("or as the native messaging host Chrome starts") until Task 8.
+Change the host package comment's first sentence to: "Package host runs sync rounds for one extension connection, and Serve accepts the connections." Keep native messaging in the comment ("or as the native messaging host Chrome starts") until Task 7.
 
 - [ ] **Step 7: The command.** In `main.go`, add `serve` to `usageText` (`  serve       Run the server the extensions connect to`), the switch case `case "serve": return cmdServe(args[1:], stderr)`, and pull the log opening out of `cmdHost` so both use it:
 
@@ -1382,111 +1381,7 @@ func TestServeRunsOncePerUser(t *testing.T) {
 
 ---
 
-### Task 4: Rotate the log while mirrormark runs
-
-`TASKS.md` records that the log rotates only when a host starts. A server runs for a whole session, so its log would never rotate.
-
-**Files:**
-- Modify: `cmd/mirrormark/main.go` (`openLog`, `rotate`), `cmd/mirrormark/main_test.go`, `TASKS.md`, `README.md` (Files)
-
-- [ ] **Step 1: Failing test** in `main_test.go`:
-
-```go
-// The log moves to log.1 once it grows over 1 MiB, not only at start.
-func TestLogRotatesWhileRunning(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "log")
-	w, err := openRotating(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
-	line := []byte(strings.Repeat("x", 1023) + "\n")
-	for range 1100 { // a little over 1 MiB
-		if _, err := w.Write(line); err != nil {
-			t.Fatal(err)
-		}
-	}
-	old, err1 := os.Stat(path + ".1")
-	cur, err2 := os.Stat(path)
-	if err1 != nil || err2 != nil || old.Size() > maxLog || cur.Size() >= old.Size() {
-		t.Fatalf("log.1 %v %v, log %v %v", old, err1, cur, err2)
-	}
-}
-```
-
-- [ ] **Step 2: Run** `bin/dev run go test ./cmd/mirrormark/ -run TestLogRotatesWhileRunning` → FAIL (`openRotating` undefined).
-
-- [ ] **Step 3: Implement** in `main.go`, replacing `rotate` and the `os.OpenFile` in `openLog`:
-
-```go
-// rotating appends to the log and moves it to log.1, replacing the one
-// before, before a write would take it over maxLog. Each host process
-// keeps its own count, so while native hosts run beside each other the
-// limit is approximate.
-type rotating struct {
-	mu   sync.Mutex
-	path string
-	f    *os.File
-	size int64
-}
-
-// openRotating opens the log at path, first moving it to log.1 if it is
-// already over maxLog, as a starting host always did.
-func openRotating(path string) (*rotating, error) {
-	if info, err := os.Stat(path); err == nil && info.Size() > maxLog {
-		if err := os.Rename(path, path+".1"); err != nil {
-			return nil, err
-		}
-	}
-	r := &rotating{path: path}
-	return r, r.open()
-}
-
-func (r *rotating) open() error {
-	f, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return err
-	}
-	r.f, r.size = f, info.Size()
-	return nil
-}
-
-func (r *rotating) Write(b []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.size > 0 && r.size+int64(len(b)) > maxLog {
-		r.f.Close()
-		// If the rename fails, keep writing to the same file rather than
-		// losing lines; the next write tries again.
-		os.Rename(r.path, r.path+".1")
-		if err := r.open(); err != nil {
-			return 0, err
-		}
-	}
-	n, err := r.f.Write(b)
-	r.size += int64(n)
-	return n, err
-}
-
-func (r *rotating) Close() error { return r.f.Close() }
-```
-
-`openLog` returns `(*slog.Logger, io.Closer, error)` and builds the handler on `openRotating(p.LogFile())`. Delete `rotate`. `TestHostRotatesALargeLog` keeps passing, since `openRotating` still rotates a large log when it opens it. `openLog` returns the rename error as before; the caller cannot log it, because the log is what failed to open. Update `maxLog`'s comment: "the size above which the log moves to log.1".
-
-- [ ] **Step 4: Run** `bin/dev run make` → PASS.
-
-- [ ] **Step 5: TASKS.md and README.** Move "The host log grows within one session" out of Open; the repository keeps no Done section, so delete the entry. In README's Files table: "Over 1 MiB, it moves to `log.1`, replacing the one before."
-
-- [ ] **Step 6: Commit** `fix(rfc-0001): rotate the log while mirrormark runs [pre-existing]`.
-
----
-
-### Task 5: Hand each bound profile a token
+### Task 4: Hand each bound profile a token
 
 **Files:**
 - Create: `internal/db/bind.go`, `internal/db/bind_test.go`
@@ -1639,7 +1534,7 @@ func tokenOf(t *testing.T, p db.Paths, id string) string {
 
 ---
 
-### Task 6: `mirrormark serve` as a systemd user service
+### Task 5: `mirrormark serve` as a systemd user service
 
 **Files:**
 - Create: `cmd/mirrormark/service.go`, `cmd/mirrormark/service_test.go`
@@ -1692,17 +1587,13 @@ func fakeSystemctl(t *testing.T, fail string) *[]string {
 }
 
 func TestUnit(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", "/x/my data")
-	t.Setenv("XDG_STATE_HOME", "relative") // not absolute: ignored, as DefaultPaths does
-	t.Setenv("XDG_CONFIG_HOME", "")
-	got := string(unit("/opt/mirror mark/mirrormark"))
+	got := string(unit("/opt/mirror mark/100%/mirrormark"))
 	want := `# Written by mirrormark install; mirrormark uninstall removes it.
 [Unit]
 Description=mirrormark bookmark sync
 
 [Service]
-ExecStart="/opt/mirror mark/mirrormark" serve
-Environment="XDG_DATA_HOME=/x/my data"
+ExecStart="/opt/mirror mark/100%%/mirrormark" serve
 Restart=on-failure
 
 [Install]
@@ -1713,30 +1604,23 @@ WantedBy=default.target
 	}
 }
 
+// Every run restarts the server, so it runs the binary just installed.
 func TestStartServer(t *testing.T) {
 	p := testHome(t)
 	calls := fakeSystemctl(t, "")
 	var out bytes.Buffer
-	if err := startServer(p, "/bin/mirrormark", false, &out); err != nil {
-		t.Fatal(err)
-	}
-	// A new unit restarts the server, which may run the old build.
-	if want := []string{"daemon-reload", "enable mirrormark.service", "restart mirrormark.service"}; !slices.Equal(*calls, want) {
-		t.Fatalf("calls %q", *calls)
+	for range 2 {
+		*calls = nil
+		if err := startServer(p, "/bin/mirrormark", &out); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"daemon-reload", "enable mirrormark.service", "restart mirrormark.service"}; !slices.Equal(*calls, want) {
+			t.Fatalf("calls %q", *calls)
+		}
 	}
 	data, err := os.ReadFile(unitPath(p))
 	if err != nil || !bytes.Contains(data, []byte("ExecStart=/bin/mirrormark serve\n")) {
 		t.Fatalf("unit %q, %v", data, err)
-	}
-	*calls = nil
-	startServer(p, "/bin/mirrormark", false, &out)
-	if want := []string{"daemon-reload", "enable mirrormark.service", "start mirrormark.service"}; !slices.Equal(*calls, want) {
-		t.Fatalf("unchanged unit: calls %q", *calls)
-	}
-	*calls = nil
-	startServer(p, "/bin/mirrormark", true, &out)
-	if (*calls)[2] != "restart mirrormark.service" {
-		t.Fatalf("a new build: calls %q", *calls)
 	}
 }
 
@@ -1744,7 +1628,7 @@ func TestStartServerWithoutSystemd(t *testing.T) {
 	p := testHome(t)
 	fakeSystemctl(t, "daemon-reload")
 	var out bytes.Buffer
-	if err := startServer(p, "/bin/mirrormark", false, &out); err != nil {
+	if err := startServer(p, "/bin/mirrormark", &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Keep this running instead") || !strings.Contains(out.String(), "/bin/mirrormark serve") {
@@ -1756,7 +1640,7 @@ func TestStopServer(t *testing.T) {
 	p := testHome(t)
 	calls := fakeSystemctl(t, "")
 	var out bytes.Buffer
-	startServer(p, "/bin/mirrormark", false, &out)
+	startServer(p, "/bin/mirrormark", &out)
 	*calls = nil
 	if err := stopServer(p, []string{"Firefox Developer Edition"}, &out); err != nil {
 		t.Fatal(err)
@@ -1831,37 +1715,22 @@ func unitQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
-// unit is the user unit that runs self as the server. It carries the XDG
-// variables install sees, so the server finds the same files.
+// unit is the user unit that runs self as the server. It sets no
+// environment: systemd's user manager supplies it.
 func unit(self string) []byte {
-	var b strings.Builder
-	b.WriteString("# Written by mirrormark install; mirrormark uninstall removes it.\n[Unit]\nDescription=mirrormark bookmark sync\n\n[Service]\n")
-	fmt.Fprintf(&b, "ExecStart=%s serve\n", unitQuote(self))
-	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-		if x := os.Getenv(v); filepath.IsAbs(x) {
-			fmt.Fprintf(&b, "Environment=%s\n", unitQuote(v+"="+x))
-		}
-	}
-	b.WriteString("Restart=on-failure\n\n[Install]\nWantedBy=default.target\n")
-	return []byte(b.String())
+	return []byte("# Written by mirrormark install; mirrormark uninstall removes it.\n[Unit]\nDescription=mirrormark bookmark sync\n\n[Service]\n" +
+		"ExecStart=" + unitQuote(self) + " serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n")
 }
 
-// startServer writes the user unit and has systemd run the server,
-// restarting it if restart is set (a new build was just put in place) or
-// the unit changed. Without systemd it says how to run the server by hand.
-func startServer(p db.Paths, self string, restart bool, stdout io.Writer) error {
-	f := chrome.File{Path: unitPath(p), Data: unit(self)}
-	changed := !chrome.FilesCurrent([]chrome.File{f})
-	if changed {
-		if err := chrome.WriteFiles([]chrome.File{f}); err != nil {
-			return err
-		}
+// startServer writes the user unit and has systemd (re)start the server,
+// every time, so it runs the binary just installed; connected extensions
+// reconnect at their next alarm. Without systemd it says how to run the
+// server by hand.
+func startServer(p db.Paths, self string, stdout io.Writer) error {
+	if err := chrome.WriteFiles([]chrome.File{{Path: unitPath(p), Data: unit(self)}}); err != nil {
+		return err
 	}
-	verb := "start"
-	if restart || changed {
-		verb = "restart"
-	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", unitName}, {verb, unitName}} {
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", unitName}, {"restart", unitName}} {
 		if err := runSystemctl(args...); err != nil {
 			fmt.Fprintf(stdout, "Could not run mirrormark as a systemd user service (%v).\nKeep this running instead, for example from your desktop's autostart:\n  %s serve\n", err, quoteArg(self))
 			return nil
@@ -1941,11 +1810,11 @@ func geckoUsers(dbs map[string]*db.DB, except string, stderr io.Writer) []string
   and in `uninstallFirefox`, `users := geckoUsers(dbs, b.Config, stderr)`, with the loop keeping only its `d.Profile.Browser == b.Config` half.
 
 - [ ] **Step 6: Call them.**
-  - Chromium install: after `ensureConfig`, `if err := startServer(p, self, !ready, stdout); err != nil { return fail(err) }`. The first pass (`!ready`) put a new build in place, so it restarts.
-  - Gecko install: after `ensureConfig` and `firefox.Files`: `startServer(p, self, !chrome.FilesCurrent(files), stdout)`, computing `FilesCurrent` once into a variable used by both.
+  - Chromium install: after `ensureConfig`, `if err := startServer(p, self, stdout); err != nil { return fail(err) }`.
+  - Gecko install: the same, after `ensureConfig` and writing `firefox.Files`.
   - `cmdUninstall`, Chromium branch, after `removeSystemFiles`: `if err := stopServer(p, serviceUsers(p, cb.Config, stderr), stdout); err != nil { return fail(err) }`. Gecko branch, after `uninstallFirefox`: the same with `fb.Config`.
 
-- [ ] **Step 7: README.** In each Install section, one line after the first `install`: "`install` also sets up `mirrormark serve` as a systemd user service (`~/.config/systemd/user/mirrormark.service`) and starts it. Without systemd, it prints the command to keep running." In "Upgrade, uninstall, unpack": uninstall removes the service once no other browser uses mirrormark; after an upgrade that changes only the binary, run `systemctl --user restart mirrormark`. In Files, add the unit.
+- [ ] **Step 7: README.** In each Install section, one line after the first `install`: "`install` also sets up `mirrormark serve` as a systemd user service (`~/.config/systemd/user/mirrormark.service`) and starts it. Without systemd, it prints the command to keep running." In "Upgrade, uninstall, unpack": `install` restarts the service on every run, so run it after upgrading the binary, as before; uninstall removes the service once no other browser uses mirrormark. Under Files, add the unit, and say that if you set `XDG_CONFIG_HOME`, `XDG_DATA_HOME` or `XDG_STATE_HOME` in your shell, set them for systemd too in `~/.config/environment.d/`.
 
 - [ ] **Step 8: Run** `bin/dev run make` → PASS, `bin/dev run make check-e2e` → PASS. In the dev image, `install` prints the "Keep this running instead" lines; the e2e tests do not depend on them.
 
@@ -1953,15 +1822,15 @@ func geckoUsers(dbs map[string]*db.DB, except string, stderr io.Writer) []string
 
 ---
 
-### Task 7: The extension connects to `mirrormark serve`
+### Task 6: The extension connects to `mirrormark serve`
 
-This is the switch. It is one commit because each part breaks without the others. The extension's new client needs protocol 2's challenge. The e2e tests need the harness to start the server. `install`'s bind confirmation needs a running server.
+This is the switch. It is one commit because each part breaks without the others. The extension's new client needs the server's challenge. The e2e tests need the harness to start the server. `install`'s bind confirmation needs a running server.
 
 **Files:**
-- Modify: `extension/manifest.json`, `extension/background.js`, `extension/embed.go` (doc comment), `extension/embed_test.go`, `internal/host/protocol.go` (`Version = 2`), `internal/host/host_test.go`, `internal/host/protocol_test.go`, `internal/host/server_test.go`, `cmd/mirrormark/service.go` (`serverRunning`), `cmd/mirrormark/install.go`, `cmd/mirrormark/install_test.go`, `e2e/env.go`, `e2e/install_test.go`, `README.md`
+- Modify: `extension/manifest.json`, `extension/background.js`, `extension/embed.go` (doc comment), `extension/embed_test.go`, `cmd/mirrormark/service.go` (`serverRunning`), `cmd/mirrormark/install.go`, `cmd/mirrormark/install_test.go`, `e2e/env.go`, `e2e/install_test.go`, `README.md`
 
 **Interfaces:**
-- Consumes: Tasks 3, 5 and 6.
+- Consumes: Tasks 3, 4 and 5.
 - Produces: `serverRunning`, `e.serve(t)`, `e.stopServer(t)`, `connections(t, e, id)`, `closed(t, e, conn)`.
 
 - [ ] **Step 1: Manifest.** In `manifest.json`: `"version": "0.2.0"`, `"permissions": ["alarms", "bookmarks", "storage"]`, and add `"content_security_policy": { "extension_pages": "script-src 'self'" }`. In `embed_test.go`: expect `alarms,bookmarks,storage`; assert the CSP is exactly that string; delete `TestBackgroundUsesHostName`.
@@ -1974,7 +1843,7 @@ This is the switch. It is one commit because each part breaks without the others
 // connection, until `mirrormark install` binds the profile to a database.
 // Chrome and Firefox install it in every bound profile, so it never
 // uninstalls itself.
-const V = 2;
+const V = 1;
 const QUIET_MS = 500; // send a tree after this long without bookmark events
 const REBIND_MS = 1000; // time for the old connection's host to let go of the database
 // Reconnects wait for an alarm, which the browser fires no sooner than 30 s.
@@ -2155,9 +2024,7 @@ function post(s, m) {
 
 `sendTree` reads `const p = sock;`, and `onMessage(p, m)` compares `p !== sock`. An unbound profile with no token sends nothing: `open` returns at `if (!db)`. A profile bound by a build before the token has a `db` but no `token`; its hello gets `bad-token` from the server, since the database has no token either, and the popup says to run `install` again.
 
-- [ ] **Step 3: Protocol 2.** `const Version = 2` in `protocol.go`. In `host_test.go`, `protocol_test.go` and `server_test.go`, every literal `V: 1` becomes `V: host.Version`. In `TestOtherVersionIsRefused`, the hello's `V: 2` becomes `V: host.Version + 1`. The native host path keeps working on version 2; no extension uses it any more.
-
-- [ ] **Step 4: `install` binds only with a server running.** In `service.go`:
+- [ ] **Step 3: `install` binds only with a server running.** In `service.go`:
 
 ```go
 // serverWait is how long install waits for a server systemd is starting.
@@ -2210,7 +2077,7 @@ func fakeServer(t *testing.T, p db.Paths) {
 
 Call it in `fakeChromeOnPath` and `geckoData`. Add one test per family in which no server runs: the second pass prints "mirrormark is not running", exits 1, and the fake browser's call log stays empty. Set `serverWait = 0` in those tests.
 
-- [ ] **Step 5: The e2e harness starts the server.** In `e2e/env.go`, add `server *exec.Cmd` to `Env`, call `e.serve(t)` at the end of `newEnv`, and:
+- [ ] **Step 4: The e2e harness starts the server.** In `e2e/env.go`, add `server *exec.Cmd` to `Env`, call `e.serve(t)` at the end of `newEnv`, and:
 
 ```go
 // serve starts the test's mirrormark server, as the user's systemd service
@@ -2353,19 +2220,19 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run** `bin/dev run make` → PASS. Then `bin/dev run make check-e2e` → PASS, the whole suite.
+- [ ] **Step 5: Run** `bin/dev run make` → PASS. Then `bin/dev run make check-e2e` → PASS, the whole suite.
   - If a Firefox or LibreWolf socket closes with code 1015, the CSP did not take: check the unpacked manifest in the XPI.
   - If Gecko's first socket drops about 10 s after start (seen in the spike), the 30 s alarm covers it. A test that waits less than that after a Firefox start must not be tightened to hide it; widen its wait and say why in a comment.
-  - If a test sees `bad-token`, either the binding predates Task 5's token (every e2e binding runs `install` after this change, so stop and report) or the two sides compute the proof differently: compare the extension's `mac` with the Go one on one input in the browser's console before changing anything.
+  - If a test sees `bad-token`, either the binding predates Task 4's token (every e2e binding runs `install` after this change, so stop and report) or the two sides compute the proof differently: compare the extension's `mac` with the Go one on one input in the browser's console before changing anything.
   - If `crypto.subtle` is undefined in a background, the context is not secure: report it with the browser and version. Do not fall back to sending the token.
 
-- [ ] **Step 7: README.** Replace "The popup says Chrome cannot reach the host" with "The popup says mirrormark is not running": start it with `systemctl --user start mirrormark` or `mirrormark serve`; check `systemctl --user status mirrormark` and the log. Add `bad-token: …` under "What the popup shows": run `install --profile` for that profile again; and "the program on port N could not prove it is your mirrormark": another program holds that port; if sync does not resume, find it with `ss -ltnp`. In "Upgrade", say that the first `install` after upgrading from a build before the server asks for a browser restart, and that the second binds each profile again.
+- [ ] **Step 6: README.** Replace "The popup says Chrome cannot reach the host" with "The popup says mirrormark is not running": start it with `systemctl --user start mirrormark` or `mirrormark serve`; check `systemctl --user status mirrormark` and the log. Add `bad-token: …` under "What the popup shows": run `install --profile` for that profile again; and "the program on port N could not prove it is your mirrormark": another program holds that port; if sync does not resume, find it with `ss -ltnp`. In "Upgrade", say that the first `install` after upgrading from a build before the server asks for a browser restart, and that the second binds each profile again.
 
-- [ ] **Step 8: Commit** `feat(rfc-0001): connect the extension to mirrormark serve`.
+- [ ] **Step 7: Commit** `feat(rfc-0001): connect the extension to mirrormark serve`.
 
 ---
 
-### Task 8: Remove native messaging
+### Task 7: Remove native messaging
 
 **Files:**
 - Modify: `cmd/mirrormark/main.go`, `cmd/mirrormark/main_test.go`, `cmd/mirrormark/install.go`, `cmd/mirrormark/install_test.go`, `internal/host/protocol.go`, `internal/host/host.go`, `internal/host/host_test.go`, `internal/host/protocol_test.go`, `internal/host/export_test.go`, `internal/chrome/files.go`, `internal/chrome/profiles.go` (comment at line 86), `internal/chrome/chrome_test.go`, `internal/firefox/files.go`, `internal/firefox/profiles.go` (package comment), `internal/firefox/firefox_test.go`, `extension/embed.go`, `README.md`
@@ -2373,64 +2240,35 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 **Interfaces:**
 - Produces: `chrome.LegacyHostManifest`, `firefox.LegacyHostManifest()`; `Browser.SystemFiles` returns one file; `firefox.Files` returns no host manifest.
 
-- [ ] **Step 1: Failing tests for old host manifests.** In `install_test.go`:
+`install` leaves a host manifest from an earlier build in place: nothing starts it any more. `uninstall` removes it as it does today, by its new name.
+
+- [ ] **Step 1: Failing tests for old host manifests.** In `install_test.go`, beside `TestUninstallLeavesAnotherExtensionsHostManifest`:
 
 ```go
-// An upgrade from a build that used native messaging removes the host
-// manifest it left, and only if it is this install's.
-func TestInstallRemovesTheOldHostManifest(t *testing.T) {
+// uninstall removes the native host manifest a build before the server
+// left, when it is this install's.
+func TestUninstallRemovesTheOldHostManifest(t *testing.T) {
 	skipIfRoot(t)
-	for _, mine := range []bool{true, false} {
-		t.Run(fmt.Sprint("mine=", mine), func(t *testing.T) {
-			p := testHome(t)
-			root, _ := fakeSystem(t)
-			key, err := chrome.LoadOrCreateKey(filepath.Join(p.Data, "extension.pem"))
-			must(t, err)
-			id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-			if !mine {
-				id = strings.Repeat("b", 32) // another install's extension
-			}
-			legacy := filepath.Join(root, chrome.LegacyHostManifest)
-			// Root's directories are read-only here; put it in place as sudo would.
-			must(t, runSudo(strings.NewReader(`{"allowed_origins": ["chrome-extension://`+id+`/"]}`), io.Discard, io.Discard,
-				"install", "-D", "-m", "0644", "/dev/stdin", legacy))
-			var out, errb bytes.Buffer
-			if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
-				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
-			}
-			if _, err := os.Stat(legacy); mine != errors.Is(err, fs.ErrNotExist) {
-				t.Fatalf("old host manifest after install: %v", err)
-			}
-		})
+	p := testHome(t)
+	root, _ := fakeSystem(t)
+	var out, errb bytes.Buffer
+	run([]string{"unpack"}, strings.NewReader(""), &out, &errb) // creates the key
+	key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
+	must(t, err)
+	legacy := filepath.Join(root, chrome.LegacyHostManifest)
+	// Root's directories are read-only here; put it in place as sudo would.
+	must(t, runSudo(strings.NewReader(`{"allowed_origins": ["chrome-extension://`+chrome.ExtensionID(chrome.PublicKeyDER(key))+`/"]}`), io.Discard, io.Discard,
+		"install", "-D", "-m", "0644", "/dev/stdin", legacy))
+	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-}
-
-func TestFirefoxInstallRemovesTheOldHostManifest(t *testing.T) {
-	for _, mine := range []bool{true, false} {
-		t.Run(fmt.Sprint("mine=", mine), func(t *testing.T) {
-			p := testHome(t)
-			root, _ := firefoxData(t, p, "aurora")
-			id := extension.GeckoID
-			if !mine {
-				id = "someone-else@example.org"
-			}
-			legacy, err := firefox.LegacyHostManifest()
-			must(t, err)
-			must(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
-			must(t, os.WriteFile(legacy, []byte(`{"allowed_extensions": ["`+id+`"]}`), 0o644))
-			var out, errb bytes.Buffer
-			if code := run([]string{"install", "--browser", "firefox", "--user-data-dir", root, "--profile", "xalpha.alpha"}, strings.NewReader(""), &out, &errb); code != 0 {
-				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
-			}
-			if _, err := os.Stat(legacy); mine != errors.Is(err, fs.ErrNotExist) {
-				t.Fatalf("old host manifest after install: %v", err)
-			}
-		})
+	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("old host manifest after uninstall: %v", err)
 	}
 }
 ```
 
-Add the same two tests for `uninstall`: after a first-pass `install`, put the old manifest in place as above, run `uninstall` (`--browser firefox` for the second), and check the same thing.
+And `TestFirefoxUninstallRemovesTheOldHostManifest`: `geckoData`, a first-pass `install --browser firefox`, then `firefox.LegacyHostManifest()` written with `{"allowed_extensions": ["`+extension.GeckoID+`"]}`; after `uninstall --browser firefox` it is gone, and one naming `someone-else@example.org` stays.
 
 - [ ] **Step 2: Run** `bin/dev run go test ./cmd/mirrormark/` → FAIL (`chrome.LegacyHostManifest` undefined).
 
@@ -2439,30 +2277,18 @@ Add the same two tests for `uninstall`: after a first-pass `install`, put the ol
 
 ```go
 // LegacyHostManifest is where builds before the server put the native
-// host manifest every Chromium browser read. install and uninstall remove
-// it when it names this install's extension.
+// host manifest every Chromium browser read. uninstall removes it when it
+// names this install's extension.
 const LegacyHostManifest = "/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json"
 ```
 
-  - `internal/firefox/files.go`: delete `hostManifestJSON` and the host manifest at the head of `Files(profileDirs []string)`, which loses its `bin` parameter; rename `HostManifestPath` to `LegacyHostManifest`, with the comment "where builds before the server put the native host manifest Firefox and LibreWolf read; install and uninstall remove it when it names the gecko id". It builds the path from the literal `com.github.chriscz.mirrormark.json`.
+  - `internal/firefox/files.go`: delete `hostManifestJSON` and the host manifest at the head of `Files(profileDirs []string)`, which loses its `bin` parameter; rename `HostManifestPath` to `LegacyHostManifest`, with the comment "where builds before the server put the native host manifest Firefox and LibreWolf read; uninstall removes it when it names the gecko id". It builds the path from the literal `com.github.chriscz.mirrormark.json`.
   - `extension/embed.go`: delete `HostName`; the package comment says the extension connects to the local server.
   - Tests: `chrome_test.go` (lines 326–335) expects one system file; `firefox_test.go` (161–173) checks `LegacyHostManifest`'s path and that `Files` holds only XPIs and `user.js` files.
 
 - [ ] **Step 4: `install.go`.**
-  - Chromium install: `system := cb.SystemFiles(ext)`. Delete the "lets another extension … replacing it" warning. After `writeSystemFiles`, and on every run with `--profile`:
-
-```go
-	// A build before the server left a native host manifest; it starts
-	// nothing now. One naming another extension is another install's.
-	legacy := filepath.Join(sysroot, chrome.LegacyHostManifest)
-	if data, err := os.ReadFile(legacy); err == nil && namesExtension(data, ext.ID) {
-		if err := removeSystemFiles([]string{legacy}, stdout, stderr); err != nil {
-			return fail(err)
-		}
-	}
-```
-
-  - Gecko install: `firefox.Files(dirs)`; after writing them, on every run with `--profile`, remove `firefox.LegacyHostManifest()` if it contains `"`+extension.GeckoID+`"`.
+  - Chromium install: `system := cb.SystemFiles(ext)`. Delete the "lets another extension … replacing it" warning.
+  - Gecko install: `firefox.Files(dirs)`.
   - Chromium uninstall: `host` becomes `legacy := filepath.Join(sysroot, chrome.LegacyHostManifest)`, appended to `paths` whenever it names the id, whatever other browsers do. The message becomes "Kept the CRX, which %s still uses." The no-key message names only the external file.
   - Gecko uninstall: the host manifest goes if it names the gecko id; `users` and its message go, since the only shared thing left is the service, which `stopServer` handles.
   - `selfPath()` is still used by `startServer`.
@@ -2516,7 +2342,7 @@ func (e *end) Close() { e.once.Do(func() { close(e.self) }) }
 
 - [ ] **Step 6: Install tests.** In `install_test.go`, delete `TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest`. Keep `TestUninstallLeavesAnotherExtensionsHostManifest`, pointing it at `chrome.LegacyHostManifest`. Make `TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest` and `TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck` about the service: `unitPath(p)` stays, and the "keeping the files it shares" warning. Remove `chrome.HostManifestPath()` and `firefox.HostManifestPath()` from every `mustExist`/`mustBeGone` and path list (lines 332, 734, 748, 887, 959, 992, 1092, 1340, 1377, 1391, 1472, 1490, 1518, 1547, 1587). Where such a list checked that a shared file stays, `filepath.Join(p.Data, "mirrormark.crx")` still does that for Chromium, and `unitPath(p)` for Gecko.
 
-- [ ] **Step 7: README.** Remove every host-manifest passage: Chrome's "What `sudo` does" (one file now), "Ids, labels and the key" (two installs no longer contend for one manifest), the Brave and LibreWolf shared-manifest lines, and the Files table rows. Add one line to Upgrade: an `install` or `uninstall` also removes a native host manifest an earlier build left. Remove the troubleshooting text about native messaging errors.
+- [ ] **Step 7: README.** Remove every host-manifest passage: Chrome's "What `sudo` does" (one file now), "Ids, labels and the key" (two installs no longer contend for one manifest), the Brave and LibreWolf shared-manifest lines, and the Files table rows. Add one line to Upgrade: a native host manifest an earlier build left does nothing now, and `uninstall` removes it. Remove the troubleshooting text about native messaging errors.
 
 - [ ] **Step 8: Run** `bin/dev run make` → PASS (`gofmt`, `vet` with the e2e tag, tests). `grep -rn "native\|HostName\|HostManifestPath\|connectNative" --include=*.go --include=*.js cmd internal extension e2e` → only the two legacy-manifest comments and constants. Then `bin/dev run make check-e2e` → PASS.
 
@@ -2524,7 +2350,7 @@ func (e *end) Close() { e.once.Do(func() { close(e.self) }) }
 
 ---
 
-### Task 9: Install and bind Brave and LibreWolf end to end
+### Task 8: Install and bind Brave and LibreWolf end to end
 
 This was Task 7 of [`plan-brave-librewolf.md`](plan-brave-librewolf.md). It is unchanged except where the server replaced the host manifests.
 
@@ -2532,7 +2358,7 @@ This was Task 7 of [`plan-brave-librewolf.md`](plan-brave-librewolf.md). It is u
 - Modify: `e2e/env.go`, `e2e/browser.go`, `e2e/bidi.go`, `e2e/install_test.go`, `README.md` (Development)
 
 **Interfaces:**
-- Consumes: Tasks 7–8 (`e.serve`, `connections`, `stopServer`'s message), and from the earlier plans `--profile`, `e.ready`, `chrome.ReadState`, `firefox.ReadState`.
+- Consumes: Tasks 6–7 (`e.serve`, `connections`, `stopServer`'s message), and from the earlier plans `--profile`, `e.ready`, `chrome.ReadState`, `firefox.ReadState`.
 - Produces: kinds `chrome`, `brave`, `firefox`, `librewolf` for `setupPair`; `bins`, `names`, `gecko`; `launch(t, name, kind, udd, env)`, `launchFirefox(t, name, kind, dir, port, env)`.
 
 - [ ] **Step 1: The harness knows four kinds.** In `e2e/env.go`, add:
@@ -2727,7 +2553,7 @@ func TestLibreWolfInstallAndBind(t *testing.T) {
 
 ---
 
-### Task 10: Run the sync tests between Brave and LibreWolf
+### Task 9: Run the sync tests between Brave and LibreWolf
 
 This was Task 8 of [`plan-brave-librewolf.md`](plan-brave-librewolf.md), unchanged: the sync tests do not see the transport.
 
@@ -2751,8 +2577,9 @@ var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox"
 
 ## After the last task
 
-- In a `docs(rfc-0001)` commit, bring Section 11, Phase 8 and the History up to date with anything built differently from them, and the Brave and LibreWolf parts of Section 9 with Tasks 9–10. Move what Tasks 7, 9 and 10 checked into the spike's results: the real server in all four browsers, and the Gecko keep-alive under the e2e suite's lifetimes.
+- In a `docs(rfc-0001)` commit, bring Section 11, Phase 8 and the History up to date with anything built differently from them, and the Brave and LibreWolf parts of Section 9 with Tasks 8–9. Move what Tasks 6, 8 and 9 checked into the spike's results: the real server in all four browsers, and the Gecko keep-alive under the e2e suite's lifetimes.
 - `TASKS.md`:
+  - Under "The host log grows within one session", say that a session is now the server's whole run, usually the user's login, which makes rotating on write more worth doing.
   - Under "Wrong-binding detection relies on browser ids not matching", note that the token now ties a connection to its database. It still does not tell a wrongly bound profile, so the entry stays.
   - Add that `e2e/bidi.go` could use `ws.Dial`, which has deadlines and handles control frames: this would fix "The BiDi handshake has no deadline" and "The BiDi client ignores control frames".
   - Under "Manual checks still to do", add: on the desktop, upgrade from the native-messaging build in Chrome and Developer Edition, following the README. Check that the first `install` asks for a restart and starts the service (`systemctl --user status mirrormark`), the second binds, the popup clears, and a server restart (`systemctl --user restart mirrormark`) and a browser restart each reconnect. Then run the Brave and LibreWolf steps from [`plan-brave-librewolf.md`](plan-brave-librewolf.md)'s "After the last task". Phase 8 is done when these runs are recorded.
@@ -2760,8 +2587,8 @@ var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox"
 ## Risks
 
 - **The two halves of the proof live in two languages.** Go computes it in `host.mac`, the extension in `mac` in `background.js`. Only the e2e suite runs both; `server_test.go` pins the Go half to the exact inputs, and every e2e binding fails with `bad-token` if the halves disagree.
-- **The switch is one large commit** (Task 7). It touches the extension, the protocol, `install` and the e2e harness at once, because a smaller step would leave either the tests or the users without a transport. Review it in the order the steps give.
-- **Gecko's first-socket drop** (spike, cause unknown) can add up to 30 s after a Gecko start before the first sync. The e2e waits that follow a Firefox start must allow for it; Task 7 Step 6 says what to do if one does not.
+- **The switch is one large commit** (Task 6). It touches the extension, the protocol, `install` and the e2e harness at once, because a smaller step would leave either the tests or the users without a transport. Review it in the order the steps give.
+- **Gecko's first-socket drop** (spike, cause unknown) can add up to 30 s after a Gecko start before the first sync. The e2e waits that follow a Firefox start must allow for it; Task 6 Step 5 says what to do if one does not.
 - **The ports in the dev image:** e2e tests run one at a time and each stops its server, so a fixed port is free for the next. A server left from a crashed run holds `61959`. The next test's server takes `63018`, and the extension skips the stale one, because the stale server does not know the new home's origins. This shows in the log as `refused a connection`.
 - **`serverRunning` takes the serve lock for a moment.** A server that systemd starts in that instant exits and is restarted by `Restart=on-failure`. This is harmless, but it shows in the journal.
 - **Not tested here, and listed in the RFC:** sleep and resume, a server down when the browser starts, Chrome and Brave with their own sandbox, a program holding all three ports, and an upgrade that changes only the binary.
