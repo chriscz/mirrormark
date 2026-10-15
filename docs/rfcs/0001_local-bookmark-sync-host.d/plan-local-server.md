@@ -41,7 +41,7 @@ extension/
   background.js       WebSocket client (Task 6)
   manifest.json       CSP, no nativeMessaging, 0.2.0 (Task 6)
 internal/ws/
-  ws.go               Upgrade, Dial, Conn.Read/Write/Close (Task 2)
+  ws.go               Upgrade, Dial, Conn.Read/Write/Close/SetReadDeadline (Task 2)
   ws_test.go
 internal/host/
   protocol.go         Conn, encode/decode, Msg.Nonce/Proof (Tasks 1, 3); Stream,
@@ -80,9 +80,13 @@ func decode(b []byte) (Msg, error)
 // internal/ws (Task 2)
 func Upgrade(w http.ResponseWriter, r *http.Request, max int) (*Conn, error)
 func Dial(addr string, h http.Header, max int) (*Conn, error) // client side, for tests
-func (c *Conn) Read() ([]byte, error)                         // io.EOF after the peer's close
-func (c *Conn) Write(msg []byte) error
-func (c *Conn) Close(code uint16, reason string) error
+func (c *Conn) Read() ([]byte, error)                         // io.EOF after the peer's close; a local Close wraps net.ErrClosed
+func (c *Conn) Write(msg []byte) error                        // safe from several goroutines
+func (c *Conn) Close(code uint16, reason string) error        // idempotent; waits at most 1 s for a write
+func (c *Conn) SetReadDeadline(t time.Time) error             // os.ErrDeadlineExceeded; zero time clears it
+// A message's buffer grows with the bytes received, not with the length a
+// header claims. Close frames are validated (code range, UTF-8 reason); a
+// handshake for another version gets 426.
 
 // internal/host (Task 3)
 type Options struct {
@@ -204,7 +208,7 @@ func decode(b []byte) (Msg, error) {
 - Create: `internal/ws/ws.go`, `internal/ws/ws_test.go`
 
 **Interfaces:**
-- Produces: `ws.Upgrade`, `ws.Dial`, `(*ws.Conn).Read`, `Write`, `Close`.
+- Produces: `ws.Upgrade`, `ws.Dial`, `(*ws.Conn).Read`, `Write`, `Close`, `SetReadDeadline`.
 
 - [ ] **Step 1: Write the failing tests** in `internal/ws/ws_test.go`:
 
@@ -213,21 +217,26 @@ package ws_test
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/chriscz/mirrormark/internal/ws"
 )
 
-// echo serves one connection: each text message comes back as it came.
-// got receives Read's final error.
-func echo(t *testing.T, max int) (addr string, got chan error) {
+// serve runs handle on each upgraded connection and sends what it returns
+// to got.
+func serve(t *testing.T, max int, handle func(*ws.Conn) error) (addr string, got chan error) {
 	got = make(chan error, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := ws.Upgrade(w, r, max)
@@ -235,17 +244,37 @@ func echo(t *testing.T, max int) (addr string, got chan error) {
 			got <- err
 			return
 		}
-		for {
-			m, err := c.Read()
-			if err != nil {
-				got <- err
-				return
-			}
-			c.Write(m)
-		}
+		got <- handle(c)
 	}))
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://"), got
+}
+
+// echo serves one connection: each text message comes back as it came.
+// got receives Read's final error.
+func echo(t *testing.T, max int) (addr string, got chan error) {
+	return serve(t, max, func(c *ws.Conn) error {
+		for {
+			m, err := c.Read()
+			if err != nil {
+				return err
+			}
+			c.Write(m)
+		}
+	})
+}
+
+// wait returns what the server sent to got, failing the test if nothing
+// comes.
+func wait(t *testing.T, got chan error) error {
+	t.Helper()
+	select {
+	case err := <-got:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("the server did not finish")
+		return nil
+	}
 }
 
 func dial(t *testing.T, addr string) *ws.Conn {
@@ -275,26 +304,43 @@ func TestCloseEndsRead(t *testing.T) {
 	addr, got := echo(t, 1<<20)
 	c := dial(t, addr)
 	c.Close(1000, "bye")
-	if err := <-got; !errors.Is(err, io.EOF) {
+	if err := wait(t, got); err != io.EOF {
 		t.Fatalf("server Read after close: %v", err)
 	}
 }
 
-// raw opens a connection and does the handshake by hand, for frames Dial
-// would never send.
-func raw(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+// handshake sends a hand-made opening handshake with the given key and
+// version and returns the answer.
+func handshake(t *testing.T, nc net.Conn, br *bufio.Reader, addr, key, version string) *http.Response {
+	t.Helper()
+	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: "+key+"\r\nSec-WebSocket-Version: "+version+"\r\n\r\n")
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func connect(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	nc, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { nc.Close() })
-	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
-		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
-	br := bufio.NewReader(nc)
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 101 {
-		t.Fatalf("handshake: %v %v", resp, err)
+	nc.SetDeadline(time.Now().Add(5 * time.Second)) // fail, not hang, if no close frame comes
+	return nc, bufio.NewReader(nc)
+}
+
+// raw opens a connection and does the handshake by hand, for frames Dial
+// would never send.
+func raw(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	nc, br := connect(t, addr)
+	resp := handshake(t, nc, br, addr, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+	if resp.StatusCode != 101 {
+		t.Fatalf("handshake: %v", resp.Status)
 	}
 	// The example key and answer from the WebSocket specification.
 	if got := resp.Header.Get("Sec-WebSocket-Accept"); got != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
@@ -303,12 +349,23 @@ func raw(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
 	return nc, br
 }
 
-// frame writes one frame with the given first byte, masked unless mask
-// is false.
-func frame(nc net.Conn, b0 byte, payload []byte, mask bool) {
-	h := []byte{b0, byte(len(payload))}
+// encode makes one frame with the given first byte and the shortest
+// length encoding, masked unless mask is false.
+func encode(b0 byte, payload []byte, mask bool) []byte {
+	bit := byte(0)
 	if mask {
-		h[1] |= 0x80
+		bit = 0x80
+	}
+	h := []byte{b0}
+	switch n := len(payload); {
+	case n < 126:
+		h = append(h, bit|byte(n))
+	case n <= 0xffff:
+		h = binary.BigEndian.AppendUint16(append(h, bit|126), uint16(n))
+	default:
+		h = binary.BigEndian.AppendUint64(append(h, bit|127), uint64(n))
+	}
+	if mask {
 		h = append(h, 1, 2, 3, 4)
 		p := make([]byte, len(payload))
 		for i := range payload {
@@ -316,23 +373,63 @@ func frame(nc net.Conn, b0 byte, payload []byte, mask bool) {
 		}
 		payload = p
 	}
-	nc.Write(append(h, payload...))
+	return append(h, payload...)
 }
 
-// closeCode reads the server's close frame and returns its code.
-func closeCode(t *testing.T, br *bufio.Reader) uint16 {
+// frame writes one frame made by encode.
+func frame(nc net.Conn, b0 byte, payload []byte, mask bool) {
+	nc.Write(encode(b0, payload, mask))
+}
+
+// readFrame reads one unmasked frame from the server.
+func readFrame(t *testing.T, br *bufio.Reader) (b0 byte, payload []byte) {
 	t.Helper()
-	for {
-		var h [2]byte
-		if _, err := io.ReadFull(br, h[:]); err != nil {
+	var h [2]byte
+	if _, err := io.ReadFull(br, h[:]); err != nil {
+		t.Fatal(err)
+	}
+	n := uint64(h[1] & 0x7f)
+	switch n {
+	case 126:
+		var b [2]byte
+		if _, err := io.ReadFull(br, b[:]); err != nil {
 			t.Fatal(err)
 		}
-		p := make([]byte, h[1]&0x7f)
-		io.ReadFull(br, p)
-		if h[0]&0x0f == 0x8 {
-			return binary.BigEndian.Uint16(p)
+		n = uint64(binary.BigEndian.Uint16(b[:]))
+	case 127:
+		var b [8]byte
+		if _, err := io.ReadFull(br, b[:]); err != nil {
+			t.Fatal(err)
 		}
+		n = binary.BigEndian.Uint64(b[:])
 	}
+	payload = make([]byte, n)
+	if _, err := io.ReadFull(br, payload); err != nil {
+		t.Fatal(err)
+	}
+	return h[0], payload
+}
+
+// closeFrame reads frames until the server's close frame and returns its
+// code and reason. A close frame with no payload has no code: 1005.
+func closeFrame(t *testing.T, br *bufio.Reader) (uint16, string) {
+	t.Helper()
+	for {
+		b0, p := readFrame(t, br)
+		if b0&0x0f != 0x8 {
+			continue
+		}
+		if len(p) < 2 {
+			return 1005, ""
+		}
+		return binary.BigEndian.Uint16(p), string(p[2:])
+	}
+}
+
+func closeCode(t *testing.T, br *bufio.Reader) uint16 {
+	t.Helper()
+	code, _ := closeFrame(t, br)
+	return code
 }
 
 func TestRefusesWhatABrowserNeverSends(t *testing.T) {
@@ -354,7 +451,7 @@ func TestRefusesWhatABrowserNeverSends(t *testing.T) {
 			if code := closeCode(t, br); code != c.want {
 				t.Errorf("close code %d, want %d", code, c.want)
 			}
-			if err := <-got; err == nil || errors.Is(err, io.EOF) {
+			if err := wait(t, got); err == nil || err == io.EOF {
 				t.Errorf("server Read: %v", err)
 			}
 		})
@@ -379,14 +476,61 @@ func TestJoinsFragmentsAndAnswersPings(t *testing.T) {
 	frame(nc, 0x80, []byte("cd"), true)
 	var got []string
 	for len(got) < 2 {
-		var h [2]byte
-		io.ReadFull(br, h[:])
-		p := make([]byte, h[1]&0x7f)
-		io.ReadFull(br, p)
-		got = append(got, string([]byte{h[0]})+string(p))
+		b0, p := readFrame(t, br)
+		got = append(got, string([]byte{b0})+string(p))
 	}
 	if got[0] != "\x8ap" || got[1] != "\x81abcd" {
 		t.Fatalf("got %q, want the pong, then the joined message", got)
+	}
+}
+
+// Messages whose frames use the 16-bit and 64-bit length encodings, whole
+// and in fragments, come back intact.
+func TestReadsLongLengths(t *testing.T) {
+	long16, long64 := bytes.Repeat([]byte("a"), 300), bytes.Repeat([]byte("b"), 70000)
+	for _, c := range []struct {
+		name   string
+		frames [][]byte
+		want   []byte
+	}{
+		{"16-bit", [][]byte{encode(0x81, long16, true)}, long16},
+		{"64-bit", [][]byte{encode(0x81, long64, true)}, long64},
+		{"16-bit then 64-bit fragments", [][]byte{encode(0x01, long16, true), encode(0x80, long64, true)},
+			append(append([]byte{}, long16...), long64...)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			addr, _ := echo(t, 1<<20)
+			nc, br := raw(t, addr)
+			for _, f := range c.frames {
+				nc.Write(f)
+			}
+			b0, p := readFrame(t, br)
+			if b0 != 0x81 || !bytes.Equal(p, c.want) {
+				t.Fatalf("got %#x with %d bytes, want %d", b0, len(p), len(c.want))
+			}
+		})
+	}
+}
+
+// A frame of exactly the limit that trickles in, in small pieces, is
+// still read whole.
+func TestReadsAFrameThatArrivesInPieces(t *testing.T) {
+	const max = 70000
+	addr, _ := echo(t, max)
+	nc, br := raw(t, addr)
+	msg := bytes.Repeat([]byte("q"), max)
+	f := encode(0x81, msg, true)
+	for len(f) > 0 {
+		n := min(len(f), 1000)
+		if _, err := nc.Write(f[:n]); err != nil {
+			t.Fatal(err)
+		}
+		f = f[n:]
+		time.Sleep(time.Millisecond)
+	}
+	b0, p := readFrame(t, br)
+	if b0 != 0x81 || !bytes.Equal(p, msg) {
+		t.Fatalf("got %#x with %d bytes", b0, len(p))
 	}
 }
 
@@ -396,6 +540,326 @@ func TestRefusesAPlainRequest(t *testing.T) {
 	if err != nil || resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("%v %v", resp, err)
 	}
+}
+
+func TestRefusesABadHandshake(t *testing.T) {
+	for _, c := range []struct {
+		name, key, version string
+		want               int
+	}{
+		{"key not base64", "not base64!", "13", http.StatusBadRequest},
+		{"key not 16 bytes", "dGhlIHNhbXBsZQ==", "13", http.StatusBadRequest},
+		{"old version", "dGhlIHNhbXBsZSBub25jZQ==", "8", http.StatusUpgradeRequired},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			addr, got := echo(t, 1<<20)
+			nc, br := connect(t, addr)
+			resp := handshake(t, nc, br, addr, c.key, c.version)
+			nc.Close() // so a wrongly upgraded connection ends with io.EOF
+			if resp.StatusCode != c.want {
+				t.Errorf("status %s, want %d", resp.Status, c.want)
+			}
+			if c.want == http.StatusUpgradeRequired && resp.Header.Get("Sec-WebSocket-Version") != "13" {
+				t.Errorf("Sec-WebSocket-Version %q", resp.Header.Get("Sec-WebSocket-Version"))
+			}
+			if err := wait(t, got); err == nil || err == io.EOF {
+				t.Errorf("Upgrade succeeded: %v", err)
+			}
+		})
+	}
+}
+
+// More frames a browser never sends: each is refused with the right code
+// before the server reads, or waits for, any payload.
+func TestRefusesMalformedFrames(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		raw  []byte
+		want uint16
+	}{
+		// A 64-bit length far over the limit, with no payload behind it.
+		{"huge length", []byte{0x81, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, 1009},
+		{"top bit of a 64-bit length", []byte{0x81, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0}, 1009},
+		{"16-bit length just over the limit", []byte{0x81, 0xfe, 0x00, 0x65}, 1009},
+		{"64-bit length just over the limit", []byte{0x81, 0xff, 0, 0, 0, 0, 0, 0, 0, 0x65}, 1009},
+		{"long ping", []byte{0x89, 0xfe, 0x00, 0x7e}, 1002},
+		{"fragmented ping", []byte{0x09, 0x80, 1, 2, 3, 4}, 1002},
+		{"text inside a fragmented text", []byte{0x01, 0x81, 0, 0, 0, 0, 'a', 0x81, 0x81, 0, 0, 0, 0, 'b'}, 1002},
+		{"unknown opcode", []byte{0x83, 0x80, 1, 2, 3, 4}, 1003},
+		{"reserved control opcode", []byte{0x8b, 0x80, 1, 2, 3, 4}, 1002},
+		{"last reserved control opcode", []byte{0x8f, 0x80, 1, 2, 3, 4}, 1002},
+		{"bad UTF-8", []byte{0x81, 0x82, 0, 0, 0, 0, 0xc3, 0x28}, 1007},
+		{"close with one byte", encode(0x88, []byte{3}, true), 1002},
+		{"close code 999", encode(0x88, []byte{0x03, 0xe7}, true), 1002},
+		{"close code 1004", encode(0x88, []byte{0x03, 0xec}, true), 1002},
+		{"close code 1005", encode(0x88, []byte{0x03, 0xed}, true), 1002},
+		{"close code 1006", encode(0x88, []byte{0x03, 0xee}, true), 1002},
+		{"close code 1015", encode(0x88, []byte{0x03, 0xf7}, true), 1002},
+		{"close code 2999", encode(0x88, []byte{0x0b, 0xb7}, true), 1002},
+		{"close code 5000", encode(0x88, []byte{0x13, 0x88}, true), 1002},
+		{"close reason not UTF-8", encode(0x88, []byte{0x03, 0xe8, 0xc3, 0x28}, true), 1007},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			addr, got := echo(t, 100)
+			nc, br := raw(t, addr)
+			nc.Write(c.raw)
+			if code := closeCode(t, br); code != c.want {
+				t.Errorf("close code %d, want %d", code, c.want)
+			}
+			if err := wait(t, got); err == nil || err == io.EOF {
+				t.Errorf("server Read: %v", err)
+			}
+		})
+	}
+}
+
+// A well-formed close is answered with 1000 and ends Read with io.EOF.
+func TestAnswersAGoodClose(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		payload []byte
+	}{
+		{"no payload", nil},
+		{"1000", []byte{0x03, 0xe8}},
+		{"1001 with a reason", []byte{0x03, 0xe9, 'b', 'y', 'e'}},
+		{"1014", []byte{0x03, 0xf6}},
+		{"3000", []byte{0x0b, 0xb8}},
+		{"4999", []byte{0x13, 0x87}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			addr, got := echo(t, 100)
+			nc, br := raw(t, addr)
+			frame(nc, 0x88, c.payload, true)
+			if code := closeCode(t, br); code != 1000 {
+				t.Errorf("close code %d, want 1000", code)
+			}
+			if err := wait(t, got); err != io.EOF {
+				t.Errorf("server Read: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadEndsWithEOFWhenThePeerHangsUp(t *testing.T) {
+	addr, got := echo(t, 1<<20)
+	nc, _ := raw(t, addr)
+	nc.Close()
+	if err := wait(t, got); err != io.EOF {
+		t.Fatalf("server Read: %v", err)
+	}
+}
+
+func TestHangingUpInsideAMessageIsUnexpected(t *testing.T) {
+	addr, got := echo(t, 1<<20)
+	nc, _ := raw(t, addr)
+	frame(nc, 0x01, []byte("ab"), true) // text, not final
+	nc.Close()
+	if err := wait(t, got); err != io.ErrUnexpectedEOF {
+		t.Fatalf("server Read: %v", err)
+	}
+}
+
+func TestReadDeadline(t *testing.T) {
+	addr, got := serve(t, 100, func(c *ws.Conn) error {
+		if err := c.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+			return err
+		}
+		_, err := c.Read()
+		return err
+	})
+	raw(t, addr) // and send nothing
+	select {
+	case err := <-got:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("server Read: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read did not time out")
+	}
+}
+
+func TestDialRefusesAPlainServer(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	if _, err := ws.Dial(strings.TrimPrefix(srv.URL, "http://"), nil, 1<<20); err == nil {
+		t.Fatal("Dial succeeded against a server that does not upgrade")
+	}
+}
+
+// The server pings from its own goroutine while the host writes replies,
+// so writes from several goroutines must not interleave their frames.
+func TestWritesFromManyGoroutines(t *testing.T) {
+	addr, _ := echo(t, 1<<20)
+	c := dial(t, addr)
+	const writers, each = 8, 50
+	msg := strings.Repeat("z", 300) // long enough for a 16-bit length
+	errs := make(chan error, writers)
+	for range writers {
+		go func() {
+			for range each {
+				if err := c.Write([]byte(msg)); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+	}
+	for range writers * each {
+		got, err := c.Read()
+		if err != nil || string(got) != msg {
+			t.Fatalf("got %d bytes, %v", len(got), err)
+		}
+	}
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCloseTwice(t *testing.T) {
+	addr, _ := echo(t, 1<<20)
+	c := dial(t, addr)
+	if err := c.Close(1000, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(1000, ""); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// A Write stuck on a peer that does not read must not hold Close up.
+func TestCloseDoesNotWaitForAStuckWrite(t *testing.T) {
+	closed := make(chan time.Duration, 1)
+	addr, got := serve(t, 100, func(c *ws.Conn) error {
+		werr := make(chan error, 1)
+		go func() { werr <- c.Write(make([]byte, 64<<20)) }()
+		time.Sleep(200 * time.Millisecond) // let the write fill the socket buffers
+		start := time.Now()
+		c.Close(1001, "")
+		closed <- time.Since(start)
+		return <-werr
+	})
+	raw(t, addr) // and never read
+	select {
+	case d := <-closed:
+		if d > 3*time.Second {
+			t.Fatalf("Close took %v", d)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close stalled behind the write")
+	}
+	if err := wait(t, got); err == nil {
+		t.Fatal("the stuck Write succeeded")
+	}
+}
+
+func TestCloseTruncatesALongReason(t *testing.T) {
+	reason := strings.Repeat("é", 100) // 200 bytes, two to a rune
+	addr, _ := serve(t, 100, func(c *ws.Conn) error { return c.Close(1000, reason) })
+	_, br := raw(t, addr)
+	code, got := closeFrame(t, br)
+	if code != 1000 || len(got) > 123 || len(got) < 122 || !utf8.ValidString(got) || !strings.HasPrefix(reason, got) {
+		t.Fatalf("code %d, reason of %d bytes %q", code, len(got), got)
+	}
+}
+
+// fakeConn is a connection that reads from r and swallows writes.
+type fakeConn struct{ r io.Reader }
+
+func (f fakeConn) Read(p []byte) (int, error)       { return f.r.Read(p) }
+func (f fakeConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (f fakeConn) Close() error                     { return nil }
+func (f fakeConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (f fakeConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (f fakeConn) SetDeadline(time.Time) error      { return nil }
+func (f fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (f fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// hijacker hands Upgrade a fakeConn.
+type hijacker struct {
+	nc net.Conn
+	h  http.Header
+}
+
+func (w *hijacker) Header() http.Header         { return w.h }
+func (w *hijacker) Write(p []byte) (int, error) { return len(p), nil }
+func (w *hijacker) WriteHeader(int)             {}
+func (w *hijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.nc, bufio.NewReadWriter(bufio.NewReader(w.nc), bufio.NewWriter(w.nc)), nil
+}
+
+// fake upgrades a connection whose peer sends the bytes of r.
+func fake(t testing.TB, r io.Reader, max int) *ws.Conn {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	c, err := ws.Upgrade(&hijacker{nc: fakeConn{r}, h: http.Header{}}, req, max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// allocated returns how many bytes f allocates.
+func allocated(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// A header that claims a frame of the full limit, then a little payload,
+// commits memory for what arrived, not for what was claimed.
+func TestAClaimedLengthDoesNotCommitMemory(t *testing.T) {
+	const max = 64 << 20
+	head := []byte{0x81, 0xff, 0, 0, 0, 0, 0x04, 0, 0, 0, 1, 2, 3, 4} // 64 MB, masked
+	c := fake(t, io.MultiReader(bytes.NewReader(head), bytes.NewReader(make([]byte, 1000))), max)
+	var err error
+	n := allocated(func() { _, err = c.Read() })
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("Read: %v", err)
+	}
+	if n > 1<<20 {
+		t.Fatalf("allocated %d bytes for 1000 bytes of payload", n)
+	}
+}
+
+// FuzzRead feeds arbitrary bytes to a server connection: it must not
+// panic, and must allocate in proportion to the bytes it was given, not to
+// the lengths they claim.
+func FuzzRead(f *testing.F) {
+	for _, seed := range [][]byte{
+		encode(0x81, []byte("hello"), true),
+		append(encode(0x01, []byte("ab"), true), append(encode(0x89, []byte("p"), true), encode(0x80, []byte("cd"), true)...)...),
+		encode(0x81, bytes.Repeat([]byte("x"), 300), true),
+		encode(0x88, []byte{0x03, 0xe8, 'o', 'k'}, true),
+		encode(0x88, []byte{3}, true),
+		{0x81, 0xff, 0, 0, 0, 0, 0, 0, 0x04, 0, 1, 2, 3, 4},
+		{0x81, 0xfe, 0x04, 0x00, 1, 2, 3, 4, 'a'},
+		{0x8b, 0x80, 1, 2, 3, 4},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		c := fake(t, bytes.NewReader(data), 1024)
+		n := allocated(func() {
+			for range len(data) + 1 { // each Read takes at least one byte or fails
+				if _, err := c.Read(); err != nil {
+					return
+				}
+			}
+			t.Error("Read did not stop at the end of the input")
+		})
+		if limit := uint64(64<<10 + 32*len(data)); n > limit {
+			t.Fatalf("allocated %d bytes for %d bytes of input", n, len(data))
+		}
+	})
 }
 ```
 
@@ -422,9 +886,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -442,6 +908,15 @@ const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 // writer for ever.
 const writeWait = 10 * time.Second
 
+// closeWait bounds Close: after it the socket is closed even if the close
+// frame has not gone out, which also fails a write stuck behind it.
+const closeWait = time.Second
+
+// chunk is the most a frame's buffer grows by before more of the frame has
+// arrived, so a header that claims a large frame costs little until the
+// bytes come.
+const chunk = 4096
+
 // Conn is one WebSocket connection. One goroutine may Read while others
 // Write.
 type Conn struct {
@@ -450,6 +925,7 @@ type Conn struct {
 	max    int
 	client bool       // a client masks what it sends; a server must not
 	mu     sync.Mutex // one frame at a time
+	once   sync.Once  // closes c once
 }
 
 func accept(key string) string {
@@ -471,13 +947,21 @@ func has(h http.Header, name, token string) bool {
 
 // Upgrade answers the opening handshake in r and takes over the
 // connection. Messages over max bytes are refused. A request that is not
-// a handshake gets 400.
+// a handshake gets 400, and one for another protocol version 426.
 func Upgrade(w http.ResponseWriter, r *http.Request, max int) (*Conn, error) {
 	key := r.Header.Get("Sec-WebSocket-Key")
-	if r.Method != http.MethodGet || !has(r.Header, "Connection", "upgrade") || !has(r.Header, "Upgrade", "websocket") ||
-		r.Header.Get("Sec-WebSocket-Version") != "13" || key == "" {
+	if r.Method != http.MethodGet || !has(r.Header, "Connection", "upgrade") || !has(r.Header, "Upgrade", "websocket") {
 		http.Error(w, "not a WebSocket handshake", http.StatusBadRequest)
 		return nil, errors.New("not a WebSocket handshake")
+	}
+	if v := r.Header.Get("Sec-WebSocket-Version"); v != "13" {
+		w.Header().Set("Sec-WebSocket-Version", "13")
+		http.Error(w, "only WebSocket version 13 is supported", http.StatusUpgradeRequired)
+		return nil, fmt.Errorf("WebSocket version %q", v)
+	}
+	if k, err := base64.StdEncoding.DecodeString(key); err != nil || len(k) != 16 {
+		http.Error(w, "a bad Sec-WebSocket-Key", http.StatusBadRequest)
+		return nil, errors.New("a bad Sec-WebSocket-Key")
 	}
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -539,26 +1023,38 @@ func Dial(addr string, h http.Header, max int) (*Conn, error) {
 
 // Read returns the next text message. It answers pings and the peer's
 // close itself, and returns io.EOF after a close or when the connection
-// ends between frames.
+// ends between messages, and io.ErrUnexpectedEOF when it ends inside one.
 func (c *Conn) Read() ([]byte, error) {
 	var msg []byte
 	inMsg := false
 	for {
-		fin, op, payload, err := c.frame()
+		fin, op, n, mask, err := c.header()
+		if err == io.EOF && inMsg {
+			err = io.ErrUnexpectedEOF
+		}
 		if err != nil {
 			return nil, err
 		}
 		switch op {
-		case opPing:
-			if err := c.write(opPong, payload); err != nil {
+		case opPing, opPong, opClose:
+			var ctl [125]byte
+			p, err := c.payload(ctl[:0], n, mask)
+			if err != nil {
 				return nil, err
 			}
+			switch op {
+			case opPing:
+				if err := c.write(opPong, p); err != nil {
+					return nil, err
+				}
+			case opClose:
+				if code, why := checkClose(p); code != 0 {
+					return nil, c.fail(code, why)
+				}
+				c.Close(1000, "") // answer the close, then hang up
+				return nil, io.EOF
+			}
 			continue
-		case opPong:
-			continue
-		case opClose:
-			c.Close(1000, "") // answer the close, then hang up
-			return nil, io.EOF
 		case opText:
 			if inMsg {
 				return nil, c.fail(1002, "a new message inside a fragmented one")
@@ -569,20 +1065,51 @@ func (c *Conn) Read() ([]byte, error) {
 				return nil, c.fail(1002, "a continuation with no message")
 			}
 		default:
+			if op > opClose {
+				return nil, c.fail(1002, "a reserved control opcode")
+			}
 			return nil, c.fail(1003, "only text messages are accepted")
 		}
-		if len(msg)+len(payload) > c.max {
+		if len(msg)+n > c.max {
 			return nil, c.fail(1009, "message too large")
 		}
-		msg = append(msg, payload...)
+		if msg, err = c.payload(msg, n, mask); err != nil {
+			return nil, err
+		}
 		if fin {
+			if !utf8.Valid(msg) {
+				return nil, c.fail(1007, "a text message that is not UTF-8")
+			}
 			return msg, nil
 		}
 	}
 }
 
-// frame reads one frame and unmasks it.
-func (c *Conn) frame() (fin bool, op byte, payload []byte, err error) {
+// checkClose checks the payload of the peer's close frame. It returns 0
+// if the frame is well formed, or the code to fail with and why.
+func checkClose(p []byte) (uint16, string) {
+	if len(p) == 0 {
+		return 0, ""
+	}
+	if len(p) == 1 {
+		return 1002, "a close frame with half a code"
+	}
+	// Codes below 1000 are unused, 1004 is reserved, 1005, 1006 and 1015
+	// must never be sent, 1016 to 2999 are unassigned and 5000 up are
+	// not codes at all.
+	switch code := binary.BigEndian.Uint16(p); {
+	case code < 1000, code >= 1004 && code <= 1006, code >= 1015 && code <= 2999, code >= 5000:
+		return 1002, fmt.Sprintf("close code %d", code)
+	}
+	if !utf8.Valid(p[2:]) {
+		return 1007, "a close reason that is not UTF-8"
+	}
+	return 0, ""
+}
+
+// header reads one frame header. n is at most max, and at most 125 for a
+// control frame. mask is nil for an unmasked frame.
+func (c *Conn) header() (fin bool, op byte, n int, mask *[4]byte, err error) {
 	var h [2]byte
 	if _, err = io.ReadFull(c.r, h[:]); err != nil {
 		return
@@ -597,46 +1124,75 @@ func (c *Conn) frame() (fin bool, op byte, payload []byte, err error) {
 		err = c.fail(1002, "masking the wrong way round")
 		return
 	}
-	n := uint64(h[1] & 0x7f)
-	switch n {
+	size := uint64(h[1] & 0x7f)
+	switch size {
 	case 126:
 		var b [2]byte
-		if _, err = io.ReadFull(c.r, b[:]); err != nil {
+		if err = c.full(b[:]); err != nil {
 			return
 		}
-		n = uint64(binary.BigEndian.Uint16(b[:]))
+		size = uint64(binary.BigEndian.Uint16(b[:]))
 	case 127:
 		var b [8]byte
-		if _, err = io.ReadFull(c.r, b[:]); err != nil {
+		if err = c.full(b[:]); err != nil {
 			return
 		}
-		n = binary.BigEndian.Uint64(b[:])
+		size = binary.BigEndian.Uint64(b[:])
 	}
-	if op >= opClose && (n > 125 || !fin) {
+	if op >= opClose && (size > 125 || !fin) {
 		err = c.fail(1002, "a control frame that is long or fragmented")
 		return
 	}
-	if n > uint64(c.max) {
+	if size > uint64(c.max) {
 		err = c.fail(1009, "message too large")
 		return
 	}
-	var mask [4]byte
+	n = int(size)
 	if masked {
-		if _, err = io.ReadFull(c.r, mask[:]); err != nil {
-			return
-		}
-	}
-	payload = make([]byte, n)
-	if _, err = io.ReadFull(c.r, payload); err != nil {
-		return
-	}
-	if masked {
-		for i := range payload {
-			payload[i] ^= mask[i%4]
-		}
+		mask = new([4]byte)
+		err = c.full(mask[:])
 	}
 	return
 }
+
+// full fills b from inside a frame, where the connection ending is
+// io.ErrUnexpectedEOF.
+func (c *Conn) full(b []byte) error {
+	_, err := io.ReadFull(c.r, b)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
+}
+
+// payload reads n bytes of payload onto the end of buf and unmasks them.
+// buf grows with the bytes that arrive, never by more than chunk or its
+// own length ahead of them.
+func (c *Conn) payload(buf []byte, n int, mask *[4]byte) ([]byte, error) {
+	start, end := len(buf), len(buf)+n
+	for len(buf) < end {
+		if len(buf) == cap(buf) {
+			buf = slices.Grow(buf, min(end-len(buf), max(chunk, len(buf))))
+		}
+		next := min(cap(buf), end)
+		if err := c.full(buf[len(buf):next]); err != nil {
+			return nil, err
+		}
+		buf = buf[:next]
+	}
+	if mask != nil {
+		for i := start; i < end; i++ {
+			buf[i] ^= mask[(i-start)%4]
+		}
+	}
+	return buf, nil
+}
+
+// SetReadDeadline sets when a Read that is waiting gives up, with an
+// error that matches os.ErrDeadlineExceeded. The zero time means never.
+// A Read that gave up may have stopped inside a frame, so close the
+// connection after one.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.c.SetReadDeadline(t) }
 
 // Write sends msg as one text frame.
 func (c *Conn) Write(msg []byte) error { return c.write(opText, msg) }
@@ -673,10 +1229,28 @@ func (c *Conn) write(op byte, payload []byte) error {
 }
 
 // Close sends a close frame with code and reason, then closes the
-// connection. Closing twice is harmless.
+// connection. A reason over 123 bytes, the room a control frame leaves
+// after the code, is cut short. Close waits at most closeWait for a
+// write in progress; a second Close does nothing and returns nil.
 func (c *Conn) Close(code uint16, reason string) error {
+	if len(reason) > 123 {
+		reason = reason[:123]
+		for len(reason) > 0 && !utf8.ValidString(reason) {
+			reason = reason[:len(reason)-1] // drop the cut rune
+		}
+	}
+	t := time.AfterFunc(closeWait, func() { c.shut() })
 	c.write(opClose, append(binary.BigEndian.AppendUint16(nil, code), reason...))
-	return c.c.Close()
+	t.Stop()
+	return c.shut()
+}
+
+// shut closes the socket the first time and returns its error; later
+// calls return nil.
+func (c *Conn) shut() error {
+	var err error
+	c.once.Do(func() { err = c.c.Close() })
+	return err
 }
 
 // fail closes the connection with code and returns why.
@@ -689,6 +1263,8 @@ func (c *Conn) fail(code uint16, why string) error {
 - [ ] **Step 4: Run** `bin/dev run go test -count=1 ./internal/ws/` → PASS, then `bin/dev run make` → PASS (`check-vet` included). `bin/dev run make check-race` once, since `Conn` is shared between goroutines → PASS.
 
 - [ ] **Step 5: Commit** `feat(rfc-0001): a standard-library WebSocket server`.
+
+Review then added `SetReadDeadline` and `fix(rfc-0001): grow WebSocket buffers with the bytes received, and tighten close handling`: a buffer grows with the bytes received, close frames are validated, a handshake for another version gets 426, and a second `Close` does nothing. The code above is the package with both.
 
 ---
 
