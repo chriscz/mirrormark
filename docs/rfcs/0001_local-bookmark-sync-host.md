@@ -74,39 +74,39 @@ If another member's file is missing or unreadable, the round skips every union t
 
 ```jsonc
 // extension → host, first message; "db" is set by `mirrormark install` (Section 5), "nonce" is new each time (Section 11)
-{"v": 2, "type": "hello", "db": "chrome-personal", "nonce": "9a4e…", "browser": "chrome/141.0"}   // or "firefox/159.0"
+{"v": 1, "type": "hello", "db": "chrome-personal", "nonce": "9a4e…", "browser": "chrome/141.0"}   // or "firefox/159.0"
 
 // host → extension, only if it has that database: its nonce and its proof that it holds the token
-{"v": 2, "type": "challenge", "nonce": "c0d7…", "proof": "51b2…"}
+{"v": 1, "type": "challenge", "nonce": "c0d7…", "proof": "51b2…"}
 
 // extension → host, only after it checked the host's proof; the host runs no round until this is right
-{"v": 2, "type": "proof", "proof": "e83a…"}
+{"v": 1, "type": "proof", "proof": "e83a…"}
 
 // extension → host, at the first bookmark event of a burst; the host starts no round until the next tree
-{"v": 2, "type": "changed"}
+{"v": 1, "type": "changed"}
 
 // extension → host, after hello, after a burst of bookmark events (0.5 s quiet), after each batch
-{"v": 2, "type": "tree", "nodes": [
+{"v": 1, "type": "tree", "nodes": [
   {"id": "1", "parent": null, "root": "toolbar"},
   {"id": "57", "parent": "1", "index": 0, "title": "GitHub", "url": "https://github.com/"}]}
 
 // host → extension, at most 1 MB per message
-{"v": 2, "type": "apply", "batch": 7, "ops": [
+{"v": 1, "type": "apply", "batch": 7, "ops": [
   {"op": "move", "id": "57", "parent": "90", "expect": {"parent": "58"}},
   {"op": "create", "ref": "n1", "parent": "58", "index": 0,
    "title": "GitHub (chrome/work)", "url": "https://github.com/orgs/b"}]}
 
 // extension → host, one result per op
-{"v": 2, "type": "applied", "batch": 7, "results": [{"ok": true}, {"ok": true, "id": "212"}]}
+{"v": 1, "type": "applied", "batch": 7, "results": [{"ok": true}, {"ok": true, "id": "212"}]}
 
 // host → extension, at the end of every round; no problems when it synced cleanly
-{"v": 2, "type": "status", "problems": [{"code": "db-mismatch", "message": "…"}]}
+{"v": 1, "type": "status", "problems": [{"code": "db-mismatch", "message": "…"}]}
 
 // host → extension, every 20 s, so the browser keeps the extension running (Section 11)
-{"v": 2, "type": "ping"}
+{"v": 1, "type": "ping"}
 
 // either direction; from the host, only when it stops
-{"v": 2, "type": "error", "code": "db-locked", "message": "…"}
+{"v": 1, "type": "error", "code": "db-locked", "message": "…"}
 ```
 
 - **Whole trees.** The extension always sends its whole tree, and the host compares it with the database file, so a missed event is fixed by the next tree.
@@ -418,10 +418,10 @@ Native messaging makes the browser start the host, so a browser in a sandbox (fi
 
 **Which database a connection is: a challenge, not the token.** The token never crosses the socket. Instead each side proves it holds it, and the server proves it first, so the extension sends nothing that helps anyone until it knows it reached its own mirrormark. On each connection:
 
-1. The extension sends `{"v": 2, "type": "hello", "db": <id>, "nonce": <nonce_e>, "browser": …}`. The database id is not secret.
-2. The host answers only if the database file exists, its profile block's `origin` equals the connection's `Origin` header, it has a `token`, and `nonce_e` is well formed. It then sends `{"v": 2, "type": "challenge", "nonce": <nonce_s>, "proof": <proof_s>}`, with `proof_s = HMAC-SHA256(token, "server:" + port + ":" + nonce_e)`. Otherwise it answers `error` and stops: `db-missing` as before, or the new code `bad-token`, and the popup says to run `mirrormark install` for this profile again.
+1. The extension sends `{"v": 1, "type": "hello", "db": <id>, "nonce": <nonce_e>, "browser": …}`. The database id is not secret.
+2. The host answers only if the database file exists, its profile block's `origin` equals the connection's `Origin` header, it has a `token`, and `nonce_e` is well formed. It then sends `{"v": 1, "type": "challenge", "nonce": <nonce_s>, "proof": <proof_s>}`, with `proof_s = HMAC-SHA256(token, "server:" + port + ":" + nonce_e)`. Otherwise it answers `error` and stops: `db-missing` as before, or the new code `bad-token`, and the popup says to run `mirrormark install` for this profile again.
 3. The extension computes `proof_s` itself and compares. If it differs, the extension closes that socket, sends nothing more on it, and tries the next port (below).
-4. The extension sends `{"v": 2, "type": "proof", "proof": <proof_e>}`, with `proof_e = HMAC-SHA256(token, "extension:" + nonce_s)`, then its tree.
+4. The extension sends `{"v": 1, "type": "proof", "proof": <proof_e>}`, with `proof_e = HMAC-SHA256(token, "extension:" + nonce_s)`, then its tree.
 5. The host compares `proof_e` in constant time (`hmac.Equal`). If it differs, it answers `error` `bad-token` and stops. Only when it matches does it take the database's lock and touch the lock file, so `db.Connected` (Section 5) still confirms a binding, and only for a proven one. Messages before then, other than `hello` and `proof`, are ignored, as a tree before a hello is today.
 
 Encodings, exactly: each nonce is 32 bytes from a cryptographic random source, written as 64 lowercase hex digits. The HMAC key is the token as text, its 64 lowercase hex digits encoded as ASCII (not the 32 bytes they stand for), so neither side decodes hex. The HMAC input is the ASCII string shown, with `port` the decimal port the server listens on and the nonce as its 64 hex digits; each proof is the 32-byte HMAC as 64 lowercase hex digits. The extension uses Web Crypto (`crypto.subtle.importKey("raw", …, {name: "HMAC", hash: "SHA-256"})` and `sign`); the server uses `crypto/hmac` and `crypto/sha256`.
@@ -451,7 +451,7 @@ profile:
   token: 3f9c…                                                    # 64 hex digits, written by install
 ```
 
-**The protocol over WebSocket.** The messages of Section 2 stay as they are, one JSON message per WebSocket text frame, with `v` raised to 2 because the hello gains `nonce` and the `challenge` and `proof` messages are new. The server sends `{"v": 2, "type": "ping"}` every 20 s on each connection. Messages to the extension stay within 1 MB, so the batch limits do not change; messages from it may be up to 64 MB, as before.
+**The protocol over WebSocket.** The messages of Section 2 stay as they are, one JSON message per WebSocket text frame, with `v` still 1. The hello gains `nonce`, and `challenge`, `proof` and `ping` are new, but no peer of one transport ever meets one of the other: the new extension only dials the server, and the old one only uses native messaging, which the new binary drops. So a version check would never fire. The server sends `{"v": 1, "type": "ping"}` every 20 s on each connection. Messages to the extension stay within 1 MB, so the batch limits do not change; messages from it may be up to 64 MB, as before.
 
 **A WebSocket server in the standard library.** A package of about 250 lines, `internal/ws`, does only what the server needs: the opening handshake (version 13; no subprotocols, extensions or compression), masked frames from the client (text, continuation, ping, which it answers with pong, pong, which it ignores, and close, which it answers), and unmasked, unfragmented text and close frames to the client. It refuses binary frames, unmasked frames, and messages over the limit. No new dependency.
 
@@ -476,25 +476,24 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-`ExecStart` is the binary's absolute path, with symlinks resolved, as the host manifest's was. For each of `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` that is set to an absolute path when `install` runs, the unit gets an `Environment=` line, so the server finds the same files as `install`. `install` runs `systemctl --user daemon-reload` and `enable mirrormark.service`, then `restart` on a run that changed the unit or the browser's files (a new build) and `start` otherwise. If `systemctl` is missing or fails, as without a user session bus, `install` says so and prints `mirrormark serve` as the command to keep running. Before it opens any bind page, `install` checks that a server holds `serve.lock`, waiting up to 5 s. If none does, it says how to start one, opens nothing and exits 1. `uninstall --browser B` stops, disables and removes the unit only if no other browser, of either family, still has mirrormark in place (another Chromium browser's external file, or the XPI in a Gecko profile that a database names); otherwise it says which browser still uses it. A user may run `mirrormark serve` by hand instead; `serve.lock` keeps the two from running together.
+`ExecStart` is the binary's absolute path, with symlinks resolved, as the host manifest's was. The unit sets no environment: systemd's user manager supplies it, and a user who sets the XDG variables only in a shell must set them for systemd too (`~/.config/environment.d/`), or the server looks for its files elsewhere and each popup reports `db-missing`; the README says so. `install` runs `systemctl --user daemon-reload`, `enable mirrormark.service` and `restart mirrormark.service` on every run with `--profile`, so the server always runs the binary just installed. If `systemctl` is missing or fails, as without a user session bus, `install` says so and prints `mirrormark serve` as the command to keep running. Before it opens any bind page, `install` checks that a server holds `serve.lock`, waiting up to 5 s. If none does, it says how to start one, opens nothing and exits 1. `uninstall --browser B` stops, disables and removes the unit only if no other browser, of either family, still has mirrormark in place (another Chromium browser's external file, or the XPI in a Gecko profile that a database names); otherwise it says which browser still uses it. A user may run `mirrormark serve` by hand instead; `serve.lock` keeps the two from running together.
 
 **Installing, per browser.**
 
 - **Chrome and Brave.** `install` writes only the browser's external file, and `sudo` is needed only for that file. The CRX and the unpacked extension go with the last Chromium browser's external file, and the key rule is unchanged.
 - **Developer Edition and LibreWolf.** `install` writes only the XPI and `user.js` in each profile. The two browsers no longer share a file.
-- **Old host manifests.** `install --profile …` and `uninstall` remove a native host manifest left by an earlier mirrormark: `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names this install's extension id (with `sudo rm` if needed), and `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names the gecko id. One that names another extension belongs to another install and stays.
+- **Old host manifests.** `install` leaves a native host manifest from an earlier mirrormark in place, since nothing starts it any more: the new extension has no `nativeMessaging` permission, and the new binary has no host mode. `uninstall` removes it, as it removed the manifests it wrote before: `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names this install's extension id (with `sudo rm` if needed), and `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names the gecko id. One that names another extension belongs to another install and stays.
 
 **Upgrading from the native-messaging build.** The user installs the new binary and runs `install --browser B --profile …` for each browser, as after any upgrade. The extension's version changed, so this is a first pass:
 
 1. It rewrites the external file or the XPIs.
-2. It removes the old host manifests.
-3. It writes and starts the service, and asks for a browser restart.
+2. It writes and starts the service, and asks for a browser restart.
 
 Until the restart, the old extension cannot reach a host, since the new binary has none. After it, the new extension reaches the server, but it has no token yet, so it gets `bad-token`. The second `install` binds each ready profile with its token. Database files without `origin` and `token` load as before. An older binary refuses a file that has them, because it rejects unknown keys, so going back means deleting those two lines first.
 
 **Tests.**
 
-- **Unit tests:** the WebSocket codec; the server's checks (wrong `Host`, unknown `Origin`, a database with no token or another origin, which get an `error` and no challenge); the challenge (the server's proof names its port and the extension's nonce; a wrong `proof_e`, another database's, and a `proof_e` replayed from an earlier connection against a new `nonce_s` are refused with `bad-token` and do not count as reporting in; the right one runs the host); two connections for one database (`db-locked`); the ping; falling back to the next port when the first is taken; `serve.lock`; `install` writing `origin` and `token`, keeping the token when run again, and the bind URL; the unit file and the `systemctl` calls, with a fake `systemctl`, and the message when it fails; uninstall's rule for the unit; removing old host manifests.
+- **Unit tests:** the WebSocket codec; the server's checks (wrong `Host`, unknown `Origin`, a database with no token or another origin, which get an `error` and no challenge); the challenge (the server's proof names its port and the extension's nonce; a wrong `proof_e`, another database's, and a `proof_e` replayed from an earlier connection against a new `nonce_s` are refused with `bad-token` and do not count as reporting in; the right one runs the host); two connections for one database (`db-locked`); the ping; falling back to the next port when the first is taken; `serve.lock`; `install` writing `origin` and `token`, keeping the token when run again, and the bind URL; the unit file and the `systemctl` calls, with a fake `systemctl`, and the message when it fails; uninstall's rule for the unit; uninstall removing an old host manifest that names this install, and keeping one that names another.
 - **End-to-end:** the harness starts `mirrormark serve` itself for each test, not through systemd, since the dev image has no user session, and stops it at cleanup. The existing tests keep their meaning: "a new host for a" and "the old host exits" become a new connection for a and the old connection's close, read from the log's connection numbers. One new test stops the server, sees the popup say mirrormark is not running, then puts a program on the first port that accepts any upgrade and answers every hello with a wrong proof, starts the server again (which takes the second port), and sees the profile sync through it while the program on the first port receives a hello but never a `proof`. That is the extension refusing a wrong `proof_s`, which only a browser can test. Phase 6's Brave and LibreWolf end-to-end tests, which had not run yet, run on the new transport.
 
 **User decisions.** The user made these after the spike:
@@ -516,8 +515,10 @@ Chosen by us within those decisions:
 - the ping is a JSON text message, not a WebSocket control frame, because the extension never sees control frames;
 - every browser makes the keep-alive call;
 - the reconnect alarm becomes periodic as well as one-shot;
-- the service restarts on a first pass;
-- the unit gets `Environment=` lines for the XDG variables;
+- `install` restarts the service on every run with `--profile`;
+- the unit sets no environment;
+- `install` leaves old host manifests to `uninstall`;
+- the protocol version stays 1;
 - the new error code is `bad-token`;
 - the challenge's encodings: hex nonces and proofs, the token's text as the HMAC key, and the inputs `server:<port>:<nonce_e>` and `extension:<nonce_s>`;
 - the port in the server's proof, which stops a relay through another port;
@@ -596,7 +597,8 @@ Chosen by us within those decisions:
 - **The traffic is not encrypted.** The challenge proves who is at each end; it does not hide the messages. Only a program that can capture loopback traffic, which on Linux needs root or `CAP_NET_RAW`, could read the bookmarks as they pass, and root can read the files anyway.
 - **Changes from other profiles can wait up to a minute.** A background the browser stopped with no traffic starts again at the next periodic alarm. A change made in the browser itself wakes it at once.
 - **Failed connection attempts show as errors.** When the first port is not mirrormark's, Chrome logs the failed socket in the extension's console, and may show it on the extensions page.
-- **An upgrade that changes only the binary does not restart the server.** `install` restarts the service only when it changes the browser's files or the unit. After such an upgrade, run `systemctl --user restart mirrormark`; the README says so.
+- **Upgrading the binary alone does not restart the server.** The running server keeps the old build until `install` runs, which restarts it every time, as the README's upgrade steps say.
+- **Each `install --profile` restarts the server.** Every connected profile loses its connection and reconnects at its next alarm, within a minute; nothing is lost, since a round cut short writes no file.
 - **The service runs only while the user is logged in**, which is when their browsers run. Without systemd, the user starts `mirrormark serve` themselves.
 
 ## Rollout
@@ -624,7 +626,7 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Tests:** unit tests that read each state in the profile-state spike from fixture files, for both families; that a profile that is not ready gets its message and no open; that each ready profile gets one open and a silent one ends in `not bound` after the wait; that a listing writes no file, starts no `sudo` and no browser, for Brave before and after an install and for Developer Edition with never-run and other-browser profiles; and the numeric-aware order and selection by ID and number (an exact ID beats a number, a number too large for any profile is refused as one). E2e: the existing Chrome and Firefox install tests with `--profile`, a listing of a bound Chrome profile, and a profile named before the browser installed the extension is reported not ready, then binds after a restart.
    - **Exit:** all pass, and the README's steps are run again on the desktop Brave that showed "blocked by Brave".
 
-8. **A local server instead of native messaging** (Section 11). In order: the host reads and writes messages through a connection type, not stdin and stdout; a standard-library WebSocket server package; `mirrormark serve`, which checks `Host` and `Origin` and runs the challenge but which no extension uses yet; the log rotating while the server runs; `install` writing `origin` and `token` and handing the token to the bind page; the systemd user service, installed and uninstalled together; the switch, in which the extension connects to the server, the protocol becomes version 2, and the e2e harness starts `mirrormark serve`; then removing native messaging. Phase 6's Brave and LibreWolf end-to-end tests follow, on the new transport. Every commit up to the switch leaves native messaging working, and every commit from the switch on uses the server, so no prefix leaves a user without a working transport.
+8. **A local server instead of native messaging** (Section 11). In order: the host reads and writes messages through a connection type, not stdin and stdout; a standard-library WebSocket server package; `mirrormark serve`, which checks `Host` and `Origin` and runs the challenge but which no extension uses yet; `install` writing `origin` and `token` and handing the token to the bind page; the systemd user service, installed and uninstalled together; the switch, in which the extension connects to the server and the e2e harness starts `mirrormark serve`; then removing native messaging. Phase 6's Brave and LibreWolf end-to-end tests follow, on the new transport. Every commit up to the switch leaves native messaging working, and every commit from the switch on uses the server, so no prefix leaves a user without a working transport.
    - **Tests:** as in Section 11, Tests.
    - **Exit:** all pass, the README's steps are run once on a desktop with Chrome and with Developer Edition, upgrading from the native-messaging build, and a server restart and a browser restart each reconnect.
 
@@ -658,7 +660,7 @@ Each is its own RFC or stack once the Chrome version works.
 
 - **Security.** The server listens on `127.0.0.1` only. It refuses an upgrade whose `Host` is not `127.0.0.1:<port>` or whose `Origin` is no database's, and runs no host until the connection proves, by a challenge, that it holds the named database's token; the server proves it holds the token first, and the token never crosses the socket (Section 11). The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies one JSON file into place with `install`, naming a CRX in the user's data directory; for Brave it writes Brave's file into `/opt/brave.com/brave/extensions/`. For Firefox and LibreWolf nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks).
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes a browser's databases and backups, and the last browser's purge deletes the rest.
-- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The server logs to `~/.local/state/mirrormark/log`; `install` prints its path. When the log grows over 1 MiB, the server moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the server restarts.
+- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The server logs to `~/.local/state/mirrormark/log`; `install` prints its path. When the server starts and the log is over 1 MiB, it moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the server restarts. The log does not rotate while the server runs, so such a problem grows one file for the whole session (a few MB a day); `TASKS.md` tracks rotating on write.
 
 ## Open questions
 
@@ -707,3 +709,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — profile listing as built: the example line gives the first unbound profile's quoted ID; a new `unreadable` state for a profile whose files cannot be parsed; `not <browser>` covers any refusal by the browser check, with the reason on stderr.
 - 2026-10-15 — Section 11 and Phase 8 after the localhost transport spike, by the user's decision: one `mirrormark serve` per user, run as a systemd user service, in place of native messaging; the extension connects over a WebSocket to `127.0.0.1` on the first of three fixed ports that answers; the server checks `Host`, `Origin` and a per-profile token that `install` writes into the profile block and hands over through the bind page; protocol version 2 with a ping every 20 s; host manifests are no longer written, and old ones are removed.
 - 2026-10-15 — by the user's decision (Open question 5, now resolved), the token no longer crosses the socket: the hello carries a nonce, the server answers a `challenge` with its own nonce and an HMAC proof bound to its port, and the extension checks it before sending its own `proof`. Hex encodings fixed; a port that fails the challenge is skipped; the e2e restart test adds a program on the first port that cannot prove itself. The risk of a program on the first port getting the token becomes one of a program holding all three ports stopping sync.
+- 2026-10-15 — local server plan trimmed: the protocol version stays 1, since no peer of one transport meets the other; `install` restarts the service on every run instead of deciding when; the unit carries no `Environment=` lines; `install` leaves old host manifests for `uninstall`; the log still rotates only when the server starts, with rotating on write left in `TASKS.md`.
