@@ -396,11 +396,14 @@ func TestOpenStartsOnceAndWaits(t *testing.T) {
 	}
 }
 
+// tok is a bind token for the tests.
+const tok = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestBindOpensThePageOnce(t *testing.T) {
 	shortBindWait(t)
 	fake, log := fakeChrome(t)
 	udd := filepath.Join(t.TempDir(), "udd")
-	err := Chrome.Bind(fake, udd, "Profile 1", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-work", func(time.Time) bool {
+	err := Chrome.Bind(fake, udd, "Profile 1", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-work", tok, func(time.Time) bool {
 		data, _ := os.ReadFile(log)
 		return len(data) > 0
 	})
@@ -408,7 +411,7 @@ func TestBindOpensThePageOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(log)
-	if want := "--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#chrome-work\n"; string(data) != want {
+	if want := "--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#chrome-work." + tok + "\n"; string(data) != want {
 		t.Fatalf("calls:\n%s", data)
 	}
 }
@@ -418,12 +421,12 @@ func TestBindSaysWhenTheExtensionDoesNotReportIn(t *testing.T) {
 	fake, log := fakeChrome(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	udd, _ := Brave.DefaultUserDataDir()
-	err := Brave.Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "brave-a", func(time.Time) bool { return false })
+	err := Brave.Bind(fake, udd, "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "brave-a", tok, func(time.Time) bool { return false })
 	if err == nil || err.Error() != "mirrormark did not report in within 200ms of opening the page; look at the tab Brave opened" {
 		t.Fatalf("err %v", err)
 	}
 	// The default data directory is left implicit, as a user would type it.
-	if data, _ := os.ReadFile(log); string(data) != "--profile-directory=Default chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#brave-a\n" {
+	if data, _ := os.ReadFile(log); string(data) != "--profile-directory=Default chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/bind.html#brave-a."+tok+"\n" {
 		t.Fatalf("calls:\n%s", data)
 	}
 }
@@ -433,7 +436,7 @@ func TestBindPassesTheAttemptStart(t *testing.T) {
 	fake, _ := fakeChrome(t)
 	before := time.Now()
 	var seen time.Time
-	Chrome.Bind(fake, t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(since time.Time) bool {
+	Chrome.Bind(fake, t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", tok, func(since time.Time) bool {
 		seen = since
 		return true
 	})
@@ -443,7 +446,7 @@ func TestBindPassesTheAttemptStart(t *testing.T) {
 }
 
 func TestBindReportsAChromeThatWillNotStart(t *testing.T) {
-	err := Chrome.Bind(filepath.Join(t.TempDir(), "missing"), t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", func(time.Time) bool { return true })
+	err := Chrome.Bind(filepath.Join(t.TempDir(), "missing"), t.TempDir(), "Default", "pjjjaeommfpeolloibnafkcmkindkagl", "chrome-a", tok, func(time.Time) bool { return true })
 	if err == nil {
 		t.Fatal("no error")
 	}

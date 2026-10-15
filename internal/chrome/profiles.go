@@ -9,7 +9,7 @@
 // directory reaches every Chrome data directory.
 //
 // Neither the extension nor the host can tell which profile they run in, so
-// install binds each profile by opening bind.html#<database id> in it from
+// install binds each profile by opening bind.html#<database id>.<token> in it from
 // the command line, and waits for the extension to report in.
 package chrome
 

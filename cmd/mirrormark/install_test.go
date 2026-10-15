@@ -257,7 +257,7 @@ func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls")
 	script := "#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> " + log + "\n" +
-		"[ \"${url##*#}\" = \"$FAKE_NO_HELLO\" ] || touch -d \"@$(date +%s.%N)\" \"" + p.ProfilesDir() + "/${url##*#}.lock\"\n"
+		"frag=${url##*#}; [ \"${frag%%.*}\" = \"$FAKE_NO_HELLO\" ] || touch -d \"@$(date +%s.%N)\" \"" + p.ProfilesDir() + "/${frag%%.*}.lock\"\n"
 	for _, n := range []string{"google-chrome", "brave-browser"} {
 		os.WriteFile(filepath.Join(dir, n), []byte(script), 0o755)
 	}
@@ -266,6 +266,16 @@ func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
 	chrome.BindWait = 500 * time.Millisecond
 	t.Cleanup(func() { chrome.BindWait = old })
 	return log
+}
+
+// tokenOf is the token install wrote for database id.
+func tokenOf(t *testing.T, p db.Paths, id string) string {
+	t.Helper()
+	d, err := db.LoadDB(p.ProfileFile(id))
+	if err != nil || d.Profile.Token == "" {
+		t.Fatalf("no token for %s: %+v, %v", id, d, err)
+	}
+	return d.Profile.Token
 }
 
 // chromiumReady writes the Preferences a Chromium browser has once it has
@@ -380,9 +390,12 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 		}
 	}
 	calls, _ := os.ReadFile(chromeLog)
-	if want := "--user-data-dir=" + udd + " --profile-directory=Default chrome-extension://" + id + "/bind.html#chrome-personal\n" +
-		"--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://" + id + "/bind.html#chrome-work\n"; string(calls) != want {
+	if want := "--user-data-dir=" + udd + " --profile-directory=Default chrome-extension://" + id + "/bind.html#chrome-personal." + tokenOf(t, p, "chrome-personal") + "\n" +
+		"--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://" + id + "/bind.html#chrome-work." + tokenOf(t, p, "chrome-work") + "\n"; string(calls) != want {
 		t.Fatalf("chrome calls:\n%s", calls)
+	}
+	if d, err := db.LoadDB(p.ProfileFile("chrome-personal")); err != nil || d.Profile.Origin != "chrome-extension://"+id {
+		t.Fatalf("origin %+v, %v", d, err)
 	}
 
 	// One --profile binds that profile alone.
@@ -417,7 +430,7 @@ func TestInstallReportsAProfileThatDoesNotConfirm(t *testing.T) {
 	if want := "not bound: Default: mirrormark did not report in within 300ms of opening the page; look at the tab Chrome opened, then run mirrormark install --user-data-dir " + udd + " --profile Default.\n"; !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "bound: Profile 1 -> chrome-work") {
 		t.Fatalf("output:\n%s", out.String())
 	}
-	if calls, _ := os.ReadFile(log); bytes.Count(calls, []byte("#chrome-personal\n")) != 1 {
+	if calls, _ := os.ReadFile(log); bytes.Count(calls, []byte("#chrome-personal.")) != 1 {
 		t.Fatalf("chrome calls:\n%s", calls)
 	}
 }
@@ -828,7 +841,7 @@ func geckoData(t *testing.T, p db.Paths, root, bin, app, channel string) (calls 
 	must(t, os.WriteFile(filepath.Join(ff, "application.ini"), []byte("[App]\nName="+app+"\n"), 0o644))
 	calls = filepath.Join(ff, "calls")
 	must(t, os.WriteFile(filepath.Join(ff, bin), []byte("#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> "+calls+"\n"+
-		"case \"$url\" in *bind.html*) touch -d \"@$(date +%s.%N)\" \""+p.ProfilesDir()+"/${url##*#}.lock\";; esac\n"), 0o755))
+		"case \"$url\" in *bind.html*) frag=${url##*#}; touch -d \"@$(date +%s.%N)\" \""+p.ProfilesDir()+"/${frag%%.*}.lock\";; esac\n"), 0o755))
 	ini := "[General]\nVersion=2\n"
 	for i, n := range []string{"alpha", "beta"} {
 		dir := filepath.Join(root, "x"+n+"."+n)
@@ -903,8 +916,11 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 	if !strings.Contains(out.String(), "bound: xbeta.beta -> firefox-beta\n") || strings.Contains(out.String(), "alpha") {
 		t.Fatalf("output:\n%s", out.String())
 	}
-	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#firefox-beta")) {
+	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#firefox-beta."+tokenOf(t, p, "firefox-beta"))) {
 		t.Fatalf("calls:\n%s", c)
+	}
+	if d, err := db.LoadDB(p.ProfileFile("firefox-beta")); err != nil || d.Profile.Origin != "moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b" {
+		t.Fatalf("origin %+v, %v", d, err)
 	}
 }
 
@@ -1355,7 +1371,7 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 	if !strings.Contains(out.String(), "bound: Profile 1 -> brave-work\n") {
 		t.Fatalf("output:\n%s", out.String())
 	}
-	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("--user-data-dir="+udd+" --profile-directory=Profile 1 chrome-extension://"+id+"/bind.html#brave-work\n")) {
+	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("--user-data-dir="+udd+" --profile-directory=Profile 1 chrome-extension://"+id+"/bind.html#brave-work."+tokenOf(t, p, "brave-work")+"\n")) {
 		t.Fatalf("calls:\n%s", c)
 	}
 }
@@ -1557,7 +1573,7 @@ func TestInstallIntoLibreWolfThenBind(t *testing.T) {
 	if !strings.Contains(out.String(), "bound: xbeta.beta -> librewolf-beta\n") {
 		t.Fatalf("output:\n%s", out.String())
 	}
-	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#librewolf-beta")) {
+	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#librewolf-beta."+tokenOf(t, p, "librewolf-beta"))) {
 		t.Fatalf("calls:\n%s", c)
 	}
 }

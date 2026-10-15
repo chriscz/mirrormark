@@ -262,13 +262,16 @@ func boundFile(bin string) func(time.Time) bool {
 	return func(time.Time) bool { _, err := os.Stat(filepath.Join(filepath.Dir(bin), "bound")); return err == nil }
 }
 
+// tok is a bind token for the tests.
+const tok = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestBindOpensThePageOnceWithTheUUID(t *testing.T) {
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	if err := Firefox.Bind(bin, dir, testUUID, "firefox-work", boundFile(bin)); err != nil {
+	if err := Firefox.Bind(bin, dir, testUUID, "firefox-work", tok, boundFile(bin)); err != nil {
 		t.Fatal(err)
 	}
-	if calls, _ := os.ReadFile(log); string(calls) != "--profile "+dir+" about:blank moz-extension://"+testUUID+"/bind.html#firefox-work\n" {
+	if calls, _ := os.ReadFile(log); string(calls) != "--profile "+dir+" about:blank moz-extension://"+testUUID+"/bind.html#firefox-work."+tok+"\n" {
 		t.Fatalf("calls:\n%s", calls)
 	}
 }
@@ -276,7 +279,7 @@ func TestBindOpensThePageOnceWithTheUUID(t *testing.T) {
 func TestBindSaysWhenTheAddonDoesNotReportIn(t *testing.T) {
 	dir := t.TempDir()
 	bin, log := fakeFirefox(t, dir)
-	err := LibreWolf.Bind(bin, dir, testUUID, "librewolf-work", func(time.Time) bool { return false })
+	err := LibreWolf.Bind(bin, dir, testUUID, "librewolf-work", tok, func(time.Time) bool { return false })
 	calls, _ := os.ReadFile(log)
 	if err == nil || !strings.Contains(err.Error(), "look at the tab LibreWolf opened") || bytes.Count(calls, []byte("bind.html")) != 1 {
 		t.Fatalf("err %v, calls:\n%s", err, calls)

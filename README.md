@@ -364,6 +364,10 @@ key](#ids-labels-and-the-key)).
 
 ### Installing and binding
 
+- **The token.** The bind page also stores the profile's token, a secret
+  that `install` writes into the profile's database file. It proves the
+  binding to the server once the extension uses it. Running `install` for a
+  bound profile keeps its token.
 - **`not ready: <profile>`.** The profile's files say mirrormark is not
   installed there, is turned off, or is another build, so `install` opened
   nothing there. The line says what to do and which command to run then.

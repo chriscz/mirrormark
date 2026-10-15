@@ -35,15 +35,15 @@ func Open(bin string, args []string, reported func(since time.Time) bool) (bool,
 	return false, nil
 }
 
-// Bind opens bind.html#<dbID> once in one of b's profiles with bin and
+// Bind opens bind.html#<dbID>.<token> once in one of b's profiles with bin and
 // waits for the extension to report in.
-func (b Browser) Bind(bin, userDataDir, profileDir, extID, dbID string, reported func(since time.Time) bool) error {
+func (b Browser) Bind(bin, userDataDir, profileDir, extID, dbID, token string, reported func(since time.Time) bool) error {
 	def, _ := b.DefaultUserDataDir()
 	var args []string
 	if userDataDir != def {
 		args = append(args, "--user-data-dir="+userDataDir)
 	}
-	args = append(args, "--profile-directory="+profileDir, "chrome-extension://"+extID+"/bind.html#"+dbID)
+	args = append(args, "--profile-directory="+profileDir, "chrome-extension://"+extID+"/bind.html#"+dbID+"."+token)
 	ok, err := Open(bin, args, reported)
 	if err != nil || ok {
 		return err

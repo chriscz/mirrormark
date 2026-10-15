@@ -191,7 +191,11 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		}
 		id := ids[c.Dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, reported); err != nil {
+		token, err := db.Bind(p, id, "chrome-extension://"+ext.ID)
+		if err != nil {
+			return fail(err)
+		}
+		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, token, reported); err != nil {
 			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", c.ID(), err, cmd)
 			code = 1
 			continue
@@ -418,7 +422,11 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 		}
 		id := ids[tg.dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
-		if err := b.Bind(tg.bin, tg.dir, uuid, id, reported); err != nil {
+		token, err := db.Bind(p, id, "moz-extension://"+uuid)
+		if err != nil {
+			return fail(err)
+		}
+		if err := b.Bind(tg.bin, tg.dir, uuid, id, token, reported); err != nil {
 			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", tg.c.ID(), err, cmd)
 			code = 1
 			continue

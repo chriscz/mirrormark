@@ -53,6 +53,9 @@ func TestInstallAndBind(t *testing.T) {
 		if err != nil || d.Profile.Path != filepath.Join(c.b.UDD, "Default") {
 			t.Errorf("%s database %+v, %v", c.id, d, err)
 		}
+		if got := eval[string](t, c.b, `chrome.storage.local.get("token").then((r) => r.token)`); got != d.Profile.Token || got == "" {
+			t.Errorf("%s holds token %q, the database %q", c.b.Name, got, d.Profile.Token)
+		}
 		roundDone(t, c.b, c.b.Name+" round after binding")
 	}
 
