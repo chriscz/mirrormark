@@ -25,4 +25,7 @@ func TestDefaultPathsFollowXDG(t *testing.T) {
 	if got := p.ProfileFile("chrome-a"); got != filepath.Join("/x/data/mirrormark/profiles", "chrome-a.yaml") {
 		t.Fatalf("ProfileFile = %q", got)
 	}
+	if got := p.ServeLock(); got != "/x/data/mirrormark/serve.lock" {
+		t.Fatalf("ServeLock = %q", got)
+	}
 }

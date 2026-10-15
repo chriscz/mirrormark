@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func TestUnpackWritesFilesAndKey(t *testing.T) {
 	if err := Unpack(dir, pub); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"manifest.json", "background.js", "bind.html", "bind.js", "popup.html", "popup.js"} {
+	for _, f := range []string{"manifest.json", "background.js", "bind.html", "bind.js", "popup.html", "popup.js", "ports.json"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Errorf("%s: %v", f, err)
 		}
@@ -81,5 +82,12 @@ func TestBindAcceptsDatabaseIDs(t *testing.T) {
 	js, _ := Files.ReadFile("bind.js")
 	if !strings.Contains(string(js), db.ValidID.String()) {
 		t.Fatalf("bind.js does not check ids with %s", db.ValidID)
+	}
+}
+
+func TestPorts(t *testing.T) {
+	got, err := Ports()
+	if err != nil || !slices.Equal(got, []int{61959, 63018, 63454}) {
+		t.Fatalf("Ports() = %v, %v", got, err)
 	}
 }

@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/db"
@@ -31,6 +34,7 @@ Commands:
               [--browser chrome|brave|firefox|librewolf] [--purge]
   unpack      Write the extension, with this install's key, for Load unpacked
               [DIR]
+  serve       Run the server the extensions connect to
   host        Run as the native messaging host (the browser does this)
   help        Show this help
 `
@@ -58,6 +62,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdUninstall(args[1:], stdout, stderr)
 	case "unpack":
 		return cmdUnpack(args[1:], stdout, stderr)
+	case "serve":
+		return cmdServe(args[1:], stderr)
 	}
 	fmt.Fprintf(stderr, "mirrormark: unknown command %q\n", args[0])
 	usage(stderr)
@@ -71,26 +77,85 @@ func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
-	if err := os.MkdirAll(p.State, 0o700); err != nil {
-		fmt.Fprintln(stderr, "mirrormark:", err)
-		return 1
-	}
-	// Every profile's host appends to this one log; keep it bounded. Two
-	// hosts starting at once may both rotate, and so lose the old log.
-	rotateErr := rotate(p.LogFile())
-	f, err := os.OpenFile(p.LogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	log, f, err := openLog(p)
 	if err != nil {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
 	defer f.Close()
+	if err := host.Run(context.Background(), host.Stream(stdin, stdout), host.Options{Paths: p, Log: log}); err != nil {
+		log.Warn("host stopped", "err", err)
+		return 1
+	}
+	return 0
+}
+
+// openLog opens the log every host and the server append to, rotating it
+// first if it is large. Two hosts starting at once may both rotate, and so
+// lose the old log. The caller closes the file.
+func openLog(p db.Paths) (*slog.Logger, *os.File, error) {
+	if err := os.MkdirAll(p.State, 0o700); err != nil {
+		return nil, nil, err
+	}
+	rotateErr := rotate(p.LogFile())
+	f, err := os.OpenFile(p.LogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
 	log := slog.New(slog.NewTextHandler(f, nil)).With("pid", os.Getpid())
 	if rotateErr != nil {
 		log.Warn("cannot rotate the log", "err", rotateErr)
 	}
-	if err := host.Run(context.Background(), host.Stream(stdin, stdout), host.Options{Paths: p, Log: log}); err != nil {
-		log.Warn("host stopped", "err", err)
+	return log, f, nil
+}
+
+// cmdServe runs the server until it is told to stop. One runs per user:
+// it holds the serve lock while it runs.
+func cmdServe(args []string, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "mirrormark: usage: mirrormark serve")
+		return 2
+	}
+	if refuseRoot("serve", "", stderr) {
 		return 1
+	}
+	fail := func(err error) int {
+		fmt.Fprintln(stderr, "mirrormark:", err)
+		return 1
+	}
+	p, err := db.DefaultPaths()
+	if err != nil {
+		return fail(err)
+	}
+	unlock, err := db.TryLock(p.ServeLock())
+	if errors.Is(err, db.ErrLocked) {
+		return fail(errors.New("mirrormark is already running for this user"))
+	}
+	if err != nil {
+		return fail(err)
+	}
+	defer unlock()
+	log, f, err := openLog(p)
+	if err != nil {
+		return fail(err)
+	}
+	defer f.Close()
+	ports, err := extension.Ports()
+	if err != nil {
+		return fail(err)
+	}
+	ln, err := host.Listen(ports)
+	if err != nil {
+		log.Warn("cannot listen", "err", err)
+		return fail(err)
+	}
+	log.Info("listening", "addr", ln.Addr().String())
+	fmt.Fprintf(stderr, "mirrormark: listening on %s; the log is %s\n", ln.Addr(), p.LogFile())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := host.Serve(ctx, ln, host.Options{Paths: p, Log: log}); err != nil {
+		log.Warn("server stopped", "err", err)
+		return fail(err)
 	}
 	return 0
 }

@@ -140,7 +140,7 @@ func TestXPIHoldsTheExtensionWithoutAKey(t *testing.T) {
 	for _, f := range z.File {
 		names = append(names, f.Name)
 	}
-	if !slices.Equal(names, []string{"background.js", "bind.html", "bind.js", "manifest.json", "popup.html", "popup.js"}) {
+	if !slices.Equal(names, []string{"background.js", "bind.html", "bind.js", "manifest.json", "popup.html", "popup.js", "ports.json"}) {
 		t.Fatalf("files %v", names)
 	}
 	m, _ := z.Open("manifest.json")

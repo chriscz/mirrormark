@@ -1,5 +1,6 @@
-// Package host is the native messaging host: Chrome starts it when the
-// extension connects, and it runs sync rounds for that one profile.
+// Package host runs sync rounds for one extension connection, and Serve
+// accepts the connections. It also runs as the native messaging host
+// Chrome starts, for that one profile.
 //
 // A round runs when the extension sends a tree (on connect, after a burst of
 // bookmark events and after each batch) and when the poll sees that
@@ -29,10 +30,15 @@ const Version = 1
 
 // Msg is every message in either direction; Type says which fields count.
 //
+// Through the server, the hello carries the extension's nonce and the host
+// answers "challenge" with its own nonce and its proof; the extension
+// answers "proof" with its own. The host runs only after a right proof.
+//
 // The host sends "error" only when it stops, with one of these codes:
 // unsupported-version, bad-db, db-missing (no database file), db-locked
 // (another host uses the database), db-lock-error (the lock file cannot be
-// locked).
+// locked), bad-token (through the server: the database has no token or
+// another origin, the nonce is malformed, or the proof is wrong).
 //
 // After every round the host sends "status" with the problems the round
 // found, none when it synced cleanly, so the popup shows only what is still
@@ -47,6 +53,8 @@ type Msg struct {
 	V        int              `json:"v"`
 	Type     string           `json:"type"`
 	DB       string           `json:"db,omitempty"`
+	Nonce    string           `json:"nonce,omitempty"` // hello, challenge: 32 random bytes in hex
+	Proof    string           `json:"proof,omitempty"` // challenge, proof: an HMAC in hex
 	Browser  string           `json:"browser,omitempty"`
 	Nodes    []round.TreeNode `json:"nodes,omitempty"`
 	Batch    int              `json:"batch,omitempty"`

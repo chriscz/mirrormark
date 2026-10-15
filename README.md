@@ -123,6 +123,11 @@ Load unpacked in `chrome://extensions` (Developer mode). It still needs
 folder of your own, such as `~/mirrormark-extension`: `install` deletes and
 rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 
+`mirrormark serve` runs the server the extensions connect to, on
+127.0.0.1 only, and logs to the same log as the host. One runs per user;
+a second one stops at once. This release's extension still reaches
+mirrormark through the native messaging host.
+
 ## Install (Brave on Linux)
 
 Brave installs as Chrome does (see [Install (Google Chrome on
@@ -259,7 +264,8 @@ lose its binding at each restart; the popup then says it is not bound.
 | File | What it is |
 | --- | --- |
 | `~/.config/mirrormark/config.yaml` | Your unions. You write it. |
-| `~/.local/share/mirrormark/profiles/<id>.yaml` | One database per bound profile. You may edit its `profile:` block; mirrormark writes the rest. |
+| `~/.local/share/mirrormark/profiles/<id>.yaml` | One database per bound profile. You may edit its `profile:` block, except `origin` and `token`, which `install` writes when it binds the profile; mirrormark writes the rest. |
+| `~/.local/share/mirrormark/serve.lock` | Held by the running `mirrormark serve`, so one runs per user. |
 | `~/.local/share/mirrormark/backups/<id>/` | One copy of each database a day, the newest 30. For reading only. |
 | `~/.local/share/mirrormark/extension.pem` | The key that fixes the extension id (mode 0600). |
 | `~/.local/share/mirrormark/mirrormark.crx`, `extension/` | The packed and unpacked extension, written by `install`. |

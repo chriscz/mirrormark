@@ -35,6 +35,8 @@ type Profile struct {
 	Label   string `yaml:"label"`
 	Browser string `yaml:"browser"`
 	Path    string `yaml:"path"`
+	Origin  string `yaml:"origin,omitempty"` // the extension's origin in this profile; written by install
+	Token   string `yaml:"token,omitempty"`  // the secret the extension proves its binding with; written by install
 }
 
 // DB is one profile's database file.

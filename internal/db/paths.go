@@ -47,6 +47,9 @@ func (p Paths) ProfileFile(id string) string { return filepath.Join(p.ProfilesDi
 // ProfileLock is profile id's lock file; its mtime is the last hello.
 func (p Paths) ProfileLock(id string) string { return filepath.Join(p.ProfilesDir(), id+".lock") }
 
+// ServeLock is held by the running server, so one runs per user.
+func (p Paths) ServeLock() string { return filepath.Join(p.Data, "serve.lock") }
+
 // GlobalLock serialises rounds across all profiles.
 func (p Paths) GlobalLock() string { return filepath.Join(p.Data, "lock") }
 

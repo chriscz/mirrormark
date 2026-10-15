@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/chriscz/mirrormark/internal/db"
 )
 
 func TestRunWithoutArgsPrintsUsage(t *testing.T) {
@@ -105,5 +107,23 @@ func TestHostRotatesALargeLog(t *testing.T) {
 	}
 	if old, _ := os.ReadFile(log + ".1"); !bytes.Equal(old, big) {
 		t.Fatal("a small log was rotated")
+	}
+}
+
+// A second server for the same user stops at once, before it listens.
+func TestServeRunsOncePerUser(t *testing.T) {
+	d := t.TempDir()
+	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+		t.Setenv(v, d+"/"+v)
+	}
+	p, _ := db.DefaultPaths()
+	unlock, err := db.TryLock(p.ServeLock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	var out, errb bytes.Buffer
+	if code := run([]string{"serve"}, strings.NewReader(""), &out, &errb); code != 1 || !strings.Contains(errb.String(), "already running") {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
 	}
 }

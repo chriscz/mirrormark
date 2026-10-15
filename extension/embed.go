@@ -30,7 +30,7 @@ const HostName = "com.github.chriscz.mirrormark"
 // a key, so every install shares it.
 const GeckoID = "mirrormark@chriscz.github.io"
 
-//go:embed manifest.json background.js bind.html bind.js popup.html popup.js
+//go:embed manifest.json background.js bind.html bind.js popup.html popup.js ports.json
 var Files embed.FS
 
 // Unpack writes the extension to dir and adds the public key to the
@@ -75,4 +75,16 @@ func Version() (string, error) {
 	}
 	err = json.Unmarshal(data, &m)
 	return m.Version, err
+}
+
+// Ports are the ports the server may listen on, in the order it tries
+// them, from ports.json, which the extension reads too.
+func Ports() ([]int, error) {
+	data, err := Files.ReadFile("ports.json")
+	if err != nil {
+		return nil, err
+	}
+	var ports []int
+	err = json.Unmarshal(data, &ports)
+	return ports, err
 }

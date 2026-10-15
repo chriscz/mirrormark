@@ -2,6 +2,10 @@ package host
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +14,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"time"
 
@@ -23,6 +28,9 @@ type Options struct {
 	Log     *slog.Logger
 	Timeout time.Duration // how long the browser may take to apply a batch; default 10 s
 	Poll    time.Duration // how often to look for changed files; default 1 s
+	Ping    time.Duration // Serve: how often to ping each connection; default 20 s
+	Origin  string        // the connection's Origin; Serve sets it, and then the hello starts a challenge
+	Port    string        // the port the server listens on, named in the host's proof; Serve sets it
 }
 
 // At most this many ops go in one apply message, and its ops take at most
@@ -41,6 +49,7 @@ type state struct {
 	msgs     <-chan Msg
 	conn     Conn
 	self     string
+	pending  pending
 	unlock   func() // releases the profile lock; held while Run runs
 	live     *round.Live
 	fresh    bool      // live reflects the browser: no batch or edit since
@@ -161,6 +170,8 @@ func (s *state) handle(m Msg) error {
 	switch m.Type {
 	case "hello":
 		return s.hello(m)
+	case "proof":
+		return s.proof(m)
 	case "tree":
 		if s.self == "" {
 			s.o.Log.Debug("tree before hello ignored")
@@ -192,7 +203,7 @@ func (s *state) handle(m Msg) error {
 }
 
 func (s *state) hello(m Msg) error {
-	if s.self != "" {
+	if s.self != "" || s.pending.db != "" {
 		return nil
 	}
 	if !db.ValidID.MatchString(m.DB) {
@@ -201,15 +212,26 @@ func (s *state) hello(m Msg) error {
 	if _, err := os.Stat(s.o.Paths.ProfileFile(m.DB)); err != nil {
 		return s.fail("db-missing", fmt.Sprintf("no database file for %s; run mirrormark install", m.DB))
 	}
+	// Through the server, a connection must prove which database it is
+	// before the host runs: native messaging needed no proof, since the
+	// browser started the host for its own extension.
+	if s.o.Origin != "" {
+		return s.challenge(m)
+	}
+	return s.accept(m.DB, m.Browser)
+}
+
+// accept runs the host for database id from now on.
+func (s *state) accept(id, browser string) error {
 	// Held until Run returns: a copied profile bound to the same file must
 	// not drive it twice.
-	lock := s.o.Paths.ProfileLock(m.DB)
+	lock := s.o.Paths.ProfileLock(id)
 	unlock, err := db.TryLock(lock)
 	if err != nil {
 		if errors.Is(err, db.ErrLocked) {
-			return s.fail("db-locked", fmt.Sprintf("another browser profile is using %s; was this profile copied?", m.DB))
+			return s.fail("db-locked", fmt.Sprintf("another browser profile is using %s; was this profile copied?", id))
 		}
-		return s.fail("db-lock-error", fmt.Sprintf("cannot lock %s: %v", m.DB, err))
+		return s.fail("db-lock-error", fmt.Sprintf("cannot lock %s: %v", id, err))
 	}
 	s.unlock = unlock
 	// install and the tests watch this mtime to see that the profile connected.
@@ -217,9 +239,61 @@ func (s *state) hello(m Msg) error {
 	if err := os.Chtimes(lock, now, now); err != nil {
 		s.o.Log.Warn("cannot touch lock file", "err", err)
 	}
-	s.self = m.DB
-	s.o.Log.Info("connected", "db", m.DB, "browser", m.Browser)
+	s.self = id
+	// A connection that limits how long an unproven peer may take learns
+	// that this one is through.
+	if c, ok := s.conn.(interface{ proven() }); ok {
+		c.proven()
+	}
+	s.o.Log.Info("connected", "db", id, "browser", browser)
 	return nil
+}
+
+// pending is a hello waiting for the extension's proof.
+type pending struct{ db, browser, token, nonce string }
+
+// nonceRe is a nonce as both sides write it: 32 random bytes in hex.
+var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// challenge answers a hello through the server. The connection came from
+// the database's origin, but any program can send any Origin, and in
+// Chromium every profile has the same one. So each side proves it holds
+// the token install handed this profile, without sending it: the host
+// first, so the extension tells a program posing as mirrormark nothing.
+// The port in the host's proof stops a program on another port relaying
+// the hello here and passing back this host's proof.
+func (s *state) challenge(m Msg) error {
+	d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
+	if err != nil {
+		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s: %v", m.DB, err))
+	}
+	if d.Profile.Token == "" || d.Profile.Origin != s.o.Origin || !nonceRe.MatchString(m.Nonce) {
+		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
+	}
+	b := make([]byte, 32)
+	rand.Read(b) // never fails
+	s.pending = pending{db: m.DB, browser: m.Browser, token: d.Profile.Token, nonce: hex.EncodeToString(b)}
+	return s.send(Msg{Type: "challenge", Nonce: s.pending.nonce, Proof: mac(d.Profile.Token, "server:"+s.o.Port+":"+m.Nonce)})
+}
+
+// proof checks the extension's answer to the challenge, and only then
+// runs the host for its database.
+func (s *state) proof(m Msg) error {
+	p := s.pending
+	if s.self != "" || p.db == "" {
+		return nil // no challenge is waiting
+	}
+	if !hmac.Equal([]byte(m.Proof), []byte(mac(p.token, "extension:"+p.nonce))) {
+		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", p.db))
+	}
+	return s.accept(p.db, p.browser)
+}
+
+// mac is HMAC-SHA256 of msg, keyed by the token as text, in lowercase hex.
+func mac(token, msg string) string {
+	h := hmac.New(sha256.New, []byte(token))
+	h.Write([]byte(msg))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // filesChanged reports whether config.yaml or any database file changed
