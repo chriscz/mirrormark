@@ -82,23 +82,56 @@ func ReadMsg(r io.Reader) (Msg, error) {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return Msg{}, err
 	}
-	var m Msg
-	if err := json.Unmarshal(buf, &m); err != nil {
-		return Msg{}, fmt.Errorf("bad message: %w", err)
-	}
-	return m, nil
+	return decode(buf)
 }
 
 func WriteMsg(w io.Writer, m Msg) error {
-	b, err := json.Marshal(m)
+	b, err := encode(m)
 	if err != nil {
 		return err
-	}
-	if len(b) > maxOut {
-		return fmt.Errorf("message of %d bytes is over the browsers' 1 MB limit", len(b))
 	}
 	// One write, so a reader never sees a length without its message.
 	out := binary.NativeEndian.AppendUint32(make([]byte, 0, 4+len(b)), uint32(len(b)))
 	_, err = w.Write(append(out, b...))
 	return err
+}
+
+// Conn carries whole messages between the host and one extension.
+type Conn interface {
+	// Read returns the next message, or io.EOF once the extension has gone.
+	Read() (Msg, error)
+	// Write sends one message.
+	Write(Msg) error
+}
+
+// Stream is a Conn in native messaging's framing: each message is its
+// length as a native-endian uint32, then that many bytes of JSON.
+func Stream(r io.Reader, w io.Writer) Conn { return stream{r, w} }
+
+type stream struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (s stream) Read() (Msg, error) { return ReadMsg(s.r) }
+func (s stream) Write(m Msg) error  { return WriteMsg(s.w, m) }
+
+// encode is m as JSON, refused when the browsers could not take it.
+func encode(m Msg) ([]byte, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxOut {
+		return nil, fmt.Errorf("message of %d bytes is over the browsers' 1 MB limit", len(b))
+	}
+	return b, nil
+}
+
+func decode(b []byte) (Msg, error) {
+	var m Msg
+	if err := json.Unmarshal(b, &m); err != nil {
+		return Msg{}, fmt.Errorf("bad message: %w", err)
+	}
+	return m, nil
 }

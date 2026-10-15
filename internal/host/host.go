@@ -39,7 +39,7 @@ var errStop = errors.New("host stopped")
 type state struct {
 	o        Options
 	msgs     <-chan Msg
-	out      io.Writer
+	conn     Conn
 	self     string
 	unlock   func() // releases the profile lock; held while Run runs
 	live     *round.Live
@@ -73,7 +73,7 @@ func (f failed) Unwrap() error { return f.error }
 const retryDelay = 5 * time.Second
 
 // Run serves one extension connection until the browser closes it.
-func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
+func Run(ctx context.Context, c Conn, o Options) error {
 	if o.Timeout == 0 {
 		o.Timeout = 10 * time.Second
 	}
@@ -85,7 +85,7 @@ func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
 	go func() {
 		defer close(msgs)
 		for {
-			m, err := ReadMsg(r)
+			m, err := c.Read()
 			if err != nil {
 				readErr <- err
 				return
@@ -97,7 +97,7 @@ func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
 			}
 		}
 	}()
-	s := &state{o: o, msgs: msgs, out: w, files: map[string]stamp{}}
+	s := &state{o: o, msgs: msgs, conn: c, files: map[string]stamp{}}
 	defer func() {
 		if s.unlock != nil {
 			s.unlock()
@@ -133,7 +133,7 @@ func Run(ctx context.Context, r io.Reader, w io.Writer, o Options) error {
 
 func (s *state) send(m Msg) error {
 	m.V = Version
-	err := WriteMsg(s.out, m)
+	err := s.conn.Write(m)
 	if err != nil {
 		s.o.Log.Warn("send failed", "type", m.Type, "err", err)
 	}

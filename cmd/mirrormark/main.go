@@ -88,7 +88,7 @@ func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
 	if rotateErr != nil {
 		log.Warn("cannot rotate the log", "err", rotateErr)
 	}
-	if err := host.Run(context.Background(), stdin, stdout, host.Options{Paths: p, Log: log}); err != nil {
+	if err := host.Run(context.Background(), host.Stream(stdin, stdout), host.Options{Paths: p, Log: log}); err != nil {
 		log.Warn("host stopped", "err", err)
 		return 1
 	}

@@ -101,7 +101,7 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 	}
 	exited := make(chan struct{})
 	go func() {
-		e.done <- host.Run(ctx, hr, hw, ho)
+		e.done <- host.Run(ctx, host.Stream(hr, hw), ho)
 		hw.Close()
 		close(exited)
 	}()
@@ -361,7 +361,7 @@ func TestOtherVersionIsRefused(t *testing.T) {
 	addProfile(t, p, "a")
 	hr, ew := io.Pipe()
 	er, hw := io.Pipe()
-	go host.Run(context.Background(), hr, hw, host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	go host.Run(context.Background(), host.Stream(hr, hw), host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	go host.WriteMsg(ew, host.Msg{V: 2, Type: "hello", DB: "a"})
 	m, err := host.ReadMsg(er)
 	if err != nil || m.Code != "unsupported-version" {
