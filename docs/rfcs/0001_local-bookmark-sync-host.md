@@ -373,7 +373,7 @@ Nothing was changed. Name the profiles to install into or bind with --profile ID
 | `not <browser>` | | `compatibility.ini` names another browser (the check in Sections 8 and 9) |
 | `not installed` | no `extensions.settings.<id>`, and no external file for this browser | no XPI in the profile |
 | `not installed yet` | no `extensions.settings.<id>`, and this browser's external file is in place | the XPI is there, but `extensions.json` has no entry or `prefs.js` no UUID |
-| `removed` | `<id>` in `extensions.external_uninstalls` | (Gecko deletes the XPI and keeps no record: `not installed`) |
+| `removed` | `<id>` in `extensions.external_uninstalls`, and no `extensions.settings.<id>` with a `path` (a copy loaded unpacked after a Remove has a `path` again, and the list may keep the id) | (Gecko deletes the XPI and keeps no record: `not installed`) |
 | `turned off` | `disable_reasons` not empty | `userDisabled` true |
 | `refused` | | `appDisabled` true (for example, signatures required again) |
 | `old build <version>` | `manifest.version` is not the embedded extension's | `version` is not the embedded extension's |
@@ -553,3 +553,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — Brave and LibreWolf designed as Section 9 and Phase 6 after two spikes: each is a description in the existing Chrome or Firefox package, not a new install path; Brave shares Chrome's key, CRX and host manifest, and LibreWolf takes the Developer Edition route, recognised by `application.ini`; shared files go with the last browser that still has its own file in place; profiles that have never run are skipped unless named.
 - 2026-10-15 — Brave and LibreWolf plan trimmed: `install` no longer refreshes the other Chromium browser's external file or writes only changed files; upgrades run `install` once per browser. The e2e checks that the shared host manifest stays after an uninstall instead of restarting the other browser.
 - 2026-10-15 — after the user tried Brave on a desktop: `install` without `--profile` lists the profiles with their state and writes nothing; `--profile` takes an ID or a number, not a name; `install` reads each profile's extension state from its own files and opens the bind page once, only where the extension is ready, with no retries; the never-run skip goes. Both are the user's decisions (Section 10).
+- 2026-10-15 — while implementing: a Chromium profile reads `removed` only while its `extensions.settings.<id>` has no `path`, so a copy loaded unpacked after a Remove is not reported as removed for ever.

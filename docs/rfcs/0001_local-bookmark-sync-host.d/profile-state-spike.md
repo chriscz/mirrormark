@@ -113,8 +113,9 @@ The two browsers gave the same values. The entry is in `addons[]` where
   - Chromium: read `Preferences` `extensions.settings.<id>` and
     `extensions.external_uninstalls`. The extension is ready when the entry
     has a `path` and an empty or missing `disable_reasons`. It is removed
-    when `<id>` is in `external_uninstalls`. With no entry, it is not
-    installed yet.
+    when `<id>` is in `external_uninstalls` and the entry has no `path`; a
+    copy loaded unpacked afterwards has a `path` again, and the list may
+    keep the id. With no entry, it is not installed yet.
   - Gecko: read `extensions.json` and the UUID in `prefs.js`. The add-on is
     ready when the entry has `active` true and a UUID is recorded.
     `userDisabled` means the user turned it off. `appDisabled` means the

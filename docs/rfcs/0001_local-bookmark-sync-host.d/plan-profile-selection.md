@@ -26,13 +26,13 @@
   | `NeverRun` | `never run` | no `Preferences` file | (from `Check`: `ErrNeverRun`) |
   | `NotInstalled` | `not installed` | no `extensions.settings.<id>` entry with a `path`, and `filePlaced` false | no XPI in the profile |
   | `NotInstalledYet` | `not installed yet` | the same with `filePlaced` true | XPI present, but no `addons[]` entry, entry not `active`, or no UUID in `prefs.js` |
-  | `Removed` | `removed` | `<id>` in `extensions.external_uninstalls` (checked first) | — |
+  | `Removed` | `removed` | `<id>` in `extensions.external_uninstalls`, and no `extensions.settings.<id>` entry with a `path` | — |
   | `TurnedOff` | `turned off` | `disable_reasons` present and not `[]` or `0` | `userDisabled` true |
   | `Refused` | `refused` | — | `appDisabled` true |
   | `OldBuild` | `old build <version>` | `manifest.version` ≠ `extension.Version()` | `version` ≠ `extension.Version()` |
   | `Ready` | `ready` | otherwise | otherwise (`active`, UUID present) |
 
-  Gecko checks them in this order: XPI, entry, `userDisabled`, `appDisabled`, version, `active` and UUID. Chromium checks them in this order: `external_uninstalls`, entry, disable reasons, version. The listing adds two words that come from outside `ReadState`. `bound` is `Ready` when a database's `profile.path` is this profile's directory. `not <Browser.Name>` is a Gecko profile that `Check` refuses for any reason other than `ErrNeverRun`.
+  Gecko checks them in this order: XPI, entry, `userDisabled`, `appDisabled`, version, `active` and UUID. Chromium checks them in this order: entry (with no entry that has a `path`, `external_uninstalls` tells `removed` from `not installed`), disable reasons, version. A copy loaded unpacked after a Remove has a `path` again, and Chromium may leave the id in `external_uninstalls`, so that list alone does not mean removed. The listing adds two words that come from outside `ReadState`. `bound` is `Ready` when a database's `profile.path` is this profile's directory. `not <Browser.Name>` is a Gecko profile that `Check` refuses for any reason other than `ErrNeverRun`.
 - **Per-profile output lines on stdout, exactly** (`<ID>` is the profile ID from Task 2 on; in Task 1 Chromium prints `c.Dir` and Gecko `c.Name` as today):
   - `bound: <ID> -> <db>`
   - `not ready: <ID>: <advice>.`
