@@ -2,7 +2,7 @@
 
 - Status: draft
 - Author(s): Chris Coetzee, Claude
-- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15; Brave and LibreWolf designed 2026-10-15; explicit profiles and one-shot binding 2026-10-15)
+- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15; Brave and LibreWolf designed 2026-10-15; explicit profiles and one-shot binding 2026-10-15; a local server instead of native messaging 2026-10-15)
 - Links: none yet. Repository: `github.com/chriscz/mirrormark` (MPL-2.0).
 
 ## Problem
@@ -13,11 +13,11 @@ People who use more than one browser, such as Chrome for one profile and LibreWo
 
 mirrormark is a WebExtension plus a small Go program. The user has fixed these choices: YAML files are the only database and config; conflicts are merged into suffixed copies such as `GitHub (chrome/personal)` and `GitHub (chrome/work)`, never resolved by picking a winner; deleting a bookmark inside a union moves it to a `_deleted` folder; Google Chrome on Linux comes first and the Firefox family follows; everything builds and tests in a Docker image.
 
-This RFC describes the smallest version that works: two or more Chrome profiles on Linux (Phases 1 to 4), then Firefox Developer Edition profiles joining the same unions (Section 8, Phase 5), then Brave and LibreWolf as variants of those two installs (Section 9, Phase 6). What it leaves out is listed under [Later](#later).
+This RFC describes the smallest version that works: two or more Chrome profiles on Linux (Phases 1 to 4), then Firefox Developer Edition profiles joining the same unions (Section 8, Phase 5), then Brave and LibreWolf as variants of those two installs (Section 9, Phase 6), then a local server in place of native messaging (Section 11, Phase 8). What it leaves out is listed under [Later](#later).
 
 **The bookmarks API.** Chrome exposes `bookmarks.getTree`, `get`, `create`, `update`, `move`, `remove` and change events [R5] [R6]. Node ids are stable but local to one profile, so mirrormark keeps its own ids. Chrome names its top-level folders by `folderType` (Chrome 134+). Firefox has the same API under `chrome.*`, with fixed ids for its top-level folders instead of `folderType`, and separators [R5].
 
-**Native messaging** [R1] [R2]. The extension calls `runtime.connectNative(name)`, and the browser starts the program named in a host manifest file, after checking that the extension's id is listed in it. Messages are length-prefixed UTF-8 JSON, at most 1 MB towards the extension. The browser starts one process per connection and kills it when the connection closes. An open connection keeps a Chrome service worker alive [R3].
+**The transport** (Section 11). The extension opens a WebSocket to `mirrormark serve` on `127.0.0.1`. That needs no host permission and shows no prompt in Chrome, Brave, Firefox Developer Edition or LibreWolf. Any local program, and some web pages, can reach a local port too, so the server checks each connection's `Origin` and a per-profile token. A message from the server every 20 s keeps a Chrome service worker alive [R3]; a Gecko event page also needs an extension API call on each message. Earlier versions used native messaging [R1] [R2], in which the browser starts one host process per connection; Section 11 says why it went.
 
 ## Goals
 
@@ -26,7 +26,7 @@ This RFC describes the smallest version that works: two or more Chrome profiles 
 3. **Merge, never drop.** When two profiles change the same thing differently, both versions survive as suffixed copies.
 4. **Nothing is lost.** Sync removes a bookmark only after the user removes it from `_deleted`.
 5. **Near-immediate.** A change in one running profile shows in another running profile within a few seconds.
-6. **Simple to run and install.** One Go binary that embeds the extension. No daemon, no network listener, no account. The YAML files are the whole state, and a person can read them.
+6. **Simple to run and install.** One Go binary that embeds the extension and runs as one user service, listening only on `127.0.0.1`. No account and no network beyond the computer itself. The YAML files are the whole state, and a person can read them.
 
 ## Non-goals
 
@@ -38,14 +38,15 @@ This RFC describes the smallest version that works: two or more Chrome profiles 
 
 ## Proposal
 
-We propose plain native messaging, one host process per browser profile, and YAML files as the only shared state. The host processes never talk to each other; they take turns on the files under one lock.
+We propose one local server, `mirrormark serve`, that runs one host per browser connection, and YAML files as the only shared state. The hosts never talk to each other; they take turns on the files under one lock.
 
 ```
  Chrome (personal)       Chrome (work)          mirrormark CLI
    extension               extension            (install, uninstall, unpack)
-      │ native messaging      │ native messaging        │
- mirrormark host         mirrormark host                │
-      └───────── lock, read, write ───┬─────────────────┘
+      │ WebSocket, 127.0.0.1  │                         │
+      └─── mirrormark serve ──┘                         │
+           one host per connection                      │
+           └────────── lock, read, write ┬──────────────┘
    ~/.config/mirrormark/config.yaml   unions; written by the user
    ~/.local/share/mirrormark/
      profiles/<id>.yaml               one database per profile
@@ -53,9 +54,9 @@ We propose plain native messaging, one host process per browser profile, and YAM
      lock
 ```
 
-### 1. The host: one process per profile, no daemon
+### 1. The host: one per connected profile
 
-The browser starts `mirrormark host` when its extension connects. The process opens the database file the extension is bound to (Section 5), holds a lock on `profiles/<id>.lock` while it runs so that a copied profile cannot drive the same file twice, and exits when the browser closes the connection.
+`mirrormark serve` runs one host for each extension connection (Section 11). The host opens the database file the extension is bound to (Section 5), holds a lock on `profiles/<id>.lock` while the connection lasts so that a copied profile cannot drive the same file twice, and stops when the connection closes.
 
 It runs a **round** on connect, whenever the extension reports a change, and whenever `config.yaml` or another member's database file changes. It notices file changes by comparing modification times and sizes once a second (`os.Stat`). A round:
 
@@ -65,44 +66,48 @@ It runs a **round** on connect, whenever the extension reports a change, and whe
 4. if every write succeeded and the bookmarks changed, writes this profile's database file, setting the `seq` of each union record it changed to one above the highest `seq` of that union it read;
 5. releases the lock.
 
-A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A failed round is retried 5 seconds later, or sooner when a file changes, until a round succeeds, so a browser that keeps failing does not take the global lock, or add to the log, every second. If the browser made every change but the host cannot write its file, the round reports `db-write-failed` and is retried the same way. A crashed host releases its locks with it.
+A host writes only its own browser and its own file; other profiles catch up in their next round. If any write fails, or the browser does not answer for 10 seconds, the round writes no file, logs a warning, and the next round starts again from the same file (Section 4, Why it converges). A failed round is retried 5 seconds later, or sooner when a file changes, until a round succeeds, so a browser that keeps failing does not take the global lock, or add to the log, every second. If the browser made every change but the host cannot write its file, the round reports `db-write-failed` and is retried the same way. A crashed server releases every lock with it, and systemd starts it again (Section 11).
 
 If another member's file is missing or unreadable, the round skips every union that member belongs to, logs a warning and sends it to the popup. It never treats a member it cannot read as empty.
 
 ### 2. The protocol
 
 ```jsonc
-// extension → host, first message; "db" is set by `mirrormark install` (Section 5)
-{"v": 1, "type": "hello", "db": "chrome-personal", "browser": "chrome/141.0"}   // or "firefox/159.0"
+// extension → host, first message; "db" and "token" are set by `mirrormark install` (Sections 5, 11)
+{"v": 2, "type": "hello", "db": "chrome-personal", "token": "3f9c…", "browser": "chrome/141.0"}   // or "firefox/159.0"
 
 // extension → host, at the first bookmark event of a burst; the host starts no round until the next tree
-{"v": 1, "type": "changed"}
+{"v": 2, "type": "changed"}
 
 // extension → host, after hello, after a burst of bookmark events (0.5 s quiet), after each batch
-{"v": 1, "type": "tree", "nodes": [
+{"v": 2, "type": "tree", "nodes": [
   {"id": "1", "parent": null, "root": "toolbar"},
   {"id": "57", "parent": "1", "index": 0, "title": "GitHub", "url": "https://github.com/"}]}
 
 // host → extension, at most 1 MB per message
-{"v": 1, "type": "apply", "batch": 7, "ops": [
+{"v": 2, "type": "apply", "batch": 7, "ops": [
   {"op": "move", "id": "57", "parent": "90", "expect": {"parent": "58"}},
   {"op": "create", "ref": "n1", "parent": "58", "index": 0,
    "title": "GitHub (chrome/work)", "url": "https://github.com/orgs/b"}]}
 
 // extension → host, one result per op
-{"v": 1, "type": "applied", "batch": 7, "results": [{"ok": true}, {"ok": true, "id": "212"}]}
+{"v": 2, "type": "applied", "batch": 7, "results": [{"ok": true}, {"ok": true, "id": "212"}]}
 
 // host → extension, at the end of every round; no problems when it synced cleanly
-{"v": 1, "type": "status", "problems": [{"code": "db-mismatch", "message": "…"}]}
+{"v": 2, "type": "status", "problems": [{"code": "db-mismatch", "message": "…"}]}
+
+// host → extension, every 20 s, so the browser keeps the extension running (Section 11)
+{"v": 2, "type": "ping"}
 
 // either direction; from the host, only when it stops
-{"v": 1, "type": "error", "code": "db-locked", "message": "…"}
+{"v": 2, "type": "error", "code": "db-locked", "message": "…"}
 ```
 
 - **Whole trees.** The extension always sends its whole tree, and the host compares it with the database file, so a missed event is fixed by the next tree.
 - **No rounds on an old tree.** While the extension waits for quiet, the host's copy of the tree lacks the user's latest edits, and a round that a file change starts then could create again what the user just made, such as the member folder. So the extension sends `changed` at once, and the host's poll waits for the tree that follows.
 - **No blind writes.** `update`, `move` and `remove` carry what the host expects to find. The extension reads the node first and fails the op as `stale` if it differs, so an edit the user makes during a batch survives and the next round sees it as a change. Ops run one at a time, as MDN advises when order matters [R5], and the extension stops at the first op that fails and answers the rest `not run`: each op assumes the ones before it landed. A `remove` takes one bookmark or one empty folder (`bookmarks.remove`, never `removeTree`), and the host removes a folder's contents before the folder, so a folder that still holds something fails to go instead of taking it along.
-- **Problems.** The popup shows the last `status` message's problems, so a skipped union or an invalid config stays visible until a round no longer finds it. The host's `error` codes are `unsupported-version`, `bad-db`, `db-missing`, `db-locked` and `db-lock-error` (the lock file cannot be locked at all); the `status` codes are `config-invalid`, `db-missing`, `union-skipped`, `db-mismatch`, `apply-failed`, `db-write-failed` and `db-lock-error`.
+- **Problems.** The popup shows the last `status` message's problems, so a skipped union or an invalid config stays visible until a round no longer finds it. The host's `error` codes are `unsupported-version`, `bad-db`, `bad-token` (the connection's origin or token is not the database's, Section 11), `db-missing`, `db-locked` and `db-lock-error` (the lock file cannot be locked at all); the `status` codes are `config-invalid`, `db-missing`, `union-skipped`, `db-mismatch`, `apply-failed`, `db-write-failed` and `db-lock-error`.
+- **Frames.** Each message is one WebSocket text frame (Section 11).
 - **Versions.** A message with a different `v` gets `error` `unsupported-version`, and the popup says to restart Chrome. This only happens between upgrading the binary and Chrome loading the new extension.
 
 ### 3. The YAML files
@@ -218,15 +223,15 @@ Without the guard, each of these would move a whole union into `_deleted`, or pu
 
 ### 5. Which profile is this?
 
-Neither the extension nor the host can learn which browser profile the extension runs in [R1] [R2], and with the CRX route (Section 6) the same extension runs in every profile. So `mirrormark install` binds it: after creating the profile's database file, it runs
+The extension cannot learn which browser profile it runs in, and with the CRX route (Section 6) the same extension, with the same `Origin`, runs in every profile. So `mirrormark install` binds it: after creating the profile's database file, it runs
 
 ```
-google-chrome --profile-directory="Profile 1" "chrome-extension://<id>/bind.html#chrome-personal"
+google-chrome --profile-directory="Profile 1" "chrome-extension://<id>/bind.html#chrome-personal.<token>"
 ```
 
-which opens a tab in that profile (in the running Chrome if there is one). The page stores the database id in `storage.local`, says so, and closes. The page is not web-accessible, so a web page cannot open it. The extension sends the id in every `hello`; an unbound extension stays idle and its popup says to run `mirrormark install`. If the database file is gone or another host holds its lock (a copied profile), the host answers `error` and the popup says why. Reinstalling the extension clears `storage.local`; running `mirrormark install` again rebinds it.
+which opens a tab in that profile (in the running Chrome if there is one). The page stores the database id and the token (Section 11) in `storage.local`, says so, and closes. The page is not web-accessible, so a web page cannot open it. The extension sends both in every `hello`; an unbound extension stays idle and its popup says to run `mirrormark install`. If the database file is gone or another host holds its lock (a copied profile), the host answers `error` and the popup says why. Reinstalling the extension clears `storage.local`; running `mirrormark install` again rebinds it.
 
-This works in Google Chrome 155 on Linux, with Chrome running or not, once the extension is loaded in that profile (checked in Docker while planning). Before the extension is loaded, the tab shows an error page instead ("This page has been blocked by Chrome"). So `install` first checks the profile's own files and opens the page only in a profile where they say the extension is installed and enabled. It opens the page once and waits up to 30 seconds for the extension to report in with the database id; today the host touches `profiles/<id>.lock` on each `hello`, and `install` watches its modification time. It does not retry (Section 10).
+This works in Google Chrome 155 on Linux, with Chrome running or not, once the extension is loaded in that profile (checked in Docker while planning). Before the extension is loaded, the tab shows an error page instead ("This page has been blocked by Chrome"). So `install` first checks the profile's own files and opens the page only in a profile where they say the extension is installed and enabled. It opens the page once and waits up to 30 seconds for the extension to report in with the database id; the host touches `profiles/<id>.lock` on each accepted `hello`, and `install` watches its modification time. It does not retry (Section 10).
 
 ### 6. Installing
 
@@ -235,19 +240,19 @@ The binary embeds the extension (`go:embed`). `mirrormark install` (for Chrome, 
 1. lists Chrome's profiles from `~/.config/google-chrome/Local State` (`profile.info_cache`; `--user-data-dir` picks another data directory). Without `--profile` it prints them with their state and stops, having written nothing (Section 10);
 2. binds the profiles named with `--profile`, by ID (`"Profile 1"`) or by number from the list (repeatable). Binding a profile only creates its database file; nothing syncs until `config.yaml` names it;
 3. unpacks the extension into `~/.local/share/mirrormark/extension/` and packs `mirrormark.crx` beside it;
-4. writes two system files, as root: `/usr/share/google-chrome/extensions/<id>.json` naming the CRX and its exact version, and the native host manifest `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`, which reaches every Chrome data directory. Branded Chrome ignores `--load-extension` since 137 [R12], but on Linux it installs a CRX named this way without a prompt, in every profile [R11] (both directories checked in the spike). If it cannot write them itself, it copies them into place with `sudo install -D -m 0644`, so the root step runs no mirrormark code;
+4. writes one system file, as root: `/usr/share/google-chrome/extensions/<id>.json` naming the CRX and its exact version. Branded Chrome ignores `--load-extension` since 137 [R12], but on Linux it installs a CRX named this way without a prompt, in every profile [R11] (checked in the spike). If it cannot write the file itself, it copies it into place with `sudo install -D -m 0644`, so the root step runs no mirrormark code. It also removes a native host manifest an earlier mirrormark left, and writes and starts the user service (Section 11);
 5. for each profile it binds, creates the database file (id `chrome-<profile name>`, label `chrome/<profile name>`, made unique if taken), and `config.yaml` if it is missing;
-6. if step 4 changed either system file, asks the user to restart Chrome and run `mirrormark install` again, because Chrome reads the extensions directory only at startup; otherwise it checks each named profile and binds those where the extension is ready (Sections 5 and 10).
+6. if step 4 changed the system file, asks the user to restart Chrome and run `mirrormark install` again, because Chrome reads the extensions directory only at startup; otherwise it checks each named profile and binds those where the extension is ready (Sections 5 and 10).
 
 Without `sudo`, `install` stops and says so; a no-root route is listed under [Later](#later). `mirrormark unpack [DIR]` does step 3 alone, into `DIR` if given, and prints the folder, for Load unpacked while developing or in a profile where the user removed the extension (Chrome does not reinstall it there). The unpacked manifest carries the install's `key`, so the id is the same as the installed one.
 
-**A key per install.** Chrome derives an extension's id from its public key. `install` generates a key pair with Go's standard crypto, writes the public key into the unpacked extension's manifest `key`, signs the CRX with the private key, puts the id in the host manifest's `allowed_origins`, and keeps the private key in `~/.local/share/mirrormark/extension.pem` (mode `0600`) so upgrades keep the id. No private key is shipped, so an extension built elsewhere does not get this install's id. An upgrade re-signs with the same key and raises `external_version` so Chrome picks up the new build.
+**A key per install.** Chrome derives an extension's id from its public key. `install` generates a key pair with Go's standard crypto, writes the public key into the unpacked extension's manifest `key`, signs the CRX with the private key, records `chrome-extension://<id>` as the `origin` of each database it binds (Section 11), and keeps the private key in `~/.local/share/mirrormark/extension.pem` (mode `0600`) so upgrades keep the id. No private key is shipped, so an extension built elsewhere does not get this install's id. An upgrade re-signs with the same key and raises `external_version` so Chrome picks up the new build.
 
-`mirrormark uninstall` removes the host manifest, the preferences file, the unpacked extension and the CRX, and keeps the YAML files and the key unless given `--purge`. `--purge` deletes Chrome's databases, their backups and the key, and the config, log and data directory only if no Firefox profile's database is left, since that browser's profiles still sync through them and its `uninstall` finds its profiles through their databases. A host manifest that names another extension belongs to another install, so `uninstall` leaves it in place. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
+`mirrormark uninstall` removes the preferences file, the unpacked extension, the CRX and any host manifest an earlier mirrormark left, and the user service if no other browser still uses it (Section 11), and keeps the YAML files and the key unless given `--purge`. `--purge` deletes Chrome's databases, their backups and the key, and the config, log and data directory only if no Firefox profile's database is left, since that browser's profiles still sync through them and its `uninstall` finds its profiles through their databases. A host manifest that names another extension belongs to another install, so `uninstall` leaves it in place. Removing the preferences file removes the extension from every Chrome profile at Chrome's next start.
 
 ### 7. Extension and code
 
-The extension is thin: Manifest V3, permissions `alarms`, `bookmarks`, `nativeMessaging` and `storage`, plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. After a failed connection it waits instead for an alarm (30 s, or 60 s after the host's `error`), because the worker's timers stop with it, and while that alarm is pending neither a bookmark event nor a restarted worker reconnects; after a new binding it waits a second so the old host can release the database. It sends `changed` at the first bookmark event of a burst and the tree after it, applies ops, and shows in its popup the bound profile, why the host stopped if it did, and the last round's problems. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `host` (what the native host manifest runs; Chrome starts the binary with the extension's origin as its only argument, which also selects host mode).
+The extension is thin: Manifest V3, permissions `alarms`, `bookmarks` and `storage` and a content security policy that lets Gecko open `ws://127.0.0.1` (Section 11), plain JavaScript with no build step, so the binary embeds the source files as they are. It connects from top-level service-worker code, registers `runtime.onStartup` so Chrome starts the worker when a profile opens, and reconnects on each bookmark event. After a failed connection it waits instead for an alarm (30 s, or 60 s after the host's `error`), because the worker's timers stop with it, and a periodic one-minute alarm starts a worker the browser stopped (Section 11); while the reconnect alarm is pending neither a bookmark event nor a restarted worker reconnects; after a new binding it waits a second so the old host can release the database. It sends `changed` at the first bookmark event of a burst and the tree after it, applies ops, and shows in its popup the bound profile, why the host stopped if it did, and the last round's problems. Besides `install` and `uninstall`, the CLI has `unpack` (above) and `serve` (the server, Section 11).
 
 One Go module, `github.com/chriscz/mirrormark`. Its only third-party dependency is `go.yaml.in/yaml/v3`, the YAML organisation's continuation of the archived `gopkg.in/yaml.v3` [R16]. Locking uses `syscall.Flock`; the CRX3 file is written with the standard library.
 
@@ -265,9 +270,9 @@ A Firefox profile is a member like a Chrome profile: one host per profile, the s
 - it names Firefox's top-level folders by id: `toolbar_____` → `toolbar`, `unfiled_____` → `other`, `mobile______` → `mobile`, `menu________` → `menu`;
 - it hides separators (below);
 - it labels itself `firefox/<version>` from the user agent;
-- it reads a disconnect's reason from the port's `error` as well as `runtime.lastError`.
+- it read a native port's disconnect reason from the port's `error` as well as `runtime.lastError` (gone with the native port, Section 11).
 
-An open native port keeps a Firefox event page alive as it keeps a Chrome service worker alive (160 s checked).
+An open native port kept a Firefox event page alive (160 s checked). A WebSocket does not, so the extension makes an extension API call on each ping (Section 11).
 
 **Separators.** Firefox has separators (`type: "separator"`); Chrome has none. The extension never sends them to the host, and a node's `index` in the tree counts only the siblings that are not separators. When it applies a `create` or `move` with an index, it maps that index to the real one: the position of the index-th sibling that is not a separator, or the end. Order does not sync (Non-goals), so a separator can end up between different neighbours than before; mirrormark never moves, edits or copies one. The one exception: Firefox, like Chrome, refuses to remove a folder that is not empty, and the host removes a folder only once everything it knows inside is gone, so before a `remove` of a folder that holds only separators, the extension removes them. This happens only in a purge, and a separator holds nothing. A folder that holds anything else keeps its separators, and its `remove` fails as it would without them.
 
@@ -277,19 +282,19 @@ An open native port keeps a Firefox event page alive as it keeps a Chrome servic
 
 **Ids and labels.** A Firefox profile's database id is `firefox-<slug of its name>` and its label `firefox/<slug>`; `browser` in its profile block is `firefox`. Firefox's node ids are 12-character GUIDs rather than small integers.
 
-**The host.** Firefox starts the host with two arguments, the host manifest's path and the extension's id, instead of Chrome's one origin. `mirrormark` runs as the host when its first argument ends in `com.github.chriscz.mirrormark.json`. Nothing else in the host changes; framing and the 1 MB limit towards the extension are the same [R1].
+**The host.** Firefox's connections reach the same server, with the `Origin` `moz-extension://<uuid>`, which differs per profile (Section 11). Nothing else in the host changes; framing and the 1 MB limit towards the extension are the same.
 
 **Installing**, without root. `mirrormark install --browser firefox [--user-data-dir ROOT] [--profile NAME]...`:
 
 1. lists the profiles, and without `--profile` prints them and stops, as for Chrome (Section 10): `ROOT` is `--user-data-dir`, else `$XDG_CONFIG_HOME/mozilla/firefox` (`~/.config/mozilla/firefox` when that is unset) if it holds `profiles.ini` (Firefox 147 and later [R15]), else `~/.mozilla/firefox`. It reads `profiles.ini` and adds every `ROOT/*/` that holds a `prefs.js` and is not listed, named by its directory after the first `.`; Firefox's new profile switcher records its profiles only in an SQLite file, which the standard library cannot read;
 2. picks the profiles named with `--profile` (the profile directory's base name, or its number in the list), and refuses any that is not Developer Edition or has never run, as above, before writing anything;
 3. creates each profile's database file, and `config.yaml` if missing, as for Chrome, before it writes into any profile, so a write that fails part way never leaves a profile with its checks off and no database for `uninstall` to find it by;
-4. writes, as the user: the native host manifest `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` with `allowed_extensions` naming the gecko id (Firefox does not read a host manifest under `~/.config/mozilla/`); and in each picked profile `extensions/mirrormark@chriscz.github.io.xpi`, packed from the embedded files like the CRX, and three lines in `user.js`: `xpinstall.signatures.required` false, `extensions.autoDisableScopes` 14 and `extensions.startupScanScopes` 1. A line `uninstall` reset is turned back where it is, and only prefs still missing are appended, so install and uninstall cycles add no lines. A `user.js` that is a symlink is written where it points, and an existing one keeps its mode, so a file kept with the user's dotfiles or made private stays so. On its next start Firefox installs the add-on enabled with no prompt; 14 clears only the profile bit of Firefox's default 15, so add-ons sideloaded into the user, application or system scopes still start disabled and ask;
+4. writes, as the user, in each picked profile `extensions/mirrormark@chriscz.github.io.xpi`, packed from the embedded files like the CRX, and three lines in `user.js`: `xpinstall.signatures.required` false, `extensions.autoDisableScopes` 14 and `extensions.startupScanScopes` 1. A line `uninstall` reset is turned back where it is, and only prefs still missing are appended, so install and uninstall cycles add no lines. A `user.js` that is a symlink is written where it points, and an existing one keeps its mode, so a file kept with the user's dotfiles or made private stays so. On its next start Firefox installs the add-on enabled with no prompt; 14 clears only the profile bit of Firefox's default 15, so add-ons sideloaded into the user, application or system scopes still start disabled and ask. It removes a host manifest an earlier mirrormark left in `~/.mozilla/native-messaging-hosts/`, and writes and starts the user service (Section 11);
 5. if it changed any of those files, asks the user to restart Firefox in those profiles if it is running and to run `install` again; otherwise it checks each profile and binds those where the add-on is ready.
 
-**Binding.** The extension's pages are at `moz-extension://<uuid>/`, with a UUID Firefox picks per profile and keeps in `prefs.js` (`extensions.webextensions.uuids`). Pinning it in `user.js` would replace every add-on's UUID and lose their storage, so `install` reads it. If it is missing, or `extensions.json` does not show the add-on active, the profile is not ready, and `install` says what to do instead of starting Firefox itself (Section 10). For a ready profile it runs `<LastPlatformDir>/firefox --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>` once, which opens the page in that profile whether Firefox runs there or not (a running one gets it over D-Bus), and waits for the extension to report in, as for Chrome (Section 5). `about:blank` is there because `bind.html` closes its tab, and closing the only tab of the only window quits Firefox.
+**Binding.** The extension's pages are at `moz-extension://<uuid>/`, with a UUID Firefox picks per profile and keeps in `prefs.js` (`extensions.webextensions.uuids`). Pinning it in `user.js` would replace every add-on's UUID and lose their storage, so `install` reads it. If it is missing, or `extensions.json` does not show the add-on active, the profile is not ready, and `install` says what to do instead of starting Firefox itself (Section 10). For a ready profile it records `moz-extension://<uuid>` as the database's `origin` (Section 11), then runs `<LastPlatformDir>/firefox --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>` once, which opens the page in that profile whether Firefox runs there or not (a running one gets it over D-Bus), and waits for the extension to report in, as for Chrome (Section 5). `about:blank` is there because `bind.html` closes its tab, and closing the only tab of the only window quits Firefox.
 
-**Uninstalling.** `mirrormark uninstall --browser firefox` removes the XPI from each profile whose database file says `browser: firefox`, sets `xpinstall.signatures.required` back to true and `extensions.autoDisableScopes` back to 15 (their defaults) in its `user.js`, and removes the per-user host manifest if it names the gecko id. It leaves `extensions.startupScanScopes` at 1, which only makes Firefox look in the profile's own `extensions` folder at start, so that it notices the XPI is gone. The reset applies to every line that sets those prefs to mirrormark's values, including lines the user wrote, which only turns the checks back on. It writes the `user.js` files before it removes anything, so if a write fails, running `uninstall` again finishes the job, and it leaves a `user.js` with nothing to change untouched. If no database names a Firefox profile, it changes no `user.js` and says so, naming the two prefs to check by hand. It keeps the YAML files unless given `--purge`, which deletes the Firefox profiles' databases and their backups, and the config, log and data directory only if no Chrome profile's database is left.
+**Uninstalling.** `mirrormark uninstall --browser firefox` removes the XPI from each profile whose database file says `browser: firefox`, sets `xpinstall.signatures.required` back to true and `extensions.autoDisableScopes` back to 15 (their defaults) in its `user.js`, removes a host manifest an earlier mirrormark left in `~/.mozilla/native-messaging-hosts/` if it names the gecko id, and removes the user service if no other browser still uses it (Section 11). It leaves `extensions.startupScanScopes` at 1, which only makes Firefox look in the profile's own `extensions` folder at start, so that it notices the XPI is gone. The reset applies to every line that sets those prefs to mirrormark's values, including lines the user wrote, which only turns the checks back on. It writes the `user.js` files before it removes anything, so if a write fails, running `uninstall` again finishes the job, and it leaves a `user.js` with nothing to change untouched. If no database names a Firefox profile, it changes no `user.js` and says so, naming the two prefs to check by hand. It keeps the YAML files unless given `--purge`, which deletes the Firefox profiles' databases and their backups, and the config, log and data directory only if no Chrome profile's database is left.
 
 **Decisions taken for the user.** The user was away when Section 8 was written; each of these is the smallest safe choice and awaits sign-off:
 
@@ -315,30 +320,30 @@ Brave installs as Chrome does, and LibreWolf as Firefox Developer Edition does. 
 | External extension file | `/usr/share/google-chrome/extensions/<id>.json` | `/opt/brave.com/brave/extensions/<id>.json` | | |
 | Recognised by | | | channel `aurora` in `channel-prefs.js` | `Name=LibreWolf` in `<LastPlatformDir>/application.ini` |
 
-Everything else is shared within a family: Chrome and Brave share the key, the CRX, the extension id and the system host manifest; Developer Edition and LibreWolf share the XPI, the three `user.js` lines and their resets, the per-user host manifest, the UUID lookup and the bind URL.
+Everything else is shared within a family: Chrome and Brave share the key, the CRX and the extension id; Developer Edition and LibreWolf share the XPI, the three `user.js` lines and their resets, the UUID lookup and the bind URL. Until Section 11 each family also shared a native host manifest.
 
-**Brave.** Brave reads external extension files from its executable's directory, `/opt/brave.com/brave/extensions/`, and native host manifests only from Chrome's `/etc/opt/chrome/native-messaging-hosts/`, whether or not Chrome is installed. The extension id depends only on the key, so one host manifest with one `allowed_origins` entry serves both browsers. Brave installs the CRX enabled and without a prompt, in existing profiles and in profiles created later. Its `Local State` has the same `profile.info_cache` as Chrome's, its profiles keep the extension's state in `Preferences` as Chrome's do, and binding runs `brave-browser` with Chrome's arguments, once, in a profile whose files say the extension is ready (Section 10). Brave's user agent is Chrome's, so the hello says `chrome/155.0.0.0`; the host does not need to tell the two apart, because the database id carries the profile's identity. `/usr/share/chromium/extensions/` also works in Brave but reaches Chromium too, so we use Brave's own directory.
+**Brave.** Brave reads external extension files from its executable's directory, `/opt/brave.com/brave/extensions/`. The extension id depends only on the key, so both browsers connect with one `Origin`. Brave installs the CRX enabled and without a prompt, in existing profiles and in profiles created later. Its `Local State` has the same `profile.info_cache` as Chrome's, its profiles keep the extension's state in `Preferences` as Chrome's do, and binding runs `brave-browser` with Chrome's arguments, once, in a profile whose files say the extension is ready (Section 10). Brave's user agent is Chrome's, so the hello says `chrome/155.0.0.0`; the host does not need to tell the two apart, because the database id carries the profile's identity. `/usr/share/chromium/extensions/` also works in Brave but reaches Chromium too, so we use Brave's own directory.
 
-**Shared Chromium files.** `install --browser brave` packs the same CRX and writes Brave's external file and the host manifest, with `sudo` as for Chrome. `install` writes only its own browser's external file, never the other's, so it creates nothing under a browser that is not installed. After an upgrade the user runs `install` once per browser, as for Chrome and Firefox today; a browser whose `install` was not run again keeps its old build. `uninstall --browser brave` removes Brave's external file. It removes the CRX, the unpacked extension and the host manifest only if no other Chromium browser's external file is still in place, and otherwise says which browser still uses them. `--purge` deletes Brave's databases and backups, and the key only if no other Chromium browser has its external file in place or a database left; the same rules apply to Chrome with Brave as the other browser.
+**Shared Chromium files.** `install --browser brave` packs the same CRX and writes Brave's external file, with `sudo` as for Chrome. `install` writes only its own browser's external file, never the other's, so it creates nothing under a browser that is not installed. After an upgrade the user runs `install` once per browser, as for Chrome and Firefox today; a browser whose `install` was not run again keeps its old build. `uninstall --browser brave` removes Brave's external file. It removes the CRX and the unpacked extension only if no other Chromium browser's external file is still in place, and otherwise says which browser still uses them. `--purge` deletes Brave's databases and backups, and the key only if no other Chromium browser has its external file in place or a database left; the same rules apply to Chrome with Brave as the other browser.
 
 **What a Brave or Chrome user sees.** Both browsers show a "Safety Check" card on their extensions page saying they cannot verify where mirrormark comes from (branded Chrome 155 shows it for the same install); the extension stays on. Brave restores the last session at start, where Chrome opens a new tab, so a `bind.html` tab left from an open that did not confirm opens again at the next start and binds the profile then. It holds the database id that `install` created for that profile, so this binds to the right database.
 
-**LibreWolf.** LibreWolf is a release build, but it is built without `MOZ_REQUIRE_SIGNING` and honours `xpinstall.signatures.required`, which settles the conflicting reports [R14] for 158.0-1; none of the three prefs is locked, and their defaults are Firefox's (`true`, 15), so uninstall's resets are right. The Developer Edition route works unchanged: the XPI in the profile's `extensions` folder, the three `user.js` lines, the host manifest in `~/.mozilla/native-messaging-hosts/` (LibreWolf reads it after `~/.librewolf/native-messaging-hosts/` and `/usr/lib/librewolf/native-messaging-hosts/`, so a manifest there takes precedence [R8]), the UUID from `prefs.js`, and `<bin> --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>`, cold or into a running LibreWolf over D-Bus. Its `channel-prefs.js` says `release`, so the channel cannot tell it from release Firefox; `application.ini`'s `Name=LibreWolf` can. Its user agent stays `Firefox/158.0` under `resistFingerprinting`, so its hello says `firefox/158.0`. LibreWolf clears cookies and cache at shutdown by default, but the binding in `storage.local` survived clean restarts.
+**LibreWolf.** LibreWolf is a release build, but it is built without `MOZ_REQUIRE_SIGNING` and honours `xpinstall.signatures.required`, which settles the conflicting reports [R14] for 158.0-1; none of the three prefs is locked, and their defaults are Firefox's (`true`, 15), so uninstall's resets are right. The Developer Edition route works unchanged: the XPI in the profile's `extensions` folder, the three `user.js` lines, the UUID from `prefs.js` (LibreWolf's own order of native host manifest directories [R8] no longer matters since Section 11), and `<bin> --profile <dir> about:blank moz-extension://<uuid>/bind.html#<db>`, cold or into a running LibreWolf over D-Bus. Its `channel-prefs.js` says `release`, so the channel cannot tell it from release Firefox; `application.ini`'s `Name=LibreWolf` can. Its user agent stays `Firefox/158.0` under `resistFingerprinting`, so its hello says `firefox/158.0`. LibreWolf clears cookies and cache at shutdown by default, but the binding in `storage.local` survived clean restarts.
 
 **Which Gecko profiles install accepts.** The Developer Edition-only gate becomes "the browser asked for": `--browser firefox` takes only profiles whose browser is on the `aurora` channel, `--browser librewolf` only profiles whose browser's `application.ini` says `Name=LibreWolf`. Any other Gecko browser, release Firefox among them, is still refused before anything is written, and the message names the two that work.
 
-**Shared Gecko files.** Developer Edition and LibreWolf read one host manifest. `uninstall --browser librewolf` removes the XPI and resets the prefs in LibreWolf's profiles, and removes the host manifest only if no Developer Edition profile named by a database still holds the XPI; the same applies the other way round. As for Chromium, it is the files still in place that decide, not the databases, which an uninstall without `--purge` leaves behind.
+**Shared Gecko files.** Since Section 11, Developer Edition and LibreWolf share no file: `uninstall --browser librewolf` removes the XPI and resets the prefs in LibreWolf's profiles only. All four browsers share the user service, which goes with the last browser that still has its own file in place (Section 11). As for Chromium, it is the files still in place that decide, not the databases, which an uninstall without `--purge` leaves behind.
 
 **Profiles that have never run.** A first LibreWolf start creates two profiles, and the second, `default`, never runs, so it has no `compatibility.ini` and `install` cannot tell which browser it belongs to. The list shows it as `never run`, and naming it with `--profile` is refused before anything is written. Since Section 10, nothing is installed by default, so there is no default set to skip it from. The same code serves Developer Edition, so this applies there too.
 
 **Ids and labels.** A Brave profile's database id is `brave-<slug>` and its label `brave/<slug>`, so a conflict copy reads `GitHub (brave/personal)`; a LibreWolf profile's are `librewolf-<slug>` and `librewolf/<slug>`. `browser` in the profile block is `brave` or `librewolf`. `mirrormark install` and `uninstall` accept `--browser chrome`, `brave`, `firefox` or `librewolf`, and `--purge` works per browser as before.
 
-**Not supported.** Only the packagings the spikes ran are supported: Brave stable from Brave's `.deb` (`/opt/brave.com/brave`) and LibreWolf from its official tarball. Brave Beta and Nightly have other binaries and data directories; Flatpak and Snap browsers restrict native messaging (Later). LibreWolf from its Debian/Ubuntu repository, AppImage or AUR runs from another directory; `install` may well work with it, since it reads the directory from `compatibility.ini`, but nobody has tried. The README lists these as untested.
+**Not supported.** Only the packagings the spikes ran are supported: Brave stable from Brave's `.deb` (`/opt/brave.com/brave`) and LibreWolf from its official tarball. Brave Beta and Nightly have other binaries and data directories; Flatpak and Snap browsers were not tried (Later). LibreWolf from its Debian/Ubuntu repository, AppImage or AUR runs from another directory; `install` may well work with it, since it reads the directory from `compatibility.ini`, but nobody has tried. The README lists these as untested.
 
 **Decisions taken for the user.** The user was away when this section was written; each of these is the smallest safe choice and awaits sign-off:
 
 - Brave and LibreWolf are descriptions in the existing Chrome and Firefox packages, not new install paths;
-- Brave shares Chrome's key, CRX, id and system host manifest, and writes its external file to `/opt/brave.com/brave/extensions/`;
+- Brave shares Chrome's key, CRX and id (and, until Section 11, the system host manifest), and writes its external file to `/opt/brave.com/brave/extensions/`;
 - shared files go with the last browser that still has its own file in place (the external file for Chromium, the XPI for Gecko); the Chromium key also stays while another Chromium browser's databases remain;
 - `install` writes only the browser it was asked for; after an upgrade it is run once per browser;
 - databases are `browser: brave` / `librewolf`, ids `brave-<slug>` / `librewolf-<slug>`, labels `brave/<slug>` / `librewolf/<slug>`; the host does not tell browsers apart from the hello;
@@ -397,6 +402,110 @@ The files can lag a running Chromium browser by up to about 17 seconds (Tradeoff
 
 Chosen by us within those decisions: exit 0 for the list, numbers from 0, a 30-second wait, and the state names above.
 
+### 11. A local server instead of native messaging
+
+Native messaging makes the browser start the host, so a browser in a sandbox (firejail, Flatpak, Snap) starts it inside that sandbox, where it needs holes to reach mirrormark's files. The user decided to drop it: the extension now connects over a WebSocket to one long-running `mirrormark serve` on `127.0.0.1`. The localhost transport spike (`0001_local-bookmark-sync-host.d/localhost-transport-spike.md`) ran this in Chrome 155, Brave 1.97.57, Developer Edition 159 and LibreWolf 158 in Docker; each point below comes from it unless it says otherwise. Firejail itself is a later step (Later); this section only keeps the host out of the browser's sandbox.
+
+**`mirrormark serve`.** One server per user. It first takes `serve.lock` in the data directory without waiting, so a second `serve` exits with "mirrormark is already running". It then listens on `127.0.0.1` on the first of the ports `61959`, `63018` and `63454` it can bind, and exits with an error naming the three if it can bind none. The ports lie above Linux's ephemeral range (32768–60999), so an outgoing connection never holds one by chance. They are written once, in `extension/ports.json`: the binary reads that file from its embedded copy, and the extension reads its own copy at start, so the two cannot disagree. The server logs to `~/.local/state/mirrormark/log`, as the host did, and tags each line with the connection's number (`conn=`).
+
+**One host per connection.** The server runs the per-connection logic of Sections 1 and 2 unchanged, one goroutine per connection, over a connection that reads and writes messages instead of stdin and stdout. Nothing about rounds changes. The global lock still keeps rounds apart: `flock` locks belong to the open file, so goroutines in one process exclude each other as separate processes did. A second connection for a database already in use still gets `db-locked`, as a copied profile did. Each host still polls the files once a second. When a connection closes, its host stops and releases its database's lock.
+
+**Which database a connection is.** The `hello` carries the database id, as before, and the profile's token. The host accepts it only if the database file exists, its profile block's `origin` equals the connection's `Origin` header, and its `token` equals the hello's (compared in constant time). Otherwise it answers `error` with the new code `bad-token` and stops, and the popup says to run `mirrormark install` for this profile again. Only then does it take the database's lock and touch the lock file, so `db.Connected` (Section 5) still confirms a binding, and only for an accepted hello.
+
+**Who may connect.** Any local program can open a connection and send any `Origin`. Web pages can connect too, with their own origin: pages from `127.0.0.1` in every browser, pages on a private address in Chrome, Brave and Developer Edition, and an HTTPS page on a public address once the user allows Chrome's Local Network Access prompt. So the server checks two things:
+
+- **Before the upgrade:** the `Host` header must be `127.0.0.1:<port>`, which stops DNS rebinding, and the `Origin` must be the `origin` of some database. Anything else gets HTTP 403, and no message is read. This stops every web page.
+- **In the hello:** the exact origin and the token of the database named, as above. The token stops other local programs, such as another user's. In Chrome and Brave, every profile of one install connects with the same origin, `chrome-extension://<id>`, so only the token tells their profiles apart. In Developer Edition and LibreWolf, the origin `moz-extension://<uuid>` is already per profile.
+
+Programs running as the same user can read the database files and the tokens in them; they are trusted, as before (Tradeoffs and risks).
+
+**Binding hands over the token.** For each profile it binds, `install` first writes two fields into the profile block, under the global lock so that no round overwrites them: `origin`, which is `chrome-extension://<id>` for Chrome and Brave and `moz-extension://<uuid>` (the UUID from `prefs.js`) for Developer Edition and LibreWolf; and `token`, 32 random bytes in hex, generated if the block has none yet. Running `install` again keeps the token and updates the origin, since Gecko gives a reinstalled add-on a new UUID. The bind page's URL becomes `bind.html#<db>.<token>`; the page stores both and the time, and the extension sends both in every hello. The confirmation is unchanged: `install` waits for the lock file's modification time. The token passes through the browser's command line and may stay in its history or restored session, which only the user can read, like the database file.
+
+```yaml
+profile:
+  id: chrome-personal
+  label: chrome/personal
+  browser: chrome
+  path: /home/chris/.config/google-chrome/Profile 1
+  origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop   # written by install
+  token: 3f9c…                                                    # 64 hex digits, written by install
+```
+
+**The protocol over WebSocket.** The messages of Section 2 stay as they are, one JSON message per WebSocket text frame, with `v` raised to 2 because the hello gains `token`. The server sends `{"v": 2, "type": "ping"}` every 20 s on each connection. Messages to the extension stay within 1 MB, so the batch limits do not change; messages from it may be up to 64 MB, as before.
+
+**A WebSocket server in the standard library.** A package of about 250 lines, `internal/ws`, does only what the server needs: the opening handshake (version 13; no subprotocols, extensions or compression), masked frames from the client (text, continuation, ping, which it answers with pong, pong, which it ignores, and close, which it answers), and unmasked, unfragmented text and close frames to the client. It refuses binary frames, unmasked frames, and messages over the limit. No new dependency.
+
+**The extension.**
+
+- **Connecting.** It tries `ws://127.0.0.1:<port>/` on each port in order and keeps the first socket that opens. A port where nothing listens fails at once, and so does one whose server refuses the upgrade (such as another user's mirrormark, which does not know this origin), and the next is tried. If none opens, the popup says "mirrormark is not running. Start it with `systemctl --user start mirrormark`, or run `mirrormark serve`.", and the reconnect alarm is set.
+- **Staying alive.** In Chrome and Brave, the server's ping every 20 s keeps the service worker running. In Gecko, socket traffic does not count, so the extension calls `runtime.getPlatformInfo()` on each ping. It does this in every browser, so there is one code path.
+- **Reconnecting.** The one-shot alarm set when the socket closes stays (30 s, or 60 s after the host's `error`). A periodic one-minute alarm is added: a browser that stops the background with no traffic closes the socket without running its `onclose`, and only an alarm starts it again.
+- **Manifest.** The permission `nativeMessaging` goes, no host permission is added, and `"content_security_policy": {"extension_pages": "script-src 'self'"}` replaces Gecko's default policy. That default includes `upgrade-insecure-requests`, which turns `ws://127.0.0.1` into `wss://` and fails the socket. The version rises to 0.2.0, so every browser picks up the new build.
+
+**The service.** `install --profile …` writes `$XDG_CONFIG_HOME/systemd/user/mirrormark.service` (`~/.config/systemd/user/` when unset) and enables it:
+
+```ini
+[Unit]
+Description=mirrormark bookmark sync
+
+[Service]
+ExecStart=/home/chris/bin/mirrormark serve
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+`ExecStart` is the binary's absolute path, with symlinks resolved, as the host manifest's was. For each of `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` that is set to an absolute path when `install` runs, the unit gets an `Environment=` line, so the server finds the same files as `install`. `install` runs `systemctl --user daemon-reload` and `enable mirrormark.service`, then `restart` on a run that changed the unit or the browser's files (a new build) and `start` otherwise. If `systemctl` is missing or fails, as without a user session bus, `install` says so and prints `mirrormark serve` as the command to keep running. Before it opens any bind page, `install` checks that a server holds `serve.lock`, waiting up to 5 s. If none does, it says how to start one, opens nothing and exits 1. `uninstall --browser B` stops, disables and removes the unit only if no other browser, of either family, still has mirrormark in place (another Chromium browser's external file, or the XPI in a Gecko profile that a database names); otherwise it says which browser still uses it. A user may run `mirrormark serve` by hand instead; `serve.lock` keeps the two from running together.
+
+**Installing, per browser.**
+
+- **Chrome and Brave.** `install` writes only the browser's external file, and `sudo` is needed only for that file. The CRX and the unpacked extension go with the last Chromium browser's external file, and the key rule is unchanged.
+- **Developer Edition and LibreWolf.** `install` writes only the XPI and `user.js` in each profile. The two browsers no longer share a file.
+- **Old host manifests.** `install --profile …` and `uninstall` remove a native host manifest left by an earlier mirrormark: `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names this install's extension id (with `sudo rm` if needed), and `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` if it names the gecko id. One that names another extension belongs to another install and stays.
+
+**Upgrading from the native-messaging build.** The user installs the new binary and runs `install --browser B --profile …` for each browser, as after any upgrade. The extension's version changed, so this is a first pass:
+
+1. It rewrites the external file or the XPIs.
+2. It removes the old host manifests.
+3. It writes and starts the service, and asks for a browser restart.
+
+Until the restart, the old extension cannot reach a host, since the new binary has none. After it, the new extension reaches the server, but it has no token yet, so it gets `bad-token`. The second `install` binds each ready profile with its token. Database files without `origin` and `token` load as before. An older binary refuses a file that has them, because it rejects unknown keys, so going back means deleting those two lines first.
+
+**Tests.**
+
+- **Unit tests:** the WebSocket codec; the server's checks (wrong `Host`, unknown `Origin`, missing, wrong or another database's token, and the right one); two connections for one database (`db-locked`); the ping; falling back to the next port when the first is taken; `serve.lock`; `install` writing `origin` and `token`, keeping the token when run again, and the bind URL; the unit file and the `systemctl` calls, with a fake `systemctl`, and the message when it fails; uninstall's rule for the unit; removing old host manifests.
+- **End-to-end:** the harness starts `mirrormark serve` itself for each test, not through systemd, since the dev image has no user session, and stops it at cleanup. The existing tests keep their meaning: "a new host for a" and "the old host exits" become a new connection for a and the old connection's close, read from the log's connection numbers. One new test stops the server, sees the popup say mirrormark is not running, starts the server again and sees the profile sync. Phase 6's Brave and LibreWolf end-to-end tests, which had not run yet, run on the new transport.
+
+**User decisions.** The user made these after the spike:
+
+- a long-running `mirrormark serve`, run as a systemd user service that `install` writes and enables and `uninstall` removes; users may also run it by hand;
+- native messaging goes entirely: no host manifests, no host mode, no native port. When the server cannot be reached, the popup says mirrormark is not running and how to start it;
+- three fixed ports, `61959`, `63018` and `63454`, in both the binary and the extension. The server listens on the first it can bind; the extension tries all three. No port setting yet;
+- `127.0.0.1` only. A connection is accepted only with the bound profile's exact extension origin and its token, which `install` generates, stores in that profile's database file, and hands to the extension once, through the bind page;
+- everything Section 10 and earlier built for safety stays: explicit `--profile`, the bind page opened once and only where the extension is ready, per-browser purge, the Developer Edition and LibreWolf gate, and databases before profile writes;
+- firejail is a later, separate step.
+
+Chosen by us within those decisions:
+
+- the ports live in `extension/ports.json`;
+- `serve.lock` keeps one server per user;
+- `origin` and `token` live in the profile block;
+- the bind fragment is `<db>.<token>`;
+- the ping is a JSON text message, not a WebSocket control frame, because the extension never sees control frames;
+- every browser makes the keep-alive call;
+- the reconnect alarm becomes periodic as well as one-shot;
+- the service restarts on a first pass;
+- the unit gets `Environment=` lines for the XDG variables;
+- the new error code is `bad-token`.
+
+**Not verified.**
+
+- Lifetimes beyond 9 minutes, sleep and resume, and a server that is down when the browser starts. The periodic alarm should cover the last, but only a server restart while the browser runs was tried.
+- Chrome and Brave with their own sandbox: the spike and the dev image run them with `--no-sandbox`.
+- Release Firefox, and Firefox's Local Network Access prompt. The `Origin` check refuses such pages whatever the prompt does.
+- Why Gecko drops its first socket about 10 s after the browser starts. The reconnect alarm covers it, at the cost of up to 30 s at start.
+
 ## Alternatives considered
 
 **Per-node versions** (the previous draft). Each node carried a version `v` and the profile `by` that made it, and a `purged` list with 90-day expiry recorded real deletions. A three-way merge against each profile's own last file gives the same answers with less state: base tells a removal from a node a profile never had, so no purge list is needed and a long-closed profile no longer brings purged bookmarks back; per-field merging replaces whole-node versions, so a title edit and a URL edit no longer conflict. The global lock already gives the total order the versions stood in for, and `seq` records it.
@@ -409,9 +518,11 @@ Chosen by us within those decisions: exit 0 for the list, numbers from 0, a 30-s
 
 **TypeScript and Puppeteer.** A `tsc` build and a Node test driver would bring Node and npm into the dev image for a few hundred lines of extension code. Plain JavaScript and a Go DevTools client over a pipe keep one toolchain.
 
-**One daemon behind a native-messaging relay.** Each host process relayed to a long-running `mirrormark serve` over a Unix socket. It needed a daemon that outlives the browser's host and both browsers open at once. With the files standing in for the other members, a round needs only its own browser, and a closed browser catches up when it starts.
+**One daemon behind a native-messaging relay.** Each host process relayed to a long-running `mirrormark serve` over a Unix socket. With the files standing in for the other members, a round needs only its own browser, so the relay added a process and a socket for nothing. Section 11 does run a long-running server, but the browser connects to it directly.
 
-**A localhost WebSocket server.** Any local program or web page can reach a localhost port, so it needs tokens, `Origin` checks and DNS-rebinding defences. Native messaging lets the browser vouch for the extension.
+**Native messaging** (the design before Section 11). The browser vouches for the extension and starts one host per connection, so there is no listener to defend. The user dropped it because the browser starts the host inside its own sandbox (firejail, Flatpak, Snap), and each sandbox would need holes for the host to reach mirrormark's files; a server outside the sandbox needs only loopback. The price is Section 11's `Host`, `Origin` and token checks.
+
+**`fetch` to the server instead of a WebSocket.** It needs the host permission `http://127.0.0.1/*` in all four browsers, which shows at install, and polling or long requests to get messages from the server. A WebSocket needs no permission.
 
 **Signing the XPI now** through addons.mozilla.org (unlisted, `web-ext sign` [R13]). It would let release Firefox run mirrormark, but needs an account, an API key and a signing step per release, and the question of whose account signs is open. Developer Edition proves the design first; signing is Later.
 
@@ -447,7 +558,7 @@ Chosen by us within those decisions: exit 0 for the list, numbers from 0, a 30-s
 - **No export yet.** Recovering from a bad sync means `_deleted`, the YAML backups read by hand, or the browser's own bookmark export made beforehand; `install` suggests making one.
 - **Unsigned add-ons in Firefox profiles.** `install` sets `xpinstall.signatures.required` to false in each Firefox profile it binds, so that profile accepts any unsigned add-on, not only mirrormark's, and with `extensions.autoDisableScopes` 14 an add-on file dropped into its `extensions` folder starts enabled without asking. Add-ons sideloaded into the other scopes, such as `~/.mozilla/extensions`, still start disabled and ask, as by default. A program that can write the profile directory could already change the profile in other ways, but the user loses Mozilla's signature check there. The README says so before the user runs `install`; `uninstall` restores both prefs.
 - **Only Developer Edition.** Release Firefox, which most people use, needs a signed XPI. Until then Firefox support reaches only people who run Developer Edition.
-- **Firefox upgrades are unchecked.** An upgrade replaces the XPI in each profile; that Firefox picks up a changed XPI at its next start (with `startupScanScopes` 1) was not checked in the spike, and Phase 5's e2e does not check it either. If Firefox kept the old build it would go on running it, and the host refuses an old build only when the protocol version changed (`unsupported-version` in the log).
+- **Firefox upgrades are unchecked.** An upgrade replaces the XPI in each profile; that Firefox picks up a changed XPI at its next start (with `startupScanScopes` 1) was not checked in the spike, and Phase 5's e2e does not check it either. If Firefox kept the old build it would go on running it, and the host refuses an old build only when the protocol version changed (`unsupported-version` in the log). An upgrade from the native-messaging build depends on it: a Firefox that kept the old build would keep trying native messaging and never sync until the add-on is replaced.
 - **Undocumented Firefox files.** `profiles.ini`, `compatibility.ini`, `channel-prefs.js` and the UUID map in `prefs.js` are not documented interfaces. The new profile switcher's profiles are found by scanning for `prefs.js`, and get the directory's name rather than the one Firefox shows.
 - **URLs Firefox refuses.** A Chrome bookmark whose URL Firefox will not store (perhaps `chrome://` or `file:` URLs; not checked) fails its `create` in Firefox every round, which stalls that Firefox profile like any failing write. Phase 5 does not check which schemes Firefox refuses; the stalled profile logs the failing op.
 - **Brave's file lives in Brave's package tree.** Whether a Brave upgrade or removal leaves `/opt/brave.com/brave/extensions/` alone was not checked. If an upgrade removed the file, Brave would remove mirrormark at its next start, and running `install --browser brave` again would put it back.
@@ -455,8 +566,13 @@ Chosen by us within those decisions: exit 0 for the list, numbers from 0, a 30-s
 - **Upgrades are per browser.** Every Chromium external file names the one CRX and its exact version. A user who upgrades and runs `install` for Chrome but not for Brave leaves Brave on the old build (or, if Brave had not yet installed it, failing to install the new CRX) until `install --browser brave` runs; if the protocol changed, the popup and the log say `unsupported-version`.
 - **A restored bind tab from an older install.** If the user moved a Brave profile's database aside and installed again, a failed tab from before could open at the next start and bind the old id; the popup then reports `db-missing`, and running `install` again fixes it.
 - **LibreWolf's future and other packagings.** A later LibreWolf could turn on `MOZ_REQUIRE_SIGNING` or lock one of the three prefs; `install` would still write them, and the add-on would not load (`not bound`). Only the tarball in `/opt/librewolf` and LibreWolf's default sanitize settings were run; a user who makes LibreWolf clear more at shutdown may lose the binding at each restart, which the popup reports as unbound.
-- **A host manifest in `~/.librewolf/native-messaging-hosts/`** wins over mirrormark's in `~/.mozilla/`. A user who put one there for mirrormark by hand would have to keep it current.
-- **Same-user programs are trusted.** They can rewrite the YAML files, as they could the browsers' own files.
+- **Same-user programs are trusted.** They can rewrite the YAML files, as they could the browsers' own files, and read the tokens in them, so they could also talk to the server as any profile.
+- **Sync needs the server running.** If the service is stopped, or keeps failing until systemd gives up, nothing syncs, and each popup says mirrormark is not running. Bookmarks stay as they are; the next round catches up.
+- **A program on the first port gets the token.** The extension sends its token in the hello to the first server that accepts the upgrade. A program that holds `61959` before mirrormark starts and accepts any upgrade would receive it, and could then connect to the real server on the next port as that profile. On a computer with one user, such a program could already read the database files. On a shared computer, another user's program could do it (Open question 5).
+- **Changes from other profiles can wait up to a minute.** A background the browser stopped with no traffic starts again at the next periodic alarm. A change made in the browser itself wakes it at once.
+- **Failed connection attempts show as errors.** When the first port is not mirrormark's, Chrome logs the failed socket in the extension's console, and may show it on the extensions page.
+- **An upgrade that changes only the binary does not restart the server.** `install` restarts the service only when it changes the browser's files or the unit. After such an upgrade, run `systemctl --user restart mirrormark`; the README says so.
+- **The service runs only while the user is logged in**, which is when their browsers run. Without systemd, the user starts `mirrormark serve` themselves.
 
 ## Rollout
 
@@ -476,12 +592,16 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Exit:** all pass, and the README's Firefox steps are run once by hand on a desktop with Developer Edition. That manual run is still to do; it is the one check left for this phase.
 
 6. **Brave and LibreWolf** (Section 9). Refactors first, with Chrome and Firefox unchanged: each package describes its browsers, and install, bind and uninstall read from the description. Then a profile that has never run is skipped unless named (later replaced by Section 10's required `--profile`). Then Brave, install and uninstall in one commit with the shared-file rules, and LibreWolf likewise, so no prefix turns a profile's checks off without the uninstall that turns them back on. Then the dev image gains Brave 1.97.57 and LibreWolf 158.0-1, and the e2e tests run in them.
-   - **Tests:** unit tests for each browser's data directory or profile root (with and without `$XDG_CONFIG_HOME`), the files `install` writes, recognising LibreWolf and refusing other Gecko browsers, skipping a never-run profile, and that uninstalling Brave keeps the shared host manifest and CRX while Chrome is installed, and the other way round (and the same for the two Gecko browsers). E2e: install and bind a Chrome and a Brave profile with one id, then uninstall Brave and check the shared host manifest stays; the same for a LibreWolf and a Developer Edition profile; and the five sync tests between Brave and LibreWolf.
+   - **Tests:** unit tests for each browser's data directory or profile root (with and without `$XDG_CONFIG_HOME`), the files `install` writes, recognising LibreWolf and refusing other Gecko browsers, skipping a never-run profile, and that uninstalling Brave keeps the shared CRX (and, before Phase 8, the host manifest) while Chrome is installed, and the other way round (and the same for the two Gecko browsers). E2e: install and bind a Chrome and a Brave profile with one id, then uninstall Brave and check that what Chrome still uses stays (run on Phase 8's transport); the same for a LibreWolf and a Developer Edition profile; and the five sync tests between Brave and LibreWolf.
    - **Exit:** all pass with Chrome's and Firefox's tests unchanged, and the README's Brave and LibreWolf steps are run once by hand on a desktop.
 
 7. **Explicit profiles and binding once** (Section 10), landing before Phase 6's end-to-end tests, which then use it. First, `install` reads each named profile's state from its files, opens the bind page once only where the extension is ready, and says why elsewhere. Then `install` without `--profile` lists the profiles and changes nothing, and `--profile` takes an ID or a number.
    - **Tests:** unit tests that read each state in the profile-state spike from fixture files, for both families; that a profile that is not ready gets its message and no open; that each ready profile gets one open and a silent one ends in `not bound` after the wait; that a listing writes no file, starts no `sudo` and no browser, for Brave before and after an install and for Developer Edition with never-run and other-browser profiles; and the numeric-aware order and selection by ID and number (an exact ID beats a number, a number too large for any profile is refused as one). E2e: the existing Chrome and Firefox install tests with `--profile`, a listing of a bound Chrome profile, and a profile named before the browser installed the extension is reported not ready, then binds after a restart.
    - **Exit:** all pass, and the README's steps are run again on the desktop Brave that showed "blocked by Brave".
+
+8. **A local server instead of native messaging** (Section 11). In order: the host reads and writes messages through a connection type, not stdin and stdout; a standard-library WebSocket server package; `mirrormark serve`, which checks `Host`, `Origin` and the token but which no extension uses yet; the log rotating while the server runs; `install` writing `origin` and `token` and handing the token to the bind page; the systemd user service, installed and uninstalled together; the switch, in which the extension connects to the server, the protocol becomes version 2, and the e2e harness starts `mirrormark serve`; then removing native messaging. Phase 6's Brave and LibreWolf end-to-end tests follow, on the new transport. Every commit up to the switch leaves native messaging working, and every commit from the switch on uses the server, so no prefix leaves a user without a working transport.
+   - **Tests:** as in Section 11, Tests.
+   - **Exit:** all pass, the README's steps are run once on a desktop with Chrome and with Developer Edition, upgrading from the native-messaging build, and a server restart and a browser restart each reconnect.
 
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
@@ -493,11 +613,12 @@ Each is its own RFC or stack once the Chrome version works.
 - **Chromium, Brave Beta and Nightly.** Their profile directories and external extension directories; Chromium also honours `--load-extension` [R12].
 - **`mirrormark export`** of a database or backup to a bookmarks HTML file both families import.
 - **`mirrormark preview <union>`**, printing what a union would become before a member is added.
-- **Flatpak and Snap browsers**, which restrict native messaging.
+- **Firejail, Flatpak and Snap browsers.** The server runs outside the sandbox, so each needs only loopback access from inside it; none was tried.
+- **A port setting**, for a computer where all three ports are taken.
 - **Windows and macOS**, which refuse local CRX files [R11].
 - **Release packaging**: `make release` and a README tested in a fresh container.
 - **`mirrormark status`**, summarising profiles, unions, last rounds and errors; until then the log and the popup carry them.
-- **A no-root install**: a per-user host manifest in `<data dir>/NativeMessagingHosts/` plus Load unpacked in each profile.
+- **A no-root install** for Chrome and Brave: Load unpacked in each profile.
 
 ## Success criteria
 
@@ -510,9 +631,9 @@ Each is its own RFC or stack once the Chrome version works.
 
 ## Security, privacy, operational impact
 
-- **Security.** No network listener; only the extension id in the host manifest can start the host [R1] [R2]. The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies two JSON files into place with `install`: one names a CRX in the user's data directory, the other the host binary. For Brave the same `sudo install` writes Brave's file into `/opt/brave.com/brave/extensions/`. For Firefox and LibreWolf nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks); only the gecko id in the per-user host manifest can start the host.
+- **Security.** The server listens on `127.0.0.1` only. It refuses an upgrade whose `Host` is not `127.0.0.1:<port>` or whose `Origin` is no database's, and a hello whose origin and token are not the named database's (Section 11). The host validates every message and file and executes nothing it receives. The extension has no host permissions. The `sudo` step copies one JSON file into place with `install`, naming a CRX in the user's data directory; for Brave it writes Brave's file into `/opt/brave.com/brave/extensions/`. For Firefox and LibreWolf nothing runs as root, but each bound profile stops checking add-on signatures (Tradeoffs and risks).
 - **Privacy.** The YAML files and backups hold the user's bookmarks in plain text, mode `0600`. Nothing leaves the computer, and there is no telemetry. `uninstall --purge` deletes a browser's databases and backups, and the last browser's purge deletes the rest.
-- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The host logs to `~/.local/state/mirrormark/log`; `install` prints its path. A host that starts with the log over 1 MiB moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the host restarts.
+- **Operations.** About 2 MB per database file per 10,000 bookmarks (estimate), times up to 30 backups. The server logs to `~/.local/state/mirrormark/log`; `install` prints its path. When the log grows over 1 MiB, the server moves it to `log.1`. Every warning is logged each time; a failed round waits 5 seconds before the next, so a lasting problem adds a few lines every 5 seconds until it is fixed or the server restarts.
 
 ## Open questions
 
@@ -520,6 +641,7 @@ Each is its own RFC or stack once the Chrome version works.
 2. **Chrome account and local folders.** A signed-in Chrome profile can have two bookmark bars [R6]. _Resolved as built:_ when a path resolves, an account folder (`syncing`) wins over a local one of the same name.
 3. **URL matching.** Should `http`/`https` or a trailing slash count as the same URL? _Resolved as built:_ no; URLs compare exactly.
 4. **Release Firefox.** Whose addons.mozilla.org account signs the XPI, and is an unlisted signed add-on acceptable to the user? Until decided, only Developer Edition is supported.
+5. **Should the server prove the token first?** As decided, the extension sends its token in the hello to the first server that accepts the upgrade (Tradeoffs and risks). The server could instead answer the hello with an HMAC of a nonce the extension sent, keyed by the token, before the extension sends anything secret. That costs one round trip and Web Crypto in the extension. Awaiting the user's decision; until then, the token goes in the hello.
 
 ## References
 
@@ -558,3 +680,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — after the user tried Brave on a desktop: `install` without `--profile` lists the profiles with their state and writes nothing; `--profile` takes an ID or a number, not a name; `install` reads each profile's extension state from its own files and opens the bind page once, only where the extension is ready, with no retries; the never-run skip goes. Both are the user's decisions (Section 10).
 - 2026-10-15 — while implementing: a Chromium profile reads `removed` only while its `extensions.settings.<id>` has no `path`, so a copy loaded unpacked after a Remove is not reported as removed for ever.
 - 2026-10-15 — profile listing as built: the example line gives the first unbound profile's quoted ID; a new `unreadable` state for a profile whose files cannot be parsed; `not <browser>` covers any refusal by the browser check, with the reason on stderr.
+- 2026-10-15 — Section 11 and Phase 8 after the localhost transport spike, by the user's decision: one `mirrormark serve` per user, run as a systemd user service, in place of native messaging; the extension connects over a WebSocket to `127.0.0.1` on the first of three fixed ports that answers; the server checks `Host`, `Origin` and a per-profile token that `install` writes into the profile block and hands over through the bind page; protocol version 2 with a ping every 20 s; host manifests are no longer written, and old ones are removed.
