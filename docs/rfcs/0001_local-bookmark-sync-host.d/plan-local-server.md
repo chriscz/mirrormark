@@ -4,7 +4,7 @@
 
 **Goal:** The extension talks to one long-running `mirrormark serve` over a WebSocket on `127.0.0.1` instead of native messaging. `install` runs the server as a systemd user service and hands each profile a token. Native messaging is then removed, and the pending Brave and LibreWolf end-to-end tests run on the new transport.
 
-**Architecture:** `host.Run` keeps all of today's per-connection logic, but it reads and writes messages through a `host.Conn` instead of stdin and stdout. A small standard-library package, `internal/ws`, speaks WebSocket. `host.Serve` accepts connections, checks `Host` and `Origin`, and runs one `host.Run` per connection. The hello check gains the profile's origin and token, which `install` writes into the profile block before it opens the bind page. The extension switches transport in one commit, together with the protocol bump and the e2e harness. Native messaging goes in the next commit.
+**Architecture:** `host.Run` keeps all of today's per-connection logic, but it reads and writes messages through a `host.Conn` instead of stdin and stdout. A small standard-library package, `internal/ws`, speaks WebSocket. `host.Serve` accepts connections, checks `Host` and `Origin`, and runs one `host.Run` per connection. The hello starts a challenge: the host proves it holds the profile's token, then the extension proves it does, so the token never crosses the socket. `install` writes the origin and token into the profile block before it opens the bind page. The extension switches transport in one commit, together with the protocol bump and the e2e harness. Native messaging goes in the next commit.
 
 **Tech Stack:** Go 1.27.2 (standard library plus `go.yaml.in/yaml/v3`; no new dependency); plain JavaScript extension; systemd user units; e2e over the DevTools pipe (Chrome, Brave) and WebDriver BiDi (Developer Edition, LibreWolf) in the dev image.
 
@@ -24,7 +24,8 @@
 - **Protocol version** stays 1 until Task 7, which makes it 2.
 - **Profile block fields:** `origin` (`chrome-extension://<id>` or `moz-extension://<uuid>`, no trailing slash) and `token` (64 lowercase hex digits from 32 bytes of `crypto/rand`), both `omitempty`.
 - **Bind URL fragment:** `#<db>.<token>`.
-- **Error code** for a wrong origin or token: `bad-token`.
+- **Error code** for a wrong origin, a database with no token, a malformed nonce or a wrong proof: `bad-token`.
+- **The challenge, exactly.** Extension → host `{"v", "type": "hello", "db", "nonce": nonce_e, "browser"}`; host → extension `{"v", "type": "challenge", "nonce": nonce_s, "proof": proof_s}`, sent only when the database exists, its `origin` is the connection's and it has a `token`; extension → host `{"v", "type": "proof", "proof": proof_e}`, sent only after the extension checked `proof_s`. `proof_s = hex(HMAC-SHA256(key, "server:" + port + ":" + nonce_e))` and `proof_e = hex(HMAC-SHA256(key, "extension:" + nonce_s))`, where `key` is the token's 64 hex digits as ASCII bytes (never hex-decoded), `port` is the listening port in decimal, and nonces are 32 bytes of `crypto/rand` (`crypto.getRandomValues` in the extension) as 64 lowercase hex digits. Hex is always lowercase. The host compares with `hmac.Equal`; the extension with `!==`, since each attempt has a new nonce. The host takes the database's lock and touches the lock file only after a right `proof_e`. The token is never sent on the socket.
 - **Unit path:** `filepath.Join(filepath.Dir(p.Config), "systemd", "user", "mirrormark.service")`, which is `$XDG_CONFIG_HOME/systemd/user/mirrormark.service`, or `~/.config/systemd/user/…` when that is unset. `ExecStart=<selfPath()> serve`, `Restart=on-failure`, `WantedBy=default.target`.
 - **Not running, exactly:** the popup text `mirrormark is not running. Start it with \`systemctl --user start mirrormark\`, or run \`mirrormark serve\`.`
 - **Log lines the e2e tests read:** `msg=listening`, `msg=connected … conn=<n> db=<id>`, `msg=disconnected … conn=<n>`.
@@ -43,9 +44,9 @@ internal/ws/
   ws.go               Upgrade, Dial, Conn.Read/Write/Close (Task 2)
   ws_test.go
 internal/host/
-  protocol.go         Conn, encode/decode, Msg.Token (Tasks 1, 3); Stream,
+  protocol.go         Conn, encode/decode, Msg.Nonce/Proof (Tasks 1, 3); Stream,
                       ReadMsg, WriteMsg go (Task 8)
-  host.go             Run(ctx, Conn, Options); token check in hello (Tasks 1, 3)
+  host.go             Run(ctx, Conn, Options); the challenge (Tasks 1, 3)
   server.go           Listen, Serve, admit, wsConn (Task 3)
   server_test.go
 internal/db/
@@ -91,6 +92,7 @@ type Options struct {
 	Poll    time.Duration
 	Ping    time.Duration // Serve: how often to ping each connection; default 20 s
 	Origin  string        // Run: the connection's Origin; set by Serve
+	Port    string        // Run: the port the server listens on, which the host's proof names; set by Serve
 }
 func Listen(ports []int) (net.Listener, error)
 func Serve(ctx context.Context, ln net.Listener, o Options) error
@@ -699,7 +701,7 @@ func (c *Conn) fail(code uint16, why string) error {
 
 **Interfaces:**
 - Consumes: Task 1 (`Conn`, `encode`, `decode`), Task 2 (`ws`).
-- Produces: `extension.Ports`, `db.Profile.Origin`/`Token`, `Paths.ServeLock`, `host.Msg.Token`, `host.Options.Ping`/`Origin`, `host.Listen`, `host.Serve`; log messages `listening`, `connected`, `disconnected`.
+- Produces: `extension.Ports`, `db.Profile.Origin`/`Token`, `Paths.ServeLock`, `host.Msg.Nonce`/`Proof`, `host.Options.Ping`/`Origin`/`Port`, `host.Listen`, `host.Serve`; log messages `listening`, `connected`, `disconnected`.
 
 No extension uses the server yet: nothing a user sees changes except the new command.
 
@@ -750,33 +752,86 @@ In `paths.go`:
 func (p Paths) ServeLock() string { return filepath.Join(p.Data, "serve.lock") }
 ```
 
-- [ ] **Step 3: The hello checks the token.** `Msg` gains `Token string \`json:"token,omitempty"\`` after `DB`. In `host.go`'s `hello`, after the `os.Stat` check and before `TryLock`:
+- [ ] **Step 3: The hello starts a challenge.** `Msg` gains, after `DB`:
 
 ```go
-	// A connection through the server proves which database it is: the
-	// origin it came from and the token install handed to this profile.
-	// In Chromium every profile has the same origin, so the token is what
-	// tells them apart.
-	if s.o.Origin != "" {
-		d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
-		if err != nil {
-			return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s: %v", m.DB, err))
-		}
-		if d.Profile.Token == "" || d.Profile.Origin != s.o.Origin ||
-			subtle.ConstantTimeCompare([]byte(m.Token), []byte(d.Profile.Token)) != 1 {
-			return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
-		}
-	}
+	Nonce    string           `json:"nonce,omitempty"` // hello, challenge: 32 random bytes in hex
+	Proof    string           `json:"proof,omitempty"` // challenge, proof: an HMAC in hex
 ```
 
-Add `"crypto/subtle"`, and in `Options`:
+In `host.go`, `state` gains `pending pending`, and `handle` gains `case "proof": return s.proof(m)`. `hello` keeps its first checks (`s.self`, now `s.self != "" || s.pending.db != ""`; `ValidID`; the `os.Stat`), then ends with:
+
+```go
+	// Through the server, a connection must prove which database it is
+	// before the host runs: native messaging needed no proof, since the
+	// browser started the host for its own extension.
+	if s.o.Origin != "" {
+		return s.challenge(m)
+	}
+	return s.accept(m.DB, m.Browser)
+}
+```
+
+`accept(id, browser string) error` is the rest of today's `hello` unchanged: `TryLock`, the lock file's mtime, `s.self`, the `connected` log line. Then:
+
+```go
+// pending is a hello waiting for the extension's proof.
+type pending struct{ db, browser, token, nonce string }
+
+// nonceRe is a nonce as both sides write it: 32 random bytes in hex.
+var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// challenge answers a hello through the server. The connection came from
+// the database's origin, but any program can send any Origin, and in
+// Chromium every profile has the same one. So each side proves it holds
+// the token install handed this profile, without sending it: the host
+// first, so the extension tells a program posing as mirrormark nothing.
+// The port in the host's proof stops a program on another port relaying
+// the hello here and passing back this host's proof.
+func (s *state) challenge(m Msg) error {
+	d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
+	if err != nil {
+		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s: %v", m.DB, err))
+	}
+	if d.Profile.Token == "" || d.Profile.Origin != s.o.Origin || !nonceRe.MatchString(m.Nonce) {
+		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
+	}
+	b := make([]byte, 32)
+	rand.Read(b) // never fails
+	s.pending = pending{db: m.DB, browser: m.Browser, token: d.Profile.Token, nonce: hex.EncodeToString(b)}
+	return s.send(Msg{Type: "challenge", Nonce: s.pending.nonce, Proof: mac(d.Profile.Token, "server:"+s.o.Port+":"+m.Nonce)})
+}
+
+// proof checks the extension's answer to the challenge, and only then
+// runs the host for its database.
+func (s *state) proof(m Msg) error {
+	p := s.pending
+	if s.self != "" || p.db == "" {
+		return nil // no challenge is waiting
+	}
+	if !hmac.Equal([]byte(m.Proof), []byte(mac(p.token, "extension:"+p.nonce))) {
+		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", p.db))
+	}
+	return s.accept(p.db, p.browser)
+}
+
+// mac is HMAC-SHA256 of msg, keyed by the token as text, in lowercase hex.
+func mac(token, msg string) string {
+	h := hmac.New(sha256.New, []byte(token))
+	h.Write([]byte(msg))
+	return hex.EncodeToString(h.Sum(nil))
+}
+```
+
+Imports: `crypto/hmac`, `crypto/rand`, `crypto/sha256`, `encoding/hex`, `regexp`. In `Options`:
 
 ```go
 	Ping    time.Duration // Serve: how often to ping each connection; default 20 s
-	Origin  string        // the connection's Origin; Serve sets it, and then the hello must carry the token
+	Origin  string        // the connection's Origin; Serve sets it, and then the hello starts a challenge
+	Port    string        // the port the server listens on, named in the host's proof; Serve sets it
 ```
 
-Add `bad-token` to the list of `error` codes in `Msg`'s comment.
+Add `challenge` and `proof` to the message types and `bad-token` to the list of `error` codes in `Msg`'s comment.
 
 - [ ] **Step 4: Write the failing server tests** in `internal/host/server_test.go`:
 
@@ -785,6 +840,9 @@ package host_test
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -803,9 +861,9 @@ import (
 
 const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
 
-// bound writes a database file for id with origin and token.
-func bound(t *testing.T, p db.Paths, id, token string) {
-	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: "chrome/" + id, Browser: "chrome", Origin: origin, Token: token}}
+// bound writes a database file for id with org and token.
+func bound(t *testing.T, p db.Paths, id, org, token string) {
+	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: "chrome/" + id, Browser: "chrome", Origin: org, Token: token}}
 	if err := db.SaveDB(p.ProfileFile(id), d); err != nil {
 		t.Fatal(err)
 	}
@@ -848,6 +906,29 @@ func send(t *testing.T, c *ws.Conn, m host.Msg) {
 	}
 }
 
+// nonceE is the extension's nonce in these tests.
+var nonceE = strings.Repeat("5a", 32)
+
+// mac is the proof, written out again here so that a change to either
+// side's input fails a test.
+func mac(token, msg string) string {
+	h := hmac.New(sha256.New, []byte(token))
+	h.Write([]byte(msg))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// challenged sends a hello for id and checks that the server proved it
+// holds token for this port and nonce. It returns the server's nonce.
+func challenged(t *testing.T, c *ws.Conn, port, id, token string) string {
+	t.Helper()
+	send(t, c, host.Msg{Type: "hello", DB: id, Nonce: nonceE})
+	m := next(t, c)
+	if m.Type != "challenge" || len(m.Nonce) != 64 || m.Proof != mac(token, "server:"+port+":"+nonceE) {
+		t.Fatalf("%s: got %+v, want a challenge with the server's proof", id, m)
+	}
+	return m.Nonce
+}
+
 // next returns the next message other than a ping.
 func next(t *testing.T, c *ws.Conn) host.Msg {
 	t.Helper()
@@ -866,7 +947,7 @@ func next(t *testing.T, c *ws.Conn) host.Msg {
 
 func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", "t1")
+	bound(t, p, "a", origin, "t1")
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	for _, c := range []struct{ name, host, origin string }{
@@ -880,39 +961,90 @@ func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 	}
 }
 
-func TestServeRefusesAWrongToken(t *testing.T) {
+// Without a binding for this origin the server has nothing to prove, so it
+// answers with an error and no challenge.
+func TestServeChallengesOnlyForABinding(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", "t1")
-	bound(t, p, "b", "t2")
+	bound(t, p, "a", origin, "t1")
+	bound(t, p, "untokened", origin, "")
+	bound(t, p, "other", "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "t3")
 	addr := serve(t, p, time.Hour)
-	for _, token := range []string{"", "t2", "t1x"} {
-		c, err := dialAs(t, addr, "", origin)
+	for _, c := range []struct{ id, nonce, code string }{
+		{"missing", nonceE, "db-missing"},
+		{"untokened", nonceE, "bad-token"},
+		{"other", nonceE, "bad-token"},
+		{"a", "short", "bad-token"},
+	} {
+		conn, err := dialAs(t, addr, "", origin)
 		if err != nil {
 			t.Fatal(err)
 		}
-		send(t, c, host.Msg{Type: "hello", DB: "a", Token: token})
-		if m := next(t, c); m.Type != "error" || m.Code != "bad-token" {
-			t.Errorf("token %q: got %+v", token, m)
-		}
-		if db.Connected(p, "a", time.Time{}) {
-			t.Fatalf("token %q: the hello counted as reporting in", token)
+		send(t, conn, host.Msg{Type: "hello", DB: c.id, Nonce: c.nonce})
+		if m := next(t, conn); m.Type != "error" || m.Code != c.code {
+			t.Errorf("%s: got %+v, want %s", c.id, m, c.code)
 		}
 	}
 }
 
+func TestServeRefusesAWrongProof(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, "t1")
+	bound(t, p, "b", origin, "t2")
+	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	refused := func(name string, proof func(nonceS string) string) {
+		t.Helper()
+		c, err := dialAs(t, addr, "", origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonceS := challenged(t, c, port, "a", "t1")
+		send(t, c, host.Msg{Type: "proof", Proof: proof(nonceS)})
+		if m := next(t, c); m.Type != "error" || m.Code != "bad-token" {
+			t.Errorf("%s: got %+v", name, m)
+		}
+	}
+	since := time.Now()
+	refused("no proof", func(string) string { return "" })
+	refused("another database's token", func(n string) string { return mac("t2", "extension:"+n) })
+	refused("the server's label", func(n string) string { return mac("t1", "server:"+port+":"+n) })
+	if db.Connected(p, "a", since) {
+		t.Fatal("a refused proof counted as reporting in")
+	}
+
+	// A proof that was right once is refused against a new nonce.
+	c, _ := dialAs(t, addr, "", origin)
+	old := mac("t1", "extension:"+challenged(t, c, port, "a", "t1"))
+	send(t, c, host.Msg{Type: "proof", Proof: old})
+	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+	if m := next(t, c); m.Type == "error" {
+		t.Fatalf("the right proof: %+v", m)
+	}
+	c.Close(1000, "")
+	refused("a replayed proof", func(string) string { return old })
+}
+
 func TestServeRunsAHostPerConnection(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", "t1")
-	bound(t, p, "b", "t2")
+	bound(t, p, "a", origin, "t1")
+	bound(t, p, "b", origin, "t2")
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	tokens := map[string]string{"a": "t1", "b": "t2"}
 	since := time.Now()
 	for _, id := range []string{"a", "b"} {
 		c, err := dialAs(t, addr, "", origin)
 		if err != nil {
 			t.Fatal(err)
 		}
-		send(t, c, host.Msg{Type: "hello", DB: id, Token: map[string]string{"a": "t1", "b": "t2"}[id]})
+		nonceS := challenged(t, c, port, id, tokens[id])
+		// A tree before the proof is ignored, as one before a hello is.
+		send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+		if db.Connected(p, id, since) {
+			t.Fatalf("%s reported in before its proof", id)
+		}
+		send(t, c, host.Msg{Type: "proof", Proof: mac(tokens[id], "extension:"+nonceS)})
 		send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
 		// The first round sends the member folder's creation.
 		if m := next(t, c); m.Type != "apply" {
@@ -924,7 +1056,8 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 	}
 	// A second connection for a database in use is a copied profile.
 	c, _ := dialAs(t, addr, "", origin)
-	send(t, c, host.Msg{Type: "hello", DB: "a", Token: "t1"})
+	nonceS := challenged(t, c, port, "a", "t1")
+	send(t, c, host.Msg{Type: "proof", Proof: mac("t1", "extension:"+nonceS)})
 	if m := next(t, c); m.Code != "db-locked" {
 		t.Fatalf("second connection for a: %+v", m)
 	}
@@ -932,7 +1065,7 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 
 func TestServePings(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", "t1")
+	bound(t, p, "a", origin, "t1")
 	c, err := dialAs(t, serve(t, p, 20*time.Millisecond), "", origin)
 	if err != nil {
 		t.Fatal(err)
@@ -1019,6 +1152,10 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	if o.Ping == 0 {
 		o.Ping = 20 * time.Second
 	}
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return err
+	}
 	var conns atomic.Int64
 	var hosts sync.WaitGroup
 	srv := &http.Server{
@@ -1042,7 +1179,7 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 			}
 			c := newWSConn(sock, o.Ping)
 			ho := o
-			ho.Log, ho.Origin = log, origin
+			ho.Log, ho.Origin, ho.Port = log, origin, port
 			err = Run(ctx, c, ho)
 			c.close()
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -1056,7 +1193,7 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 		<-ctx.Done()
 		srv.Close() // stops accepting; hijacked connections end with their hosts
 	}()
-	err := srv.Serve(ln)
+	err = srv.Serve(ln)
 	hosts.Wait()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -1068,7 +1205,7 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 // Host must be the address the server listens on, which a page that
 // rebinds its own name to 127.0.0.1 cannot send, and the Origin must be a
 // database's, which no web page has. Any program can send any Origin;
-// the hello's token stops those.
+// the challenge stops those.
 func admit(r *http.Request, addr string, p db.Paths) (string, bool) {
 	origin := r.Header.Get("Origin")
 	if r.Host != addr || origin == "" {
@@ -1818,7 +1955,7 @@ func geckoUsers(dbs map[string]*db.DB, except string, stderr io.Writer) []string
 
 ### Task 7: The extension connects to `mirrormark serve`
 
-This is the switch. It is one commit because each part breaks without the others. The extension's new client needs protocol 2's token. The e2e tests need the harness to start the server. `install`'s bind confirmation needs a running server.
+This is the switch. It is one commit because each part breaks without the others. The extension's new client needs protocol 2's challenge. The e2e tests need the harness to start the server. `install`'s bind confirmation needs a running server.
 
 **Files:**
 - Modify: `extension/manifest.json`, `extension/background.js`, `extension/embed.go` (doc comment), `extension/embed_test.go`, `internal/host/protocol.go` (`Version = 2`), `internal/host/host_test.go`, `internal/host/protocol_test.go`, `internal/host/server_test.go`, `cmd/mirrormark/service.go` (`serverRunning`), `cmd/mirrormark/install.go`, `cmd/mirrormark/install_test.go`, `e2e/env.go`, `e2e/install_test.go`, `README.md`
@@ -1843,7 +1980,7 @@ const REBIND_MS = 1000; // time for the old connection's host to let go of the d
 // Reconnects wait for an alarm, which the browser fires no sooner than 30 s.
 const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
-const DIAL_MS = 5000; // a port that accepts but never answers is skipped
+const DIAL_MS = 5000; // a port that does not finish the challenge in this time is skipped
 const RECONNECT = "reconnect"; // the one-shot alarm after a connection fails or closes
 // A browser that stops an idle background closes its socket without
 // running onclose; this alarm starts the background again, and it
@@ -1882,14 +2019,16 @@ async function open() {
   const bound = binding;
   const { db, token } = await chrome.storage.local.get(["db", "token"]);
   if (!db) return; // not bound: stay dormant
-  const s = await dial();
+  const { sock: s, failure, hostError: refused } = await dial(db, token ?? "");
   if (bound !== binding || sock || rebinding) {
     s?.close(); // rebound meanwhile
     return;
   }
   if (!s) {
-    await setStatus({ error: NOT_RUNNING });
-    chrome.alarms.create(RECONNECT, { when: Date.now() + MIN_BACKOFF });
+    await setStatus({ error: failure ?? NOT_RUNNING, problems: [] });
+    // A server that refused this profile will refuse it again; don't ask
+    // every 30 s.
+    chrome.alarms.create(RECONNECT, { when: Date.now() + (refused ? MAX_BACKOFF : MIN_BACKOFF) });
     return;
   }
   refs.clear();
@@ -1930,36 +2069,79 @@ async function open() {
     chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
   };
-  // The hello goes out in the same task that sets sock, so no tree can
-  // precede it.
-  post(s, { v: V, type: "hello", db, token, browser: BROWSER.toLowerCase() + "/" + VERSION });
+  // The hello and the proof went out in dial, so no tree can precede them.
   await sendTree();
 }
 
-// dial returns a socket to the first port whose server accepts this
-// profile, or null. A port where nothing listens fails at once, and so
-// does one whose server refuses the upgrade, such as another user's
-// mirrormark, which does not know this profile's origin.
-async function dial() {
+// dial returns { sock } for the first port whose server proves it holds
+// this profile's token, once the extension has sent its own proof. If none
+// does, it returns the first answer to show instead: { failure, hostError }
+// for a server's error, { failure } for a wrong proof, or {} if nothing
+// answered. A port where nothing listens fails at once, and so does one
+// whose server refuses the upgrade, such as another user's mirrormark,
+// which does not know this profile's origin.
+async function dial(db, token) {
+  let first = {};
   for (const p of await PORTS) {
-    const s = await new Promise((resolve) => {
-      const s = new WebSocket(`ws://127.0.0.1:${p}/`);
-      const t = setTimeout(() => {
-        s.close();
-        resolve(null);
-      }, DIAL_MS);
-      s.onopen = () => {
-        clearTimeout(t);
-        resolve(s);
-      };
-      s.onerror = () => {
-        clearTimeout(t);
-        resolve(null);
-      };
-    });
-    if (s) return s;
+    const r = await challenge(p, db, token);
+    if (r.sock) return r;
+    if (first.failure === undefined) first = r;
   }
-  return null;
+  return first;
+}
+
+// challenge runs the hello on port p. The server must prove it holds the
+// token before the extension proves it does, so a program posing as
+// mirrormark learns only the database id and a nonce it cannot use. The
+// token itself never goes on the socket.
+function challenge(p, db, token) {
+  return new Promise((resolve) => {
+    const s = new WebSocket(`ws://127.0.0.1:${p}/`);
+    const nonceE = hex(crypto.getRandomValues(new Uint8Array(32)));
+    let over = false;
+    const done = (r) => {
+      if (over) return;
+      over = true;
+      clearTimeout(t);
+      s.onopen = s.onmessage = s.onerror = s.onclose = null;
+      if (!r.sock) s.close();
+      resolve(r);
+    };
+    const t = setTimeout(() => done({}), DIAL_MS);
+    s.onerror = s.onclose = () => done({});
+    s.onopen = () => post(s, { v: V, type: "hello", db, nonce: nonceE, browser: BROWSER.toLowerCase() + "/" + VERSION });
+    s.onmessage = async (ev) => {
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        m = {};
+      }
+      if (m.type === "ping") return;
+      if (m.type === "error") return done({ failure: `${m.code}: ${m.message}`, hostError: true });
+      // A plain comparison is enough here: each attempt has a new nonce,
+      // so timing it teaches nothing about the next.
+      if (m.type !== "challenge" || m.proof !== (await mac(token, `server:${p}:${nonceE}`))) {
+        return done({ failure: `the program on port ${p} could not prove it is your mirrormark` });
+      }
+      const proof = await mac(token, `extension:${m.nonce}`);
+      if (over) return; // timed out meanwhile
+      post(s, { v: V, type: "proof", proof });
+      done({ sock: s });
+    };
+  });
+}
+
+// mac is HMAC-SHA256 of msg, keyed by the token as text, in lowercase hex,
+// as the server computes it.
+async function mac(token, msg) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(msg))));
+}
+
+function hex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function post(s, m) {
@@ -1971,7 +2153,7 @@ function post(s, m) {
 }
 ```
 
-`sendTree` reads `const p = sock;`, and `onMessage(p, m)` compares `p !== sock`.
+`sendTree` reads `const p = sock;`, and `onMessage(p, m)` compares `p !== sock`. An unbound profile with no token sends nothing: `open` returns at `if (!db)`. A profile bound by a build before the token has a `db` but no `token`; its hello gets `bad-token` from the server, since the database has no token either, and the popup says to run `install` again.
 
 - [ ] **Step 3: Protocol 2.** `const Version = 2` in `protocol.go`. In `host_test.go`, `protocol_test.go` and `server_test.go`, every literal `V: 1` becomes `V: host.Version`. In `TestOtherVersionIsRefused`, the hello's `V: 2` becomes `V: host.Version + 1`. The native host path keeps working on version 2; no extension uses it any more.
 
@@ -2097,12 +2279,58 @@ func closed(t *testing.T, e *Env, conn string) bool {
 
 In `TestInstallAndBind` and `TestFirefoxInstallAndBind`, `hostPIDs` becomes `connections`, "a new host for a" becomes "a new connection for a", and `exited(old[…])` with "the old host to exit" becomes `closed(t, e, old[…])` with "the old connection to close". Keep `exited`, which the browser helpers use. The count of `"msg=connected pid="` stays.
 
-New test, in `e2e/install_test.go`:
+New test, in `e2e/install_test.go` (imports: `encoding/json`, `net`, `net/http`, `slices`, `strconv`, `sync`, `extension`, `internal/host`, `internal/ws`):
 
 ```go
+// impostor holds the first port with a program that accepts any upgrade
+// and answers every hello with a challenge it cannot back, as another
+// user's program could. It returns the types of the messages it received.
+func impostor(t *testing.T) func() []string {
+	ports, err := extension.Ports()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(ports[0])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := ws.Upgrade(w, r, 1<<20)
+		if err != nil {
+			return
+		}
+		defer c.Close(1000, "")
+		for {
+			b, err := c.Read()
+			if err != nil {
+				return
+			}
+			var m host.Msg
+			json.Unmarshal(b, &m)
+			mu.Lock()
+			got = append(got, m.Type)
+			mu.Unlock()
+			if m.Type == "hello" {
+				b, _ := json.Marshal(host.Msg{V: host.Version, Type: "challenge", Nonce: strings.Repeat("0", 64), Proof: strings.Repeat("0", 64)})
+				c.Write(b)
+			}
+		}
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(got)
+	}
+}
+
 // TestReconnectsAfterServerRestart: with the server gone, the popup says
-// mirrormark is not running, and once it is back the extension reconnects
-// by itself and syncs again.
+// mirrormark is not running. Once it is back, on the second port because a
+// program that cannot prove itself holds the first, the extension skips
+// that program, tells it nothing more than its hello, and syncs again.
 func TestReconnectsAfterServerRestart(t *testing.T) {
 	e := setup(t)
 	roundDone(t, e.A, "a's first round")
@@ -2112,21 +2340,26 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 	eventually(t, 70*time.Second, "the popup to say mirrormark is not running", func() bool {
 		return eval[bool](t, e.A, `chrome.storage.local.get("status").then((r) => (r.status?.error ?? "").startsWith("mirrormark is not running"))`)
 	})
+	got := impostor(t)
 	before := time.Now()
-	e.serve(t)
-	eventually(t, 70*time.Second, "a hello after the server came back", func() bool {
+	e.serve(t) // the first port is taken, so it listens on the second
+	eventually(t, 70*time.Second, "a proven connection after the server came back", func() bool {
 		return db.Connected(e.Paths, e.DBA, before)
 	})
 	roundDone(t, e.A, "a round after the restart")
+	if types := got(); !slices.Contains(types, "hello") || slices.Contains(types, "proof") || slices.Contains(types, "tree") {
+		t.Fatalf("the program on the first port received %q; want hellos only", types)
+	}
 }
 ```
 
 - [ ] **Step 6: Run** `bin/dev run make` → PASS. Then `bin/dev run make check-e2e` → PASS, the whole suite.
   - If a Firefox or LibreWolf socket closes with code 1015, the CSP did not take: check the unpacked manifest in the XPI.
   - If Gecko's first socket drops about 10 s after start (seen in the spike), the 30 s alarm covers it. A test that waits less than that after a Firefox start must not be tightened to hide it; widen its wait and say why in a comment.
-  - If a test sees `bad-token`, the binding predates Task 5's token. Every e2e binding runs `install` after this change, so stop and report.
+  - If a test sees `bad-token`, either the binding predates Task 5's token (every e2e binding runs `install` after this change, so stop and report) or the two sides compute the proof differently: compare the extension's `mac` with the Go one on one input in the browser's console before changing anything.
+  - If `crypto.subtle` is undefined in a background, the context is not secure: report it with the browser and version. Do not fall back to sending the token.
 
-- [ ] **Step 7: README.** Replace "The popup says Chrome cannot reach the host" with "The popup says mirrormark is not running": start it with `systemctl --user start mirrormark` or `mirrormark serve`; check `systemctl --user status mirrormark` and the log. Add `bad-token: …` under "What the popup shows": run `install --profile` for that profile again. In "Upgrade", say that the first `install` after upgrading from a build before the server asks for a browser restart, and that the second binds each profile again.
+- [ ] **Step 7: README.** Replace "The popup says Chrome cannot reach the host" with "The popup says mirrormark is not running": start it with `systemctl --user start mirrormark` or `mirrormark serve`; check `systemctl --user status mirrormark` and the log. Add `bad-token: …` under "What the popup shows": run `install --profile` for that profile again; and "the program on port N could not prove it is your mirrormark": another program holds that port; if sync does not resume, find it with `ss -ltnp`. In "Upgrade", say that the first `install` after upgrading from a build before the server asks for a browser restart, and that the second binds each profile again.
 
 - [ ] **Step 8: Commit** `feat(rfc-0001): connect the extension to mirrormark serve`.
 
@@ -2238,7 +2471,7 @@ const LegacyHostManifest = "/etc/opt/chrome/native-messaging-hosts/com.github.ch
   - `main.go`: delete the host-mode check (`chrome-extension://`, `…json`, `host`), `cmdHost`, and `host` from `usageText`; drop the `strings` import if unused.
   - `main_test.go`: delete `TestExtensionOriginRunsTheHost` and `TestFirefoxArgumentsRunTheHost`. Rewrite `TestHostRotatesALargeLog` to open the log through `openLog` instead of running the host.
   - `protocol.go`: delete `Stream`, `stream`, `ReadMsg`, `WriteMsg` and the `encoding/binary` import. `protocol_test.go` tests `encode`/`decode` through `export_test.go` (`var Encode, Decode = encode, decode`): a round trip, oversize refused by `Encode`, bad JSON refused by `Decode`. `TestReadMsgRefusesOversize` and `TestReadMsgRefusesTruncated` go, since the WebSocket codec has its own limits and tests. `TestWriteMsgRefusesOversize` becomes an `Encode` test, and `TestSplitRefusesAnOpTooLargeToSend` (line 129) calls `host.Encode` in place of `host.WriteMsg`.
-  - `host.go`: the token check loses `if s.o.Origin != ""`. Every connection comes through `Serve`. The package comment loses native messaging.
+  - `host.go`: `hello` always calls `challenge`; the `if s.o.Origin != ""` branch and its comment go, since every connection comes through `Serve`. The package comment loses native messaging.
   - `host_test.go`: the fake extension talks to `Run` in memory:
 
 ```go
@@ -2279,7 +2512,7 @@ func (e *end) Write(m host.Msg) error {
 func (e *end) Close() { e.once.Do(func() { close(e.self) }) }
 ```
 
-  In `start`: `h, x := pipe()`; `ho.Origin = testOrigin`; `host.Run(ctx, h, ho)` then `h.Close()`; the reader loop calls `x.Read()`; `send` calls `x.Write(m)`; the cleanup calls `x.Close()` where it closed `ew`. `addProfile` writes `Origin: testOrigin, Token: "t-" + id`, and the hello sends `Token: "t-" + dbID`, with `const testOrigin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"` (and `server_test.go`'s `origin` reuses it). `TestOtherVersionIsRefused` uses `pipe()` too. The tests whose subject is a missing or wrong database keep their codes; add `TestHelloNeedsTheToken`, a hello with the wrong token answered `bad-token`, beside `TestOtherVersionIsRefused`.
+  In `start`: `h, x := pipe()`; `ho.Origin = testOrigin`; `host.Run(ctx, h, ho)` then `h.Close()`; the reader loop calls `x.Read()`; `send` calls `x.Write(m)`; the cleanup calls `x.Close()` where it closed `ew`. `ho.Port = "0"`. `addProfile` writes `Origin: testOrigin, Token: "t-" + id`, with `const testOrigin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"` (and `server_test.go`'s `origin` reuses it). The fake extension's hello sends `Nonce: nonceE` (`server_test.go`'s, shared), and its reader loop answers a `challenge` by checking `m.Proof == mac("t-"+dbID, "server:0:"+nonceE)` (failing the test if not) and sending `{Type: "proof", Proof: mac("t-"+dbID, "extension:"+m.Nonce)}` before anything else, using `server_test.go`'s `mac`. `TestOtherVersionIsRefused` uses `pipe()` too. The tests whose subject is a missing or wrong database keep their codes; the challenge's own cases stay in `server_test.go`.
 
 - [ ] **Step 6: Install tests.** In `install_test.go`, delete `TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest`. Keep `TestUninstallLeavesAnotherExtensionsHostManifest`, pointing it at `chrome.LegacyHostManifest`. Make `TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest` and `TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck` about the service: `unitPath(p)` stays, and the "keeping the files it shares" warning. Remove `chrome.HostManifestPath()` and `firefox.HostManifestPath()` from every `mustExist`/`mustBeGone` and path list (lines 332, 734, 748, 887, 959, 992, 1092, 1340, 1377, 1391, 1472, 1490, 1518, 1547, 1587). Where such a list checked that a shared file stays, `filepath.Join(p.Data, "mirrormark.crx")` still does that for Chromium, and `unitPath(p)` for Gecko.
 
@@ -2526,8 +2759,9 @@ var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox"
 
 ## Risks
 
+- **The two halves of the proof live in two languages.** Go computes it in `host.mac`, the extension in `mac` in `background.js`. Only the e2e suite runs both; `server_test.go` pins the Go half to the exact inputs, and every e2e binding fails with `bad-token` if the halves disagree.
 - **The switch is one large commit** (Task 7). It touches the extension, the protocol, `install` and the e2e harness at once, because a smaller step would leave either the tests or the users without a transport. Review it in the order the steps give.
 - **Gecko's first-socket drop** (spike, cause unknown) can add up to 30 s after a Gecko start before the first sync. The e2e waits that follow a Firefox start must allow for it; Task 7 Step 6 says what to do if one does not.
 - **The ports in the dev image:** e2e tests run one at a time and each stops its server, so a fixed port is free for the next. A server left from a crashed run holds `61959`. The next test's server takes `63018`, and the extension skips the stale one, because the stale server does not know the new home's origins. This shows in the log as `refused a connection`.
 - **`serverRunning` takes the serve lock for a moment.** A server that systemd starts in that instant exits and is restarted by `Restart=on-failure`. This is harmless, but it shows in the journal.
-- **Not tested here, and listed in the RFC:** sleep and resume, a server down when the browser starts, Chrome and Brave with their own sandbox, the token reaching a program that holds the first port (Open question 5), and an upgrade that changes only the binary.
+- **Not tested here, and listed in the RFC:** sleep and resume, a server down when the browser starts, Chrome and Brave with their own sandbox, a program holding all three ports, and an upgrade that changes only the binary.
