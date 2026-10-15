@@ -19,7 +19,7 @@
 - **No prefix leaves users without a transport.** Tasks 1–5 change nothing the extension uses: native messaging works throughout. Task 6 switches the extension, the protocol, `install`'s bind check and the e2e harness in **one commit**, because none of them can land without the others. Task 7 removes native messaging only after that.
 - **Ports, exactly:** `[61959, 63018, 63454]`, in `extension/ports.json`, read by `extension.Ports()` and by `background.js`. Nowhere else in production code.
 - **Bind on `127.0.0.1` only.** No other address, no `localhost`.
-- **Limits:** messages to the extension ≤ `maxOut` (1 MB), from it ≤ `maxIn` (64 MB), as today.
+- **Limits:** messages to the extension ≤ `maxOut` (1 MB), from it ≤ `maxIn` (64 MB), as today. Through the server, ≤ `helloMax` (4 KB) until the proof.
 - **Ping:** `{"v": <Version>, "type": "ping"}` every 20 s per connection (`Options.Ping`, default `20 * time.Second`).
 - **Protocol version** stays 1. The new extension only dials the server and the old one only uses native messaging, so no peer of one ever meets the other and a bump would never be checked.
 - **Profile block fields:** `origin` (`chrome-extension://<id>` or `moz-extension://<uuid>`, no trailing slash) and `token` (64 lowercase hex digits from 32 bytes of `crypto/rand`), both `omitempty`.
@@ -85,6 +85,7 @@ func (c *Conn) Read() ([]byte, error)                         // io.EOF after th
 func (c *Conn) Write(msg []byte) error                        // safe from several goroutines
 func (c *Conn) Close(code uint16, reason string) error        // idempotent; waits at most 1 s for a write
 func (c *Conn) SetReadDeadline(t time.Time) error             // os.ErrDeadlineExceeded; zero time clears it
+func (c *Conn) SetReadLimit(max int)                          // Task 3; between Reads only
 // A message's buffer grows with the bytes received, not with the length a
 // header claims. Close frames are validated (code range, UTF-8 reason); a
 // handshake for another version gets 426.
@@ -1364,8 +1365,9 @@ In `host.go`, `state` gains `pending pending`, and `handle` gains `case "proof":
 // pending is a hello waiting for the extension's proof.
 type pending struct{ db, browser, token, nonce string }
 
-// nonceRe is a nonce as both sides write it: 32 random bytes in hex.
-var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// hex32 is 32 random bytes in lowercase hex, as both sides write a nonce
+// and install writes a token.
+var hex32 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // challenge answers a hello through the server. The connection came from
 // the database's origin, but any program can send any Origin, and in
@@ -1377,9 +1379,14 @@ var nonceRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 func (s *state) challenge(m Msg) error {
 	d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
 	if err != nil {
-		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s: %v", m.DB, err))
+		// The details are for the log: the peer has proven nothing yet.
+		s.o.Log.Warn("cannot read the database file", "db", m.DB, "err", err)
+		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s; run mirrormark install", m.DB))
 	}
-	if d.Profile.Token == "" || d.Profile.Origin != s.o.Origin || !nonceRe.MatchString(m.Nonce) {
+	if d.Profile.Token != "" && !hex32.MatchString(d.Profile.Token) {
+		s.o.Log.Warn("the token in the database file is malformed; install writes 64 lowercase hex digits", "db", m.DB)
+	}
+	if !hex32.MatchString(d.Profile.Token) || d.Profile.Origin != s.o.Origin || !hex32.MatchString(m.Nonce) {
 		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
 	}
 	b := make([]byte, 32)
@@ -1425,9 +1432,11 @@ Add `challenge` and `proof` to the message types and `bad-token` to the list of 
 package host_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -1459,6 +1468,11 @@ func bound(t *testing.T, p db.Paths, id, org, token string) {
 // serve runs Serve on a free port until the test ends and returns its
 // address.
 func serve(t *testing.T, p db.Paths, ping time.Duration) string {
+	return serveLog(t, p, ping, io.Discard)
+}
+
+// serveLog is serve with the server's log, at debug level, going to w.
+func serveLog(t *testing.T, p db.Paths, ping time.Duration, w io.Writer) string {
 	ln, err := host.Listen([]int{0})
 	if err != nil {
 		t.Fatal(err)
@@ -1466,7 +1480,7 @@ func serve(t *testing.T, p db.Paths, ping time.Duration) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- host.Serve(ctx, ln, host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		done <- host.Serve(ctx, ln, host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			Timeout: 300 * time.Millisecond, Poll: 20 * time.Millisecond, Ping: ping})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
@@ -1492,6 +1506,13 @@ func send(t *testing.T, c *ws.Conn, m host.Msg) {
 		t.Fatal(err)
 	}
 }
+
+// The tokens install would write: 64 lowercase hex digits.
+var (
+	tok1 = strings.Repeat("1a", 32)
+	tok2 = strings.Repeat("2b", 32)
+	tok3 = strings.Repeat("3c", 32)
+)
 
 // nonceE is the extension's nonce in these tests.
 var nonceE = strings.Repeat("5a", 32)
@@ -1537,7 +1558,7 @@ func next(t *testing.T, c *ws.Conn) host.Msg {
 
 func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
+	bound(t, p, "a", origin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	for _, c := range []struct{ name, host, origin string }{
@@ -1555,9 +1576,9 @@ func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 // answers with an error and no challenge.
 func TestServeChallengesOnlyForABinding(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
+	bound(t, p, "a", origin, tok1)
 	bound(t, p, "untokened", origin, "")
-	bound(t, p, "other", "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "t3")
+	bound(t, p, "other", "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", tok3)
 	addr := serve(t, p, time.Hour)
 	for _, c := range []struct{ id, nonce, code string }{
 		{"missing", nonceE, "db-missing"},
@@ -1580,7 +1601,7 @@ func TestServeChallengesOnlyForABinding(t *testing.T) {
 // and the hello after it still gets a challenge.
 func TestServeIgnoresAProofBeforeTheHello(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
+	bound(t, p, "a", origin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	c, err := dialAs(t, addr, "", origin)
@@ -1588,13 +1609,13 @@ func TestServeIgnoresAProofBeforeTheHello(t *testing.T) {
 		t.Fatal(err)
 	}
 	send(t, c, host.Msg{Type: "proof", Proof: strings.Repeat("0", 64)})
-	challenged(t, c, port, "a", "t1")
+	challenged(t, c, port, "a", tok1)
 }
 
 func TestServeRefusesAWrongProof(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
-	bound(t, p, "b", origin, "t2")
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	refused := func(name string, proof func(nonceS string) string) {
@@ -1603,7 +1624,7 @@ func TestServeRefusesAWrongProof(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		nonceS := challenged(t, c, port, "a", "t1")
+		nonceS := challenged(t, c, port, "a", tok1)
 		send(t, c, host.Msg{Type: "proof", Proof: proof(nonceS)})
 		if m := next(t, c); m.Type != "error" || m.Code != "bad-token" {
 			t.Errorf("%s: got %+v", name, m)
@@ -1611,15 +1632,15 @@ func TestServeRefusesAWrongProof(t *testing.T) {
 	}
 	since := time.Now()
 	refused("no proof", func(string) string { return "" })
-	refused("another database's token", func(n string) string { return mac("t2", "extension:"+n) })
-	refused("the server's label", func(n string) string { return mac("t1", "server:"+port+":"+n) })
+	refused("another database's token", func(n string) string { return mac(tok2, "extension:"+n) })
+	refused("the server's label", func(n string) string { return mac(tok1, "server:"+port+":"+n) })
 	if db.Connected(p, "a", since) {
 		t.Fatal("a refused proof counted as reporting in")
 	}
 
 	// A proof that was right once is refused against a new nonce.
 	c, _ := dialAs(t, addr, "", origin)
-	old := mac("t1", "extension:"+challenged(t, c, port, "a", "t1"))
+	old := mac(tok1, "extension:"+challenged(t, c, port, "a", tok1))
 	send(t, c, host.Msg{Type: "proof", Proof: old})
 	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
 	if m := next(t, c); m.Type == "error" {
@@ -1631,12 +1652,12 @@ func TestServeRefusesAWrongProof(t *testing.T) {
 
 func TestServeRunsAHostPerConnection(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
-	bound(t, p, "b", origin, "t2")
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
-	tokens := map[string]string{"a": "t1", "b": "t2"}
+	tokens := map[string]string{"a": tok1, "b": tok2}
 	since := time.Now()
 	for _, id := range []string{"a", "b"} {
 		c, err := dialAs(t, addr, "", origin)
@@ -1661,8 +1682,8 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 	}
 	// A second connection for a database in use is a copied profile.
 	c, _ := dialAs(t, addr, "", origin)
-	nonceS := challenged(t, c, port, "a", "t1")
-	send(t, c, host.Msg{Type: "proof", Proof: mac("t1", "extension:"+nonceS)})
+	nonceS := challenged(t, c, port, "a", tok1)
+	send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
 	if m := next(t, c); m.Code != "db-locked" {
 		t.Fatalf("second connection for a: %+v", m)
 	}
@@ -1670,7 +1691,7 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 
 func TestServePings(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
+	bound(t, p, "a", origin, tok1)
 	c, err := dialAs(t, serve(t, p, 20*time.Millisecond), "", origin)
 	if err != nil {
 		t.Fatal(err)
@@ -1718,7 +1739,7 @@ func TestListenTakesTheFirstFreePort(t *testing.T) {
 func TestServeDropsASilentConnection(t *testing.T) {
 	host.SetHelloWait(t, 100*time.Millisecond)
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
+	bound(t, p, "a", origin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	silent, err := dialAs(t, addr, "", origin)
@@ -1730,7 +1751,7 @@ func TestServeDropsASilentConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	challenged(t, halfway, port, "a", "t1")
+	challenged(t, halfway, port, "a", tok1)
 	for name, c := range map[string]*ws.Conn{"silent": silent, "no proof": halfway} {
 		closed := make(chan error, 1)
 		go func() {
@@ -1757,8 +1778,8 @@ func TestServeDropsASilentConnection(t *testing.T) {
 func TestServeKeepsAProvenQuietConnection(t *testing.T) {
 	host.SetHelloWait(t, 100*time.Millisecond)
 	p := paths(t)
-	bound(t, p, "a", origin, "t1")
-	bound(t, p, "b", origin, "t2")
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
@@ -1766,12 +1787,249 @@ func TestServeKeepsAProvenQuietConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nonceS := challenged(t, c, port, "a", "t1")
-	send(t, c, host.Msg{Type: "proof", Proof: mac("t1", "extension:"+nonceS)})
+	nonceS := challenged(t, c, port, "a", tok1)
+	send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
 	time.Sleep(300 * time.Millisecond)
 	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
 	if m := next(t, c); m.Type != "apply" {
 		t.Fatalf("got %+v", m)
+	}
+}
+
+// Before its proof a connection is nobody: what it sends, other than the
+// hello and the proof, is ignored, and none of it reaches the log as a
+// warning in the peer's words.
+func TestServeIgnoresMessagesBeforeTheProof(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
+	writeConfig(t, p, workUnion)
+	log := &logBuf{}
+	addr := serveLog(t, p, time.Hour, log)
+	_, port, _ := net.SplitHostPort(addr)
+	c, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, host.Msg{Type: "error", Code: "x", Message: "words of an unproven peer"})
+	send(t, c, host.Msg{Type: "applied", Batch: 7})
+	nonceS := challenged(t, c, port, "a", tok1)
+	send(t, c, host.Msg{Type: "error", Code: "x", Message: "words of an unproven peer"})
+	send(t, c, host.Msg{Type: "changed"})
+	send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
+	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+	if m := next(t, c); m.Type != "apply" {
+		t.Fatalf("got %+v", m)
+	}
+	if strings.Contains(log.String(), "unproven peer") || strings.Contains(log.String(), "late applied") {
+		t.Fatalf("the log took in what came before the proof:\n%s", log)
+	}
+}
+
+// rawConn upgrades by hand, so a test can send frame headers that ws.Conn
+// never would.
+func rawConn(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	nc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nc.Close() })
+	nc.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nOrigin: "+origin+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	br := bufio.NewReader(nc)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake: %v %v", resp, err)
+	}
+	return nc, br
+}
+
+// closeCode reads the server's frames up to its close and returns the
+// close code.
+func closeCode(t *testing.T, br *bufio.Reader) uint16 {
+	t.Helper()
+	for {
+		var h [2]byte
+		if _, err := io.ReadFull(br, h[:]); err != nil {
+			t.Fatal(err)
+		}
+		p := make([]byte, h[1]&0x7f) // the server sends nothing long here
+		if _, err := io.ReadFull(br, p); err != nil {
+			t.Fatal(err)
+		}
+		if h[0]&0x0f == 0x8 && len(p) >= 2 {
+			return binary.BigEndian.Uint16(p)
+		}
+	}
+}
+
+// Before its proof a connection may send only small messages: a header
+// that claims 1 MB is refused at once, before any of it is read.
+func TestServeRefusesALargeMessageBeforeTheProof(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	nc, br := rawConn(t, serve(t, p, time.Hour))
+	nc.Write([]byte{0x81, 0xff, 0, 0, 0, 0, 0, 0x10, 0, 0, 1, 2, 3, 4})
+	if code := closeCode(t, br); code != 1009 {
+		t.Fatalf("close code %d, want 1009", code)
+	}
+	if _, err := os.Stat(p.ProfileLock("a")); !os.IsNotExist(err) {
+		t.Fatalf("lock file: %v", err)
+	}
+}
+
+// The extension sends its tree straight after its proof, without waiting
+// for an answer; the tree may be far larger than a hello.
+func TestServeTakesALargeTreeRightAfterTheProof(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
+	writeConfig(t, p, workUnion)
+	addr := serve(t, p, time.Hour)
+	_, port, _ := net.SplitHostPort(addr)
+	b := fakebrowser.New()
+	for i := range 500 {
+		b.Add("1", "bookmark "+strconv.Itoa(i), "https://example.com/"+strconv.Itoa(i))
+	}
+	tree, _ := json.Marshal(host.Msg{V: host.Version, Type: "tree", Nodes: b.Tree()})
+	if len(tree) < 16<<10 {
+		t.Fatalf("the tree is only %d bytes", len(tree))
+	}
+	for range 20 {
+		c, err := dialAs(t, addr, "", origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonceS := challenged(t, c, port, "a", tok1)
+		send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
+		if err := c.Write(tree); err != nil {
+			t.Fatal(err)
+		}
+		if m := next(t, c); m.Type != "apply" {
+			t.Fatalf("got %+v", m)
+		}
+		c.Close(1000, "")
+		eventually(t, "a's lock to be free", func() bool {
+			unlock, err := db.TryLock(p.ProfileLock("a"))
+			if err == nil {
+				unlock()
+			}
+			return err == nil
+		})
+	}
+}
+
+// Only an extension's origin can be a database's: a web page's is refused
+// even if a profile block was edited to name it, and without reading any
+// database.
+func TestServeAdmitsOnlyExtensionOrigins(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "web", "http://127.0.0.1:8000", tok1)
+	addr := serve(t, p, time.Hour)
+	if _, err := dialAs(t, addr, "", "http://127.0.0.1:8000"); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("a web origin: %v", err)
+	}
+}
+
+// Refusals are cheap to log: one line at Info, then Debug only, so a page
+// that keeps knocking does not grow the log.
+func TestServeLogsRefusalsBriefly(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	log := &logBuf{}
+	addr := serveLog(t, p, time.Hour, log)
+	for range 3 {
+		dialAs(t, addr, "", "http://127.0.0.1:8000")
+	}
+	l := log.String()
+	if n := strings.Count(l, `level=INFO msg="refused a connection"`); n != 1 {
+		t.Errorf("%d refusals at Info, want 1:\n%s", n, l)
+	}
+	if n := strings.Count(l, "level=WARN"); n != 0 {
+		t.Errorf("%d warnings:\n%s", n, l)
+	}
+	if n := strings.Count(l, `level=DEBUG msg="refused a connection"`); n != 3 {
+		t.Errorf("%d refusals at Debug, want 3:\n%s", n, l)
+	}
+}
+
+// A database file that exists but cannot be read is the server's problem:
+// the log has the details, and the unproven peer only db-missing.
+func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "broken", origin, tok2)
+	if err := os.WriteFile(p.ProfileFile("broken"), []byte("format: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := &logBuf{}
+	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, host.Msg{Type: "hello", DB: "broken", Nonce: nonceE})
+	m := next(t, c)
+	if m.Code != "db-missing" || strings.Contains(m.Message, p.Data) || strings.Contains(m.Message, "yaml") {
+		t.Fatalf("got %+v", m)
+	}
+	eventually(t, "the details in the log", func() bool { return strings.Contains(log.String(), p.ProfileFile("broken")) })
+}
+
+// A token that is not 64 lowercase hex digits was not written by install;
+// the server says so in the log and proves nothing with it.
+func TestServeRefusesAMalformedToken(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, strings.ToUpper(tok1))
+	log := &logBuf{}
+	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, host.Msg{Type: "hello", DB: "a", Nonce: nonceE})
+	if m := next(t, c); m.Type != "error" || m.Code != "bad-token" {
+		t.Fatalf("got %+v", m)
+	}
+	eventually(t, "the log line", func() bool { return strings.Contains(log.String(), "malformed") })
+}
+
+// When the listener fails, Serve stops its hosts and returns the error,
+// rather than wait for hosts nothing will stop.
+func TestServeStopsItsHostsWhenTheListenerFails(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", origin, tok1)
+	bound(t, p, "b", origin, tok2)
+	writeConfig(t, p, workUnion)
+	ln, err := host.Listen([]int{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- host.Serve(context.Background(), ln, host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Timeout: 300 * time.Millisecond, Poll: 20 * time.Millisecond, Ping: time.Hour})
+	}()
+	addr := ln.Addr().String()
+	_, port, _ := net.SplitHostPort(addr)
+	c, err := dialAs(t, addr, "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonceS := challenged(t, c, port, "a", tok1)
+	send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
+	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+	if m := next(t, c); m.Type != "apply" {
+		t.Fatalf("got %+v", m)
+	}
+	ln.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve returned nil for a failed listener")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve still waits for its hosts")
 	}
 }
 ```
@@ -1790,10 +2048,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1807,6 +2067,11 @@ import (
 // rather than holding a connection open for ever. A variable so that tests
 // can shorten it.
 var helloWait = 10 * time.Second
+
+// helloMax is the largest message a connection may send before its
+// proof: a hello or a proof is a few hundred bytes, so a program that has
+// proven nothing cannot make the server buffer more.
+const helloMax = 4 << 10
 
 // Listen listens on 127.0.0.1 on the first of ports it can bind.
 func Listen(ports []int) (net.Listener, error) {
@@ -1824,7 +2089,8 @@ func Listen(ports []int) (net.Listener, error) {
 // Serve accepts extension connections on ln until ctx ends and runs a host
 // for each. Hosts share nothing in memory: the global lock keeps their
 // rounds apart, as it kept separate processes apart, since flock locks
-// belong to the open file and not to the process.
+// belong to the open file and not to the process. If ln fails, Serve stops
+// its hosts and returns the error.
 func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	if o.Ping == 0 {
 		o.Ping = 20 * time.Second
@@ -1833,69 +2099,99 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	if err != nil {
 		return err
 	}
-	var conns atomic.Int64
-	// hosts counts the running handlers. mu and closing keep a handler that
-	// starts while Serve shuts down from adding to hosts during Wait.
-	var hosts sync.WaitGroup
-	var mu sync.Mutex
-	closing := false
-	srv := &http.Server{
-		ReadHeaderTimeout: 5 * time.Second,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Counted from the start, so Serve waits for a host that is
-			// still writing its database file when ctx ends.
-			mu.Lock()
-			if closing {
-				mu.Unlock()
-				http.Error(w, "shutting down", http.StatusServiceUnavailable)
-				return
-			}
-			hosts.Add(1)
-			mu.Unlock()
-			defer hosts.Done()
-			log := o.Log.With("conn", conns.Add(1))
-			origin, ok := admit(r, ln.Addr().String(), o.Paths)
-			if !ok {
-				log.Warn("refused a connection", "host", r.Host, "origin", r.Header.Get("Origin"))
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			sock, err := ws.Upgrade(w, r, maxIn)
-			if err != nil {
-				log.Warn("bad handshake", "err", err)
-				return
-			}
-			// Until it proves itself, a connection has helloWait to do so.
-			sock.SetReadDeadline(time.Now().Add(helloWait))
-			c := newWSConn(sock, o.Ping)
-			ho := o
-			ho.Log, ho.Origin, ho.Port = log, origin, port
-			err = Run(ctx, c, ho)
-			c.close()
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				log.Warn("dropped a connection that did not prove itself in time", "wait", helloWait)
-				return
-			}
-			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Warn("host stopped", "err", err)
-				return
-			}
-			log.Info("disconnected")
-		}),
-	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sv := &server{ctx: ctx, o: o, addr: ln.Addr().String(), port: port}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: sv}
 	go func() {
 		<-ctx.Done()
 		srv.Close() // stops accepting; hijacked connections end with their hosts
 	}()
 	err = srv.Serve(ln)
-	mu.Lock()
-	closing = true
-	mu.Unlock()
-	hosts.Wait()
+	cancel() // a failed listener stops the hosts too
+	sv.hosts.closeAndWait()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+// server answers each handshake on Serve's listener.
+type server struct {
+	ctx     context.Context // ends every host
+	o       Options
+	addr    string // the address Serve listens on, which the Host must name
+	port    string
+	conns   atomic.Int64 // numbers the connections in the log
+	refused refusals
+	hosts   hostGroup
+}
+
+func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Counted from the start, so Serve waits for a host that is still
+	// writing its database file when ctx ends.
+	if !sv.hosts.enter() {
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer sv.hosts.leave()
+	log := sv.o.Log.With("conn", sv.conns.Add(1))
+	origin, ok := admit(r, sv.addr, sv.o.Paths)
+	if !ok {
+		sv.refused.log(log, r)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	sock, err := ws.Upgrade(w, r, helloMax)
+	if err != nil {
+		log.Warn("bad handshake", "err", err)
+		return
+	}
+	// Until it proves itself, a connection has helloWait to do so.
+	sock.SetReadDeadline(time.Now().Add(helloWait))
+	c := newWSConn(sock, sv.o.Ping)
+	ho := sv.o
+	ho.Log, ho.Origin, ho.Port = log, origin, sv.port
+	err = Run(sv.ctx, c, ho)
+	c.close()
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		log.Warn("dropped a connection that did not prove itself in time", "wait", helloWait)
+		return
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Warn("host stopped", "err", err)
+		return
+	}
+	log.Info("disconnected")
+}
+
+// hostGroup counts the handlers that are running. Once closed it lets no
+// more in, so its Wait never races a handler that starts during shutdown.
+type hostGroup struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+}
+
+// enter counts a handler in, or reports false once the group is closed.
+func (g *hostGroup) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+func (g *hostGroup) leave() { g.wg.Done() }
+
+// closeAndWait lets no more handlers in and waits for those running.
+func (g *hostGroup) closeAndWait() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+	g.wg.Wait()
 }
 
 // admit checks a handshake before the upgrade and returns its Origin. The
@@ -1905,7 +2201,7 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 // the challenge stops those.
 func admit(r *http.Request, addr string, p db.Paths) (string, bool) {
 	origin := r.Header.Get("Origin")
-	if r.Host != addr || origin == "" {
+	if r.Host != addr || !strings.HasPrefix(origin, "chrome-extension://") && !strings.HasPrefix(origin, "moz-extension://") {
 		return "", false
 	}
 	// A database that cannot be read cannot be matched; the rounds that
@@ -1917,6 +2213,31 @@ func admit(r *http.Request, addr string, p db.Paths) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// refusals logs refused handshakes: each at Debug, and at Info at most
+// once a minute with how many there were since the last Info line. A page
+// that keeps knocking costs a line a minute, and the first refusal still
+// shows.
+type refusals struct {
+	mu   sync.Mutex
+	n    int
+	last time.Time
+}
+
+func (f *refusals) log(log *slog.Logger, r *http.Request) {
+	h, o := slog.String("host", r.Host), slog.String("origin", r.Header.Get("Origin"))
+	log.LogAttrs(r.Context(), slog.LevelDebug, "refused a connection", h, o)
+	f.mu.Lock()
+	f.n++
+	if !f.last.IsZero() && time.Since(f.last) < time.Minute {
+		f.mu.Unlock()
+		return
+	}
+	n := f.n
+	f.n, f.last = 0, time.Now()
+	f.mu.Unlock()
+	log.LogAttrs(r.Context(), slog.LevelInfo, "refused a connection", h, o, slog.Int("count", n))
 }
 
 // wsConn is a Conn over one WebSocket. It sends a ping message every
@@ -1970,10 +2291,12 @@ func (c *wsConn) Write(m Msg) error {
 	return c.sock.Write(b)
 }
 
-// proven ends the hello wait: the host calls it once the extension has
-// proven which database it is.
+// proven ends the hello wait and lifts the hello's size limit: the host
+// calls it once the extension has proven which database it is.
+// The host calls it between Reads: see Run.
 func (c *wsConn) proven() {
 	c.sock.SetReadDeadline(time.Time{}) // fails only once closed, when Read fails anyway
+	c.sock.SetReadLimit(maxIn)
 }
 
 func (c *wsConn) close() {
@@ -2086,6 +2409,15 @@ func TestServeRunsOncePerUser(t *testing.T) {
 ```
 
 - [ ] **Step 9: README.** Under "Files", add `~/.local/share/mirrormark/serve.lock` ("Held by the running `mirrormark serve`, so one runs per user"). Under the profile block's description, the two new fields `origin` and `token` ("written by `install` when it binds the profile; do not edit"). Add `serve` after `unpack` in "Upgrade, uninstall, unpack" (the README has no other command list), saying the extension still uses the native messaging host. Do not describe the service yet.
+
+- [ ] **Review fixes.** Review of the first version found these; each has a regression test, and the code above includes them.
+  - `Run` derives its own context and cancels it on return, so a host that stops on an error (`bad-token`, `db-missing`, `db-locked`, `unsupported-version`) ends its reader instead of leaving it, and the message it holds, until the server stops (`TestStoppedHostLeavesNoReader`). The test harness's `start` closes the host's input when `Run` returns, as a host process's stdin closes when it exits.
+  - `handle` ignores every message but `hello` and `proof` until the host runs, with one Debug line, replacing the tree-only check (`TestServeIgnoresMessagesBeforeTheProof`, `TestMessagesBeforeTheHostRunsChangeNothing`).
+  - `ws.(*Conn).SetReadLimit`. `Serve` upgrades with `helloMax` (4 KB) and `proven()` raises it to `maxIn` (`TestSetReadLimit`, `TestServeRefusesALargeMessageBeforeTheProof`). Until the host runs, `Run`'s reader takes one message and waits for the main loop to handle it (the `handled` channel), so the tree the extension sends straight after its proof is read after the limit is raised (`TestServeTakesALargeTreeRightAfterTheProof`).
+  - `admit` refuses an Origin without the `chrome-extension://` or `moz-extension://` prefix before it reads any database. Refusals are logged at Debug each, and at Info at most once a minute with a count (`refusals`; `TestServeAdmitsOnlyExtensionOrigins`, `TestServeLogsRefusalsBriefly`).
+  - A `db-missing` from the challenge names no file or error to the peer; the log has the details (`TestServeTellsAnUnprovenPeerNoFileDetails`).
+  - A token that is not 64 lowercase hex digits gets `bad-token` and a log line saying it is malformed (`hex32`; `TestServeRefusesAMalformedToken`). The tests' tokens are 64 hex digits.
+  - `Serve` derives its context and cancels it when `srv.Serve` returns, so a failed listener stops the hosts and `Serve` returns the error (`TestServeStopsItsHostsWhenTheListenerFails`). The handler is `server.ServeHTTP`, and the shutdown guard is `hostGroup`, so the 503 is tested directly (`TestServerRefusesHandshakesOnceShuttingDown`).
 
 - [ ] **Step 10: Run** `bin/dev run make` → PASS; `bin/dev run make check-race` → PASS; `bin/dev run make check-e2e` → PASS (unchanged: no extension uses the server).
 
