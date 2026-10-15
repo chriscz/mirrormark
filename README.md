@@ -14,24 +14,30 @@ somewhere stable such as `~/.local/bin`, because Chrome runs it from there:
 the host manifest names the path `install` ran it from, with symlinks
 resolved. If you move or rename the binary, run `mirrormark install` again.
 
-1. Run `mirrormark install` as yourself, not with `sudo`. Chrome may be open
-   or closed. By default it binds every profile in `~/.config/google-chrome`;
-   `--profile "Profile 1"` or `--profile Work` (a directory or a profile's
-   name; repeat it for more) binds only those, and `--user-data-dir DIR` reads
-   another Chrome data directory. A bound profile syncs nothing until
-   `config.yaml` names it.
+1. Run `mirrormark install` as yourself, not with `sudo`, to see the
+   profiles in `~/.config/google-chrome`, their numbers and their state. It
+   changes nothing. Chrome may be open or closed. Then run it with
+   `--profile ID` or `--profile #` for each profile to bind, such as
+   `mirrormark install --profile Default --profile "Profile 1"`. An ID is
+   the profile's directory name (`Default`, `"Profile 1"`; a Firefox
+   profile's folder name), and `#` is its number in the list. The numbers
+   follow the IDs in order (`Profile 2` before `Profile 10`), and stay the
+   same while no profile is added or removed. `--user-data-dir DIR` reads
+   another Chrome data directory. Each `install` below takes the same
+   `--profile` options; without them it only lists. A bound profile syncs
+   nothing until `config.yaml` names it.
 2. Restart Chrome when it asks: close every window, and check that no
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
    it starts.
-3. Run `mirrormark install` again. It first checks each profile's files. In
-   each profile where mirrormark is installed and turned on, it opens a tab
-   once, waits up to 30 seconds for mirrormark to report in, and prints
-   `bound: <profile> -> <id>`. For any other profile it prints
+3. Run `mirrormark install --profile ...` again. It first checks each named
+   profile's files. In each profile where mirrormark is installed and turned
+   on, it opens a tab once, waits up to 30 seconds for mirrormark to report
+   in, and prints `bound: <profile> -> <id>`. For any other profile it prints
    `not ready: <profile>: ...`, which says what to do, or
-   `not bound: <profile>: ...`. Chrome records the install in the profile
-   up to half a minute after it starts, so a `not ready` just after a
-   restart means: wait, and run it again.
+   `not bound: <profile>: ...`. Chrome records the install in the profile up
+   to half a minute after it starts, so a `not ready` just after a restart
+   means: wait, and run it again.
 4. Export your bookmarks from Chrome (Bookmark manager, Export bookmarks) so
    you have a copy, then edit `~/.config/mirrormark/config.yaml` to share
    folders (see below). Changes appear in the other profiles within a few
@@ -91,11 +97,11 @@ manifest that names another extension.
 
 ### Upgrade, uninstall, unpack
 
-Upgrading: replace the binary and run `mirrormark install` again, then
-restart Chrome if it asks. If the new build has the same extension version,
-`install` changes neither system file and Chrome keeps its copy of the
-extension, even if the extension's files changed (see
-[Development](#development)).
+Upgrading: replace the binary and run `mirrormark install --profile ...`
+again for the profiles you bound, then restart Chrome if it asks. If the new
+build has the same extension version, `install` changes neither system file
+and Chrome keeps its copy of the extension, even if the extension's files
+changed (see [Development](#development)).
 
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
 needed), the CRX and the unpacked extension. It leaves the host manifest
@@ -122,17 +128,20 @@ rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 Brave installs as Chrome does (see [Install (Google Chrome on
 Linux)](#install-google-chrome-on-linux)), with `--browser brave`:
 
-1. Run `mirrormark install --browser brave`. It binds every profile in
-   `~/.config/BraveSoftware/Brave-Browser` (or `$XDG_CONFIG_HOME/…`);
-   `--profile` and `--user-data-dir` work as for Chrome. With `sudo` it
+1. Run `mirrormark install --browser brave` to see the profiles in
+   `~/.config/BraveSoftware/Brave-Browser` (or `$XDG_CONFIG_HOME/…`), their
+   numbers and their state, then run it with `--profile ID` or
+   `--profile #` for each profile to bind; `--profile` and
+   `--user-data-dir` work as for Chrome. With `sudo` it
    writes `/opt/brave.com/brave/extensions/<extension id>.json` and the same
    host manifest Chrome uses, so Chrome and Brave share one extension id.
 2. Restart Brave (`pgrep -x brave` shows none left), then run
-   `mirrormark install --browser brave` again to bind the profiles. As for
-   Chrome, it opens a tab once only in profiles where mirrormark is
-   installed and turned on, and prints `not ready: ...` with what to do for
-   the others. Brave too records the install up to half a minute after it
-   starts. Profile ids start with `brave-`, labels with `brave/`.
+   `mirrormark install --browser brave --profile ...` again to bind the
+   profiles. As for Chrome, it opens a tab once only in profiles where
+   mirrormark is installed and turned on, and prints `not ready: ...` with
+   what to do for the others. Brave too records the install up to half a
+   minute after it starts. Profile ids start with `brave-`, labels with
+   `brave/`.
 
 Brave's extensions page may show a Safety Check card saying it can't verify
 where mirrormark comes from; mirrormark stays on. Brave reopens your last
@@ -140,11 +149,11 @@ session when it starts, so a bind tab left open may open again
 and bind the profile again to the same database; that is harmless.
 
 After upgrading mirrormark, run `mirrormark install --browser brave` as well
-as `mirrormark install` if you use both. `mirrormark uninstall --browser
-brave` removes Brave's file. It keeps the CRX and the host manifest while
-Chrome still has mirrormark installed, and `--purge` keeps the key while
-Chrome has it installed or a Chrome profile's database is left; the same
-goes for Chrome while Brave has it.
+as `mirrormark install` if you use both, each with its `--profile` options.
+`mirrormark uninstall --browser brave` removes Brave's file. It keeps the CRX
+and the host manifest while Chrome still has mirrormark installed, and
+`--purge` keeps the key while Chrome has it installed or a Chrome profile's
+database is left; the same goes for Chrome while Brave has it.
 
 Only Brave stable from Brave's own package is supported. Brave Beta and
 Nightly, and Brave from Flatpak or Snap, are untested and not supported.
@@ -172,24 +181,25 @@ three prefs in each profile's `user.js`:
 The binary needs a stable place, as for Chrome.
 
 1. Run `mirrormark install --browser firefox` as yourself; it needs no
-   `sudo`. It takes every profile in `$XDG_CONFIG_HOME/mozilla/firefox`
+   `sudo`. It lists the profiles in `$XDG_CONFIG_HOME/mozilla/firefox`
    (`~/.config/mozilla/firefox` if that is unset) when that holds a
-   `profiles.ini`, else in `~/.mozilla/firefox`.
-   `--profile NAME` (repeatable) picks some of them, and
+   `profiles.ini`, else in `~/.mozilla/firefox`, with their numbers and
+   state, and changes nothing. Then run it with `--profile ID` or
+   `--profile #` for each profile to bind, as for Chrome; the ID is the
+   profile's folder name, such as `x1y2z3ab.dev-edition-default`.
    `--user-data-dir DIR` reads the profiles in `DIR` instead. It refuses,
-   before writing anything, if a chosen profile was last run by a Firefox
-   other than Developer Edition. A profile that has never run is skipped with
-   a `skipped:` line, unless you name it with `--profile`; start Firefox in it
-   once, then run `install` again to add it.
+   before writing anything, if a named profile has never run or was last
+   run by a Firefox other than Developer Edition.
 2. Restart Firefox in those profiles if it is running (close every window).
-3. Run `mirrormark install --browser firefox` again. It first checks each
-   profile's files. In each profile where Firefox has installed mirrormark
-   and it is turned on, it opens a tab once (starting Firefox there if it
-   is not running), waits up to 30 seconds for mirrormark to report in, and
-   prints `bound: <profile> -> firefox-<name>`. For any other profile it
-   prints `not ready: <profile>: ...`, which says what to do, or
-   `not bound: <profile>: ...`. Firefox installs the add-on when it starts
-   in the profile, so start it there once after step 2 if you have not.
+3. Run `mirrormark install --browser firefox --profile ...` again. It first
+   checks each named profile's files. In each profile where Firefox has
+   installed mirrormark and it is turned on, it opens a tab once (starting
+   Firefox there if it is not running), waits up to 30 seconds for mirrormark
+   to report in, and prints `bound: <profile> -> firefox-<name>`. For any
+   other profile it prints `not ready: <profile>: ...`, which says what to
+   do, or `not bound: <profile>: ...`. Firefox installs the add-on when it
+   starts in the profile, so start it there once after step 2 if you have
+   not.
 4. Export your bookmarks from Firefox (Bookmarks, Manage bookmarks, Import
    and Backup), then share folders in `config.yaml` as for Chrome (see
    [Ids, labels and the key](#ids-labels-and-the-key) and
@@ -199,8 +209,8 @@ The binary needs a stable place, as for Chrome.
 ### Upgrade and uninstall (Firefox)
 
 Upgrading: replace or move the binary, run
-`mirrormark install --browser firefox` again, then restart Firefox in
-those profiles.
+`mirrormark install --browser firefox --profile ...` again for the
+profiles you bound, then restart Firefox in those profiles.
 
 `mirrormark uninstall --browser firefox` removes the XPI from each profile
 whose database file says `browser: firefox`, and the host manifest if it
@@ -223,13 +233,15 @@ Developer Edition on Linux)](#install-firefox-developer-edition-on-linux)),
 with `--browser librewolf`, and the same three prefs in each profile's
 `user.js`; read "Before you start" there first.
 
-1. Run `mirrormark install --browser librewolf`. It takes the profiles in
+1. Run `mirrormark install --browser librewolf` to list the profiles in
    `$XDG_CONFIG_HOME/librewolf/librewolf` (`~/.config/librewolf/librewolf`)
-   when that holds a `profiles.ini`, else in `~/.librewolf`. LibreWolf makes
-   a second profile, `default`, that it never uses; `install` skips it.
+   when that holds a `profiles.ini`, else in `~/.librewolf`, then run it
+   with `--profile ID` or `--profile #` for each profile to bind. LibreWolf
+   makes a second profile, `default`, that it never uses; it lists as
+   `never run`, so leave it out.
 2. Restart LibreWolf in those profiles if it is running, then run
-   `mirrormark install --browser librewolf` again to bind them. Profile ids
-   start with `librewolf-`, labels with `librewolf/`.
+   `mirrormark install --browser librewolf --profile ...` again to bind
+   them. Profile ids start with `librewolf-`, labels with `librewolf/`.
 
 The host manifest goes in `~/.mozilla/native-messaging-hosts/`, which
 LibreWolf reads after `~/.librewolf/native-messaging-hosts/`; a mirrormark
@@ -335,13 +347,14 @@ shows:
 
 ### The popup says Chrome cannot reach the host
 
-`Specified native messaging host not found.` or `Access to the specified
-native messaging host is forbidden.` means Chrome could not start
-mirrormark. The host manifest is missing, or another install of mirrormark,
-with another key, replaced it, so it names another extension. Run
-`mirrormark install` again, and restart Chrome if it asks. On a computer
-where two users install mirrormark, only the last one to run `install`
-reaches its host (see [Ids, labels and the key](#ids-labels-and-the-key)).
+`Specified native messaging host not found.` or
+`Access to the specified native messaging host is forbidden.` means Chrome
+could not start mirrormark. The host manifest is missing, or another install
+of mirrormark, with another key, replaced it, so it names another extension.
+Run `mirrormark install --profile <profile>` again, and restart Chrome if it
+asks. On a computer where two users install mirrormark, only the last one to
+run `install` reaches its host (see [Ids, labels and the
+key](#ids-labels-and-the-key)).
 
 ### Installing and binding
 
@@ -354,7 +367,8 @@ reaches its host (see [Ids, labels and the key](#ids-labels-and-the-key)).
 - **"This page has been blocked by Chrome"** (or by Brave) on a
   `chrome-extension://` page means the extension is not loaded in that
   profile, not that the browser blocks mirrormark. Run `mirrormark install`
-  again and follow its `not ready` line.
+  to see the profile's state, and `mirrormark install --profile <profile>`
+  to follow its `not ready` line.
 - **You removed mirrormark from a profile.** Chrome remembers a **Remove**
   for good in that profile and does not install it there again, even after
   `uninstall` and `install`. (Turning it off is undone by turning it back

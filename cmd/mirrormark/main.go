@@ -22,10 +22,11 @@ func main() {
 const usageText = `Usage: mirrormark <command> [options]
 
 Commands:
-  install     Install into Google Chrome, Brave, Firefox Developer Edition
-              or LibreWolf and bind its profiles
+  install     List a browser's profiles, or install into Google Chrome,
+              Brave, Firefox Developer Edition or LibreWolf and bind the
+              profiles named
               [--browser chrome|brave|firefox|librewolf] [--user-data-dir DIR]
-              [--profile DIR_OR_NAME]...
+              [--profile ID_OR_NUMBER]...
   uninstall   Remove from a browser; keeps your files unless --purge
               [--browser chrome|brave|firefox|librewolf] [--purge]
   unpack      Write the extension, with this install's key, for Load unpacked

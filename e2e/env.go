@@ -189,7 +189,7 @@ func (e *Env) installArgs(name string) []string {
 	if e.kind(name) == "firefox" {
 		return []string{"install", "--browser", "firefox", "--profile", name}
 	}
-	return []string{"install", "--user-data-dir", e.udd(name)}
+	return []string{"install", "--user-data-dir", e.udd(name), "--profile", "Default"}
 }
 
 // mm runs the mirrormark binary as the test's user.
@@ -207,8 +207,9 @@ func (e *Env) mm(t *testing.T, args ...string) string {
 }
 
 // bind waits until name's profile is ready, then runs install for it and
-// returns the database it bound to. install names a Chrome profile by its
-// directory, Default, and a Firefox profile by its name.
+// returns the database it bound to. install names every profile by its
+// ID: a Chrome profile's directory, Default, or the Firefox profile's
+// directory, a.
 func (e *Env) bind(name string) string {
 	e.ready(name)
 	out := e.mm(e.t, e.installArgs(name)...)

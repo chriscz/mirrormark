@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,23 +30,34 @@ func TestSlug(t *testing.T) {
 
 func TestChoose(t *testing.T) {
 	all := []chrome.Profile{{Dir: "Default", Name: "Personal"}, {Dir: "Profile 1", Name: "Work"}, {Dir: "Profile 2", Name: "Work"}}
-	if got, err := choose(all, nil); err != nil || len(got) != 3 {
-		t.Fatalf("default should be every profile: %+v, %v", got, err)
+	for _, c := range []struct {
+		picks []string
+		want  []string // dirs, or nil for an error
+		err   string
+	}{
+		{[]string{"Profile 1"}, []string{"Profile 1"}, ""},
+		{[]string{"2", "0", "Profile 2"}, []string{"Profile 2", "Default"}, ""},
+		{[]string{"Work"}, nil, `no profile "Work"; run mirrormark install to list them`},
+		{[]string{"3"}, nil, `no profile number 3; run mirrormark install to list them`},
+	} {
+		got, err := choose(all, c.picks, "mirrormark install")
+		var dirs []string
+		for _, p := range got {
+			dirs = append(dirs, p.Dir)
+		}
+		if c.err != "" {
+			if err == nil || err.Error() != c.err {
+				t.Errorf("%q: err %v, want %q", c.picks, err, c.err)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(dirs, c.want) {
+			t.Errorf("%q: %q, %v", c.picks, dirs, err)
+		}
 	}
-	if got, _ := choose(all, []string{"Profile 1"}); len(got) != 1 || got[0].Dir != "Profile 1" {
-		t.Fatalf("by directory: %+v", got)
-	}
-	if got, _ := choose(all, []string{"Personal", "Profile 2"}); len(got) != 2 || got[0].Dir != "Default" || got[1].Dir != "Profile 2" {
-		t.Fatalf("by name: %+v", got)
-	}
-	if got, _ := choose(all, []string{"Default", "Personal"}); len(got) != 1 {
-		t.Fatalf("one profile named twice: %+v", got)
-	}
-	if _, err := choose(all, []string{"Work"}); err == nil {
-		t.Fatal("a name two profiles share was accepted")
-	}
-	if _, err := choose(all, []string{"Nope"}); err == nil {
-		t.Fatal("unknown profile accepted")
+	dup := []chrome.Profile{{Dir: "/a/x.default"}, {Dir: "/b/x.default"}}
+	if _, err := choose(dup, []string{"x.default"}, "mirrormark install --browser firefox"); err == nil || err.Error() != `2 profiles have the ID "x.default" (numbers 0, 1); name one by its number` {
+		t.Errorf("duplicate ID: %v", err)
 	}
 }
 
@@ -266,11 +278,15 @@ func geckoReady(t *testing.T, profileDir, uuid string) {
 	must(t, os.WriteFile(filepath.Join(profileDir, "prefs.js"), []byte(`user_pref("extensions.webextensions.uuids", "{\"mirrormark@chriscz.github.io\":\"`+uuid+`\"}");`+"\n"), 0o600))
 }
 
-// braveData is chromeData with four profiles.
+// braveData is chromeData with four profiles, each of which Brave has run.
 func braveData(t *testing.T) string {
 	udd := t.TempDir()
 	os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"info_cache":{
 		"Default":{"name":"Personal"},"Profile 1":{"name":"Work"},"Profile 2":{"name":"Old"},"Profile 3":{"name":"Off"}}}}`), 0o600)
+	for _, d := range []string{"Default", "Profile 1", "Profile 2", "Profile 3"} {
+		must(t, os.MkdirAll(filepath.Join(udd, d), 0o700))
+		must(t, os.WriteFile(filepath.Join(udd, d, "Preferences"), []byte(`{}`), 0o600))
+	}
 	return udd
 }
 
@@ -295,7 +311,7 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	udd := chromeData(t)
 
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "Extension ID: ") || !strings.Contains(out.String(), "Restart Chrome") || errb.Len() != 0 {
@@ -342,7 +358,7 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	chromiumReady(t, filepath.Join(udd, "Default"), id)
 	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
 	out.Reset()
-	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if len(*sudoCalls) != 2 || strings.Contains(out.String(), "Restart Chrome") {
@@ -359,10 +375,10 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 		t.Fatalf("chrome calls:\n%s", calls)
 	}
 
-	// --profile narrows the binding to one profile, by name or directory.
+	// One --profile binds that profile alone.
 	out.Reset()
 	os.Remove(chromeLog)
-	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Work"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Profile 1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if calls, _ := os.ReadFile(chromeLog); bytes.Count(calls, []byte("\n")) != 1 || strings.Contains(out.String(), "Default") {
@@ -378,14 +394,14 @@ func TestInstallReportsAProfileThatDoesNotConfirm(t *testing.T) {
 	chrome.BindWait = 300 * time.Millisecond
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
+	run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb)
 	id := installedID(t, p)
 	chromiumReady(t, filepath.Join(udd, "Default"), id)
 	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
 	// Ready by its files, but the extension never reports in.
 	t.Setenv("FAKE_NO_HELLO", "chrome-personal")
 	out.Reset()
-	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if want := "not bound: Default: mirrormark did not report in within 300ms of opening the page; look at the tab Chrome opened, then run mirrormark install --user-data-dir " + udd + " --profile Default.\n"; !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "bound: Profile 1 -> chrome-work") {
@@ -406,19 +422,15 @@ func TestInstallOpensNothingWhereMirrormarkIsNotReady(t *testing.T) {
 	log := fakeChromeOnPath(t, p)
 	udd := braveData(t) // Default, Profile 1, Profile 2, Profile 3
 	var out, errb bytes.Buffer
-	run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
+	all := []string{"--profile", "0", "--profile", "1", "--profile", "2", "--profile", "3"}
+	run(append([]string{"install", "--browser", "brave", "--user-data-dir", udd}, all...), strings.NewReader(""), &out, &errb)
 	id := installedID(t, p)
 	chromiumReady(t, filepath.Join(udd, "Default"), id)
-	must(t, os.MkdirAll(filepath.Join(udd, "Profile 1"), 0o700))
-	must(t, os.WriteFile(filepath.Join(udd, "Profile 1", "Preferences"), []byte(`{}`), 0o600))
-	must(t, os.MkdirAll(filepath.Join(udd, "Profile 2"), 0o700))
-	must(t, os.WriteFile(filepath.Join(udd, "Profile 2", "Preferences"), []byte(`{"extensions":{"settings":{"`+id+`":{}},"external_uninstalls":["`+id+`"]}}`), 0o600))
-	chromiumReady(t, filepath.Join(udd, "Profile 3"), id)
-	prefs, _ := os.ReadFile(filepath.Join(udd, "Profile 3", "Preferences"))
-	must(t, os.WriteFile(filepath.Join(udd, "Profile 3", "Preferences"), bytes.Replace(prefs, []byte(`"disable_reasons":[]`), []byte(`"disable_reasons":[1]`), 1), 0o600))
+	// Profile 1's Preferences, from braveData, has no entry for mirrormark.
+	removedAndTurnedOff(t, udd, id)
 	os.Remove(log)
 	out.Reset()
-	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "brave", "--user-data-dir", udd}, all...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	for _, line := range []string{
@@ -436,6 +448,16 @@ func TestInstallOpensNothingWhereMirrormarkIsNotReady(t *testing.T) {
 	}
 }
 
+// removedAndTurnedOff makes Profile 2 of udd one the user removed
+// mirrormark from, and Profile 3 one where they turned it off.
+func removedAndTurnedOff(t *testing.T, udd, id string) {
+	t.Helper()
+	must(t, os.WriteFile(filepath.Join(udd, "Profile 2", "Preferences"), []byte(`{"extensions":{"settings":{"`+id+`":{}},"external_uninstalls":["`+id+`"]}}`), 0o600))
+	chromiumReady(t, filepath.Join(udd, "Profile 3"), id)
+	prefs, _ := os.ReadFile(filepath.Join(udd, "Profile 3", "Preferences"))
+	must(t, os.WriteFile(filepath.Join(udd, "Profile 3", "Preferences"), bytes.Replace(prefs, []byte(`"disable_reasons":[]`), []byte(`"disable_reasons":[1]`), 1), 0o600))
+}
+
 // TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady: a Gecko profile
 // whose files do not show the add-on running gets advice, not the page.
 func TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady(t *testing.T) {
@@ -443,7 +465,7 @@ func TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady(t *testing.T) {
 	p := testHome(t)
 	root, calls := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	// alpha has the XPI, but Firefox has not started there since.
@@ -454,12 +476,12 @@ func TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady(t *testing.T) {
 	ext = bytes.Replace(ext, []byte(`"appDisabled":false`), []byte(`"appDisabled":true`), 1)
 	must(t, os.WriteFile(filepath.Join(beta, "extensions.json"), ext, 0o600))
 	out.Reset()
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	for _, line := range []string{
-		"not ready: alpha: Firefox Developer Edition has not installed mirrormark in this profile yet. Quit Firefox Developer Edition if it runs in this profile (close every window) and start it there again, then run mirrormark install --browser firefox --profile alpha.\n",
-		"not ready: beta: Firefox Developer Edition refuses mirrormark in this profile because it is not signed. Check that the profile's user.js sets xpinstall.signatures.required to false, restart Firefox Developer Edition there, then run mirrormark install --browser firefox --profile beta.\n",
+		"not ready: xalpha.alpha: Firefox Developer Edition has not installed mirrormark in this profile yet. Quit Firefox Developer Edition if it runs in this profile (close every window) and start it there again, then run mirrormark install --browser firefox --profile xalpha.alpha.\n",
+		"not ready: xbeta.beta: Firefox Developer Edition refuses mirrormark in this profile because it is not signed. Check that the profile's user.js sets xpinstall.signatures.required to false, restart Firefox Developer Edition there, then run mirrormark install --browser firefox --profile xbeta.beta.\n",
 	} {
 		if !strings.Contains(out.String(), line) {
 			t.Errorf("no %q in:\n%s", line, out.String())
@@ -477,7 +499,7 @@ func TestInstallStopsWhenSudoFails(t *testing.T) {
 	runSudo = func(_ io.Reader, _, _ io.Writer, args ...string) error { return fs.ErrPermission }
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
 	if !strings.Contains(errb.String(), "sudo") {
@@ -505,7 +527,7 @@ func TestInstallResolvesASymlinkedDataDir(t *testing.T) {
 		if i == 1 { // the second run binds, so Chrome has installed it
 			chromiumReady(t, filepath.Join(udd, "Profile 1"), installedID(t, p))
 		}
-		if code := run([]string{"install", "--user-data-dir", dir, "--profile", "Work"}, strings.NewReader(""), &out, &errb); code != 0 {
+		if code := run([]string{"install", "--user-data-dir", dir, "--profile", "Profile 1"}, strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 		}
 	}
@@ -544,7 +566,7 @@ func TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest(t *testing.T) {
 	other.Path = filepath.Join(root, other.Path)
 	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--user-data-dir", chromeData(t)}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if !strings.Contains(errb.String(), "warning: "+other.Path+" lets another extension") {
@@ -558,13 +580,145 @@ func TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest(t *testing.T) {
 func TestInstallRejectsAnUnknownProfile(t *testing.T) {
 	testHome(t)
 	_, calls := fakeSystem(t)
+	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Nope"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Nope"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(errb.String(), "Profile 1 (Work)") || len(*calls) != 0 {
+	if want := `mirrormark: no profile "Nope"; run mirrormark install --user-data-dir ` + udd + " to list them\n"; errb.String() != want || len(*calls) != 0 {
 		t.Fatalf("stderr %q, sudo %v", errb.String(), *calls)
 	}
+}
+
+// TestInstallWithoutProfileListsAndWritesNothing: no --profile prints the
+// list and touches nothing: no key, no extension, no database, no sudo.
+func TestInstallWithoutProfileListsAndWritesNothing(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	_, sudoCalls := fakeSystem(t)
+	log := fakeChromeOnPath(t, p)
+	udd := braveData(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	want := "Brave profiles in " + udd + ":\n" +
+		"  #  ID         NAME      STATE          DATABASE\n" +
+		"  0  Default    Personal  not installed  -\n" +
+		"  1  Profile 1  Work      not installed  -\n" +
+		"  2  Profile 2  Old       not installed  -\n" +
+		"  3  Profile 3  Off       not installed  -\n" +
+		"Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n" +
+		"  mirrormark install --browser brave --user-data-dir " + udd + " --profile Default\n"
+	if out.String() != want || errb.Len() != 0 {
+		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
+	}
+	if entries, _ := os.ReadDir(p.Data); len(entries) != 0 || len(*sudoCalls) != 0 {
+		t.Fatalf("wrote %v, sudo %v", entries, *sudoCalls)
+	}
+	if _, err := os.Stat(p.ConfigFile()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("config: %v", err)
+	}
+	if _, err := os.Stat(log); err == nil {
+		t.Fatal("started Brave")
+	}
+}
+
+// snapshot lists every file under dirs with its size and time, so a test
+// can tell that nothing was written there.
+func snapshot(t *testing.T, dirs ...string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, d := range dirs {
+		filepath.WalkDir(d, func(path string, e fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if fi, err := e.Info(); err == nil {
+				got[path] = fmt.Sprint(fi.Size(), fi.ModTime().UnixNano(), fi.Mode())
+			}
+			return nil
+		})
+	}
+	return got
+}
+
+// After an install, the listing shows each profile's state and its
+// database, and still writes nothing; its example is the first profile not
+// yet bound.
+func TestInstallListsStatesAndDatabasesAfterAnInstall(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, sudoCalls := fakeSystem(t)
+	log := fakeChromeOnPath(t, p)
+	udd := braveData(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	id := installedID(t, p)
+	chromiumReady(t, filepath.Join(udd, "Default"), id)
+	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
+	out.Reset()
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	removedAndTurnedOff(t, udd, id)
+	before, calls, started := snapshot(t, root, p.Data, p.State, udd), len(*sudoCalls), snapshot(t, log)
+	out.Reset()
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	want := "Brave profiles in " + udd + ":\n" +
+		"  #  ID         NAME      STATE       DATABASE\n" +
+		"  0  Default    Personal  bound       brave-personal\n" +
+		"  1  Profile 1  Work      bound       brave-work\n" +
+		"  2  Profile 2  Old       removed     -\n" +
+		"  3  Profile 3  Off       turned off  -\n" +
+		"Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n" +
+		"  mirrormark install --browser brave --user-data-dir " + udd + ` --profile "Profile 2"` + "\n"
+	if out.String() != want || errb.Len() != 0 {
+		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
+	}
+	if after := snapshot(t, root, p.Data, p.State, udd); !maps.Equal(before, after) || len(*sudoCalls) != calls || !maps.Equal(started, snapshot(t, log)) {
+		t.Fatalf("the listing changed something:\nbefore %v\nafter %v\nsudo %v", before, after, *sudoCalls)
+	}
+}
+
+// A Gecko listing says which profiles have never run or belong to another
+// browser, and writes into none of them.
+func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := firefoxData(t, p, "aurora")
+	neverRun(t, root, "gamma")
+	release := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(release, "defaults", "pref"), 0o755))
+	must(t, os.WriteFile(filepath.Join(release, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "release");`), 0o644))
+	delta := filepath.Join(root, "xdelta.delta")
+	must(t, os.MkdirAll(delta, 0o700))
+	must(t, os.WriteFile(filepath.Join(delta, "prefs.js"), nil, 0o600))
+	must(t, os.WriteFile(filepath.Join(delta, "compatibility.ini"), []byte("[Compatibility]\nLastPlatformDir="+release+"\n"), 0o644))
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	want := "Firefox Developer Edition profiles in " + root + ":\n" +
+		"  #  ID            NAME   STATE                          DATABASE\n" +
+		"  0  xalpha.alpha  alpha  not installed                  -\n" +
+		"  1  xbeta.beta    beta   not installed                  -\n" +
+		"  2  xdelta.delta  delta  not Firefox Developer Edition  -\n" +
+		"  3  xgamma.gamma  gamma  never run                      -\n" +
+		"Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n" +
+		"  mirrormark install --browser firefox --profile xalpha.alpha\n"
+	if out.String() != want || errb.Len() != 0 {
+		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
+	}
+	for _, n := range []string{"alpha", "beta", "delta", "gamma"} {
+		mustBeGone(t, "listing", filepath.Join(root, "x"+n+"."+n, "user.js"), filepath.Join(root, "x"+n+"."+n, "extensions"))
+	}
+	host, _ := firefox.HostManifestPath()
+	mustBeGone(t, "listing", host, p.Data, calls)
 }
 
 func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
@@ -574,7 +728,7 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 	fakeChromeOnPath(t, p)
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	run([]string{"install", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb)
+	run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb)
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
 	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
 	paths := []string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}
@@ -676,6 +830,9 @@ func geckoData(t *testing.T, p db.Paths, root, bin, app, channel string) (calls 
 	return calls
 }
 
+// geckoBoth names both of geckoData's profiles, by ID.
+var geckoBoth = []string{"--profile", "xalpha.alpha", "--profile", "xbeta.beta"}
+
 // firefoxData makes Developer Edition's (or, with another channel, another
 // Firefox's) profiles root with alpha and beta.
 func firefoxData(t *testing.T, p db.Paths, channel string) (root, calls string) {
@@ -694,7 +851,7 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 	p := testHome(t)
 	root, calls := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "Restart Firefox") || !strings.Contains(out.String(), "unsigned") {
@@ -726,10 +883,10 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 		geckoReady(t, filepath.Join(root, "x"+n+"."+n), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4"+n[:1])
 	}
 	out.Reset()
-	if code := run([]string{"install", "--browser", "firefox", "--profile", "beta"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--browser", "firefox", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "bound: beta -> firefox-beta\n") || strings.Contains(out.String(), "alpha") {
+	if !strings.Contains(out.String(), "bound: xbeta.beta -> firefox-beta\n") || strings.Contains(out.String(), "alpha") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#firefox-beta")) {
@@ -742,7 +899,7 @@ func TestInstallRefusesReleaseFirefox(t *testing.T) {
 	p := testHome(t)
 	root, _ := firefoxData(t, p, "release")
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(errb.String(), "Developer Edition") || !strings.Contains(errb.String(), "release") {
@@ -768,10 +925,10 @@ func TestInstallWithOneReleaseProfileWritesNothing(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "xbeta.beta", "compatibility.ini"), []byte("[Compatibility]\nLastPlatformDir="+release+"\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(root, "xalpha.alpha", "user.js"), []byte("user_pref(\"browser.startup.page\", 3);\n"), 0o644))
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(errb.String(), "beta: it was last run by a browser on the release channel") || strings.Contains(errb.String(), "alpha") {
+	if !strings.Contains(errb.String(), "cannot install into these profiles; leave them out:\n  xbeta.beta: it was last run by a browser on the release channel") || strings.Contains(errb.String(), "alpha") {
 		t.Fatalf("stderr %q", errb.String())
 	}
 	for _, n := range []string{"alpha", "beta"} {
@@ -802,7 +959,7 @@ func TestUninstallFromFirefoxRestoresItsChecks(t *testing.T) {
 	p := testHome(t)
 	root, _ := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb)
+	run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb)
 	dir := filepath.Join(root, "xalpha.alpha")
 	user, _ := os.ReadFile(filepath.Join(dir, "user.js"))
 	must(t, os.WriteFile(filepath.Join(dir, "user.js"), append([]byte("user_pref(\"browser.startup.page\", 3);\n"), user...), 0o644))
@@ -851,9 +1008,9 @@ func TestFirefoxUninstallKeepsNoKey(t *testing.T) {
 	p := testHome(t)
 	firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	for _, cmd := range []string{"install", "uninstall"} {
-		if code := run([]string{cmd, "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
-			t.Fatalf("%s: exit %d: %s%s", cmd, code, out.String(), errb.String())
+	for _, args := range [][]string{append([]string{"install", "--browser", "firefox"}, geckoBoth...), {"uninstall", "--browser", "firefox"}} {
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit %d: %s%s", args[0], code, out.String(), errb.String())
 		}
 	}
 	if !strings.Contains(out.String(), "Kept your config") || strings.Contains(out.String(), "key") {
@@ -867,9 +1024,9 @@ func TestFirefoxUninstallLeavesAnUnchangedUserJSAlone(t *testing.T) {
 	p := testHome(t)
 	root, _ := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	for _, cmd := range []string{"install", "uninstall"} {
-		if code := run([]string{cmd, "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
-			t.Fatalf("%s: exit %d: %s%s", cmd, code, out.String(), errb.String())
+	for _, args := range [][]string{append([]string{"install", "--browser", "firefox"}, geckoBoth...), {"uninstall", "--browser", "firefox"}} {
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit %d: %s%s", args[0], code, out.String(), errb.String())
 		}
 	}
 	user := filepath.Join(root, "xalpha.alpha", "user.js")
@@ -893,7 +1050,7 @@ func TestFirefoxUninstallWritesUserJSFirst(t *testing.T) {
 	p := testHome(t)
 	root, _ := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	locked := t.TempDir()
@@ -930,6 +1087,9 @@ func TestFirefoxReinstallKeepsOneLinePerPref(t *testing.T) {
 	root, _ := firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
 	for _, args := range [][]string{{"install"}, {"uninstall"}, {"install"}, {"uninstall"}, {"install"}} {
+		if args[0] == "install" {
+			args = append(args, geckoBoth...)
+		}
 		if code := run(append(args, "--browser", "firefox"), strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("%s: exit %d: %s%s", args[0], code, out.String(), errb.String())
 		}
@@ -951,17 +1111,17 @@ func TestFirefoxKeepsALinkedPrivateUserJS(t *testing.T) {
 	must(t, os.WriteFile(target, []byte("user_pref(\"browser.startup.page\", 3);\n"), 0o600))
 	must(t, os.Symlink(target, link))
 	var out, errb bytes.Buffer
-	for _, cmd := range []string{"install", "uninstall"} {
-		if code := run([]string{cmd, "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
-			t.Fatalf("%s: exit %d: %s%s", cmd, code, out.String(), errb.String())
+	for _, args := range [][]string{append([]string{"install", "--browser", "firefox"}, geckoBoth...), {"uninstall", "--browser", "firefox"}} {
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit %d: %s%s", args[0], code, out.String(), errb.String())
 		}
 		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("%s replaced the link: %v", cmd, err)
+			t.Fatalf("%s replaced the link: %v", args[0], err)
 		}
 		fi, _ := os.Stat(target)
 		data, _ := os.ReadFile(target)
 		if fi.Mode().Perm() != 0o600 || !bytes.Contains(data, []byte("browser.startup.page")) || !bytes.Contains(data, []byte("signatures.required")) {
-			t.Fatalf("%s: %v %q", cmd, fi.Mode().Perm(), data)
+			t.Fatalf("%s: %v %q", args[0], fi.Mode().Perm(), data)
 		}
 	}
 }
@@ -975,7 +1135,7 @@ func installBoth(t *testing.T) (p db.Paths, root string) {
 	fakeSystem(t)
 	root, _ = firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
-	for _, args := range [][]string{{"install", "--user-data-dir", chromeData(t)}, {"install", "--browser", "firefox"}} {
+	for _, args := range [][]string{{"install", "--user-data-dir", chromeData(t), "--profile", "Default", "--profile", "1"}, append([]string{"install", "--browser", "firefox"}, geckoBoth...)} {
 		if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("%v: exit %d: %s%s", args, code, out.String(), errb.String())
 		}
@@ -1078,7 +1238,7 @@ func TestFirefoxInstallFailingPartWayCanBeUninstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	alpha := filepath.Join(root, "xalpha.alpha", "user.js")
@@ -1113,54 +1273,19 @@ func neverRun(t *testing.T, root, name string) {
 	must(t, f.Close())
 }
 
-func TestInstallSkipsAProfileThatHasNeverRun(t *testing.T) {
-	skipIfRoot(t)
-	p := testHome(t)
-	root, _ := firefoxData(t, p, "aurora")
-	neverRun(t, root, "gamma")
-	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
-	}
-	if !strings.Contains(out.String(), "skipped: gamma: it has never run") {
-		t.Fatalf("output:\n%s", out.String())
-	}
-	mustExist(t, "install", p.ProfileFile("firefox-alpha"), filepath.Join(root, "xalpha.alpha", "user.js"))
-	mustBeGone(t, "install", p.ProfileFile("firefox-gamma"), filepath.Join(root, "xgamma.gamma", "user.js"))
-}
-
 func TestInstallRefusesANamedProfileThatHasNeverRun(t *testing.T) {
 	skipIfRoot(t)
 	p := testHome(t)
 	root, _ := firefoxData(t, p, "aurora")
 	neverRun(t, root, "gamma")
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox", "--profile", "alpha", "--profile", "gamma"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--browser", "firefox", "--profile", "xalpha.alpha", "--profile", "xgamma.gamma"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(errb.String(), "gamma: it has never run") {
+	if !strings.Contains(errb.String(), "xgamma.gamma: it has never run") {
 		t.Fatalf("stderr %q", errb.String())
 	}
 	mustBeGone(t, "refused install", filepath.Join(root, "xalpha.alpha", "user.js"), p.ProfileFile("firefox-alpha"))
-}
-
-func TestInstallStopsWhenNoProfileHasRun(t *testing.T) {
-	skipIfRoot(t)
-	p := testHome(t)
-	root, _ := firefoxData(t, p, "aurora")
-	for _, n := range []string{"alpha", "beta"} {
-		must(t, os.Remove(filepath.Join(root, "x"+n+"."+n, "compatibility.ini")))
-	}
-	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
-		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
-	}
-	if !strings.Contains(errb.String(), "never run") {
-		t.Fatalf("stderr %q", errb.String())
-	}
-	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
-		t.Fatalf("made databases %v", dbs)
-	}
 }
 
 // installedID is the extension id of the key install made.
@@ -1178,7 +1303,7 @@ func installChromium(t *testing.T, browsers ...string) {
 	t.Helper()
 	for _, b := range browsers {
 		var out, errb bytes.Buffer
-		if code := run([]string{"install", "--browser", b, "--user-data-dir", chromeData(t)}, strings.NewReader(""), &out, &errb); code != 0 {
+		if code := run([]string{"install", "--browser", b, "--user-data-dir", chromeData(t), "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("install %s: exit %d: %s%s", b, code, out.String(), errb.String())
 		}
 	}
@@ -1191,7 +1316,7 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 	calls := fakeChromeOnPath(t, p)
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "Restart Brave") || !strings.Contains(out.String(), "mirrormark install --browser brave again") {
@@ -1210,7 +1335,7 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 	chromiumReady(t, filepath.Join(udd, "Default"), id)
 	chromiumReady(t, filepath.Join(udd, "Profile 1"), id)
 	out.Reset()
-	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "bound: Profile 1 -> brave-work\n") {
@@ -1229,7 +1354,7 @@ func TestInstallIntoAbsentBraveWritesNothing(t *testing.T) {
 	p := testHome(t)
 	root, calls := fakeSystem(t)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--browser", "brave", "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(errb.String(), "Brave") || len(*calls) != 0 {
@@ -1324,7 +1449,7 @@ func TestInstallRefusesABrowserThatIsNotInstalled(t *testing.T) {
 	udd := chromeData(t)
 	t.Setenv("PATH", t.TempDir()) // no brave-browser, not even testHome's guard
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(errb.String(), "Brave is not installed (no brave-browser on PATH)") || len(*calls) != 0 {
@@ -1388,7 +1513,7 @@ func TestInstallIntoLibreWolfThenBind(t *testing.T) {
 	p := testHome(t)
 	root, calls := librewolfData(t, p)
 	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--browser", "librewolf"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run(append([]string{"install", "--browser", "librewolf"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "Restart LibreWolf") || !strings.Contains(out.String(), "unsigned") {
@@ -1412,10 +1537,10 @@ func TestInstallIntoLibreWolfThenBind(t *testing.T) {
 		geckoReady(t, filepath.Join(root, "x"+n+"."+n), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4"+n[:1])
 	}
 	out.Reset()
-	if code := run([]string{"install", "--browser", "librewolf", "--profile", "beta"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"install", "--browser", "librewolf", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "bound: beta -> librewolf-beta\n") {
+	if !strings.Contains(out.String(), "bound: xbeta.beta -> librewolf-beta\n") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#librewolf-beta")) {
@@ -1435,7 +1560,7 @@ func TestEachGeckoBrowserTakesOnlyItsOwnProfiles(t *testing.T) {
 		{"firefox", lwRoot, "this profile belongs to LibreWolf; use --browser librewolf"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run([]string{"install", "--browser", c.browser, "--user-data-dir", c.root}, strings.NewReader(""), &out, &errb); code != 1 {
+		if code := run(append([]string{"install", "--browser", c.browser, "--user-data-dir", c.root}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 			t.Fatalf("%s: exit %d: %s%s", c.browser, code, out.String(), errb.String())
 		}
 		if !strings.Contains(errb.String(), c.want) {
@@ -1458,7 +1583,7 @@ func installGecko(t *testing.T) (p db.Paths, ffRoot, lwRoot string) {
 	ffRoot, _ = firefoxData(t, p, "aurora")
 	var out, errb bytes.Buffer
 	for _, b := range []string{"firefox", "librewolf"} {
-		if code := run([]string{"install", "--browser", b}, strings.NewReader(""), &out, &errb); code != 0 {
+		if code := run(append([]string{"install", "--browser", b}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 			t.Fatalf("install %s: exit %d: %s%s", b, code, out.String(), errb.String())
 		}
 	}

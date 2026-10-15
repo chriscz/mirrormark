@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/chriscz/mirrormark/extension"
@@ -68,7 +70,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	browser := fl.String("browser", "chrome", "chrome, brave, firefox or librewolf")
 	udd := fl.String("user-data-dir", "", "the browser's data directory (default ~/.config/google-chrome for Chrome, ~/.config/BraveSoftware/Brave-Browser for Brave), or the profiles directory of Firefox Developer Edition or LibreWolf")
 	var picks multiFlag
-	fl.Var(&picks, "profile", `profile to bind, by directory such as "Profile 1" or by name; repeatable (default: every profile)`)
+	fl.Var(&picks, "profile", `profile to install into or bind, by ID (its directory, such as "Profile 1") or by number in the list install prints without --profile; repeatable`)
 	if fl.Parse(args) != nil {
 		return 2
 	}
@@ -114,7 +116,14 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	chosen, err := choose(profiles, picks)
+	list := cb.InstallCommand()
+	if uddFlag != "" {
+		list += " --user-data-dir " + quoteArg(uddFlag)
+	}
+	if len(picks) == 0 {
+		return listChromium(p, cb, *udd, list, profiles, stdout, stderr)
+	}
+	chosen, err := choose(profiles, picks, list)
 	if err != nil {
 		return fail(err)
 	}
@@ -166,33 +175,129 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	code := 0
 	for _, c := range chosen {
-		cmd := again(cb.InstallCommand(), uddFlag, c.Dir)
+		cmd := again(cb.InstallCommand(), uddFlag, c.ID())
 		// The external file is current here, so a profile without the
 		// extension is waiting for the browser, not for mirrormark.
 		st, err := chrome.ReadState(filepath.Join(*udd, c.Dir), ext.ID, want, true)
 		if err != nil {
-			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", c.Dir, err)
+			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", c.ID(), err)
 			code = 1
 			continue
 		}
 		if st.State != chrome.Ready {
-			fmt.Fprintf(stdout, "not ready: %s: %s.\n", c.Dir, chromiumAdvice(cb, st, want, cmd))
+			fmt.Fprintf(stdout, "not ready: %s: %s.\n", c.ID(), chromiumAdvice(cb, st, want, cmd))
 			code = 1
 			continue
 		}
 		id := ids[c.Dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
 		if err := cb.Bind(bin, *udd, c.Dir, ext.ID, id, reported); err != nil {
-			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", c.Dir, err, cmd)
+			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", c.ID(), err, cmd)
 			code = 1
 			continue
 		}
-		fmt.Fprintf(stdout, "bound: %s -> %s\n", c.Dir, id)
+		fmt.Fprintf(stdout, "bound: %s -> %s\n", c.ID(), id)
 	}
 	if code == 0 {
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), cb.Name, p.LogFile())
 	}
 	return code
+}
+
+// listChromium prints b's profiles with their state and changes nothing.
+func listChromium(p db.Paths, b chrome.Browser, udd, list string, profiles []chrome.Profile, stdout, stderr io.Writer) int {
+	want, err := extension.Version()
+	if err != nil {
+		fmt.Fprintln(stderr, "mirrormark:", err)
+		return 1
+	}
+	// Read the key, never create it: a listing writes nothing. Without a
+	// key no extension id exists, so nothing can be installed anywhere.
+	id, placed := "", false
+	if key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem")); err == nil {
+		id = chrome.ExtensionID(chrome.PublicKeyDER(key))
+		_, err := os.Stat(filepath.Join(sysroot, b.ExternalFile(id)))
+		placed = err == nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(stderr, "mirrormark: warning: %v\n", err)
+	}
+	states := make([]string, len(profiles))
+	for i, c := range profiles {
+		dir := filepath.Join(udd, c.Dir)
+		if id == "" {
+			states[i] = chrome.ProfileState{State: chrome.NotInstalled}.String()
+			if _, err := os.Stat(filepath.Join(dir, "Preferences")); errors.Is(err, fs.ErrNotExist) {
+				states[i] = chrome.ProfileState{State: chrome.NeverRun}.String()
+			}
+			continue
+		}
+		s, err := chrome.ReadState(dir, id, want, placed)
+		if err != nil {
+			fmt.Fprintf(stderr, "mirrormark: warning: %s: %v\n", c.ID(), err)
+			states[i] = "unreadable"
+			continue
+		}
+		states[i] = s.String()
+	}
+	return printList(p, b.Name, udd, list, profiles, func(c chrome.Profile) string { return filepath.Join(udd, c.Dir) }, states, stdout, stderr)
+}
+
+// listGecko prints b's profiles with their state and changes nothing.
+func listGecko(p db.Paths, b firefox.Browser, root, list string, profiles []chrome.Profile, stdout, stderr io.Writer) int {
+	want, err := extension.Version()
+	if err != nil {
+		fmt.Fprintln(stderr, "mirrormark:", err)
+		return 1
+	}
+	states := make([]string, len(profiles))
+	for i, c := range profiles {
+		dir := firefox.Dir(root, c)
+		if _, err := b.Check(dir); errors.Is(err, firefox.ErrNeverRun) {
+			states[i] = chrome.ProfileState{State: chrome.NeverRun}.String()
+			continue
+		} else if err != nil {
+			states[i] = "not " + b.Name
+			continue
+		}
+		s, _, err := firefox.ReadState(dir, want)
+		if err != nil {
+			fmt.Fprintf(stderr, "mirrormark: warning: %s: %v\n", c.ID(), err)
+			states[i] = "unreadable"
+			continue
+		}
+		states[i] = s.String()
+	}
+	return printList(p, b.Name, root, list, profiles, func(c chrome.Profile) string { return firefox.Dir(root, c) }, states, stdout, stderr)
+}
+
+// printList prints the listing; a ready profile a database names is bound.
+func printList(p db.Paths, name, where, list string, profiles []chrome.Profile, path func(chrome.Profile) string, states []string, stdout, stderr io.Writer) int {
+	dbs, errs := db.LoadAll(p)
+	for _, err := range errs {
+		fmt.Fprintf(stderr, "mirrormark: warning: %v\n", err)
+	}
+	byPath := map[string]string{}
+	for id, d := range dbs {
+		byPath[d.Profile.Path] = id
+	}
+	fmt.Fprintf(stdout, "%s profiles in %s:\n", name, where)
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  #\tID\tNAME\tSTATE\tDATABASE")
+	ready := chrome.ProfileState{State: chrome.Ready}.String()
+	example, seen := 0, false
+	for i, c := range profiles {
+		dbid, state := byPath[path(c)], states[i]
+		if dbid != "" && state == ready {
+			state = "bound"
+		}
+		if state != "bound" && !seen {
+			example, seen = i, true
+		}
+		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\n", i, c.ID(), cmp.Or(c.Name, "-"), state, cmp.Or(dbid, "-"))
+	}
+	tw.Flush()
+	fmt.Fprintf(stdout, "Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n  %s --profile %s\n", list, quoteArg(profiles[example].ID()))
+	return 0
 }
 
 // geckoSafety says what install turns off in each profile of b, before it
@@ -229,7 +334,14 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	if err != nil {
 		return fail(err)
 	}
-	chosen, err := choose(profiles, picks)
+	list := "mirrormark install --browser " + b.Config
+	if udd != "" {
+		list += " --user-data-dir " + quoteArg(udd)
+	}
+	if len(picks) == 0 {
+		return listGecko(p, b, root, list, profiles, stdout, stderr)
+	}
+	chosen, err := choose(profiles, picks, list)
 	if err != nil {
 		return fail(err)
 	}
@@ -238,28 +350,18 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 		dir, bin string
 	}
 	var targets []target
-	var refused, skipped []string
+	var refused []string
 	for _, c := range chosen {
 		dir := firefox.Dir(root, c)
 		bin, err := b.Check(dir)
-		switch {
-		case errors.Is(err, firefox.ErrNeverRun) && len(picks) == 0:
-			// The user did not ask for it by name, and it holds nothing yet.
-			skipped = append(skipped, fmt.Sprintf("%s: %v", c.Name, err))
-		case err != nil:
-			refused = append(refused, fmt.Sprintf("%s: %v", c.Name, err))
-		default:
-			targets = append(targets, target{c, dir, bin})
+		if err != nil {
+			refused = append(refused, fmt.Sprintf("%s: %v", c.ID(), err))
+			continue
 		}
+		targets = append(targets, target{c, dir, bin})
 	}
 	if len(refused) > 0 {
-		return fail(fmt.Errorf("cannot install into these profiles; leave them out with --profile:\n  %s", strings.Join(refused, "\n  ")))
-	}
-	if len(targets) == 0 {
-		return fail(fmt.Errorf("no profile to install into:\n  %s", strings.Join(skipped, "\n  ")))
-	}
-	for _, s := range skipped {
-		fmt.Fprintf(stdout, "skipped: %s, then run install again to add it\n", s)
+		return fail(fmt.Errorf("cannot install into these profiles; leave them out:\n  %s", strings.Join(refused, "\n  ")))
 	}
 	// The databases come before any write into a profile: uninstall finds
 	// the profiles whose checks to turn back on through them, so a write
@@ -299,26 +401,26 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	}
 	code := 0
 	for _, tg := range targets {
-		cmd := again("mirrormark install --browser "+b.Config, udd, tg.c.Name)
+		cmd := again("mirrormark install --browser "+b.Config, udd, tg.c.ID())
 		st, uuid, err := firefox.ReadState(tg.dir, want)
 		if err != nil {
-			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", tg.c.Name, err)
+			fmt.Fprintf(stdout, "not ready: %s: cannot read its state: %v.\n", tg.c.ID(), err)
 			code = 1
 			continue
 		}
 		if st.State != chrome.Ready {
-			fmt.Fprintf(stdout, "not ready: %s: %s.\n", tg.c.Name, geckoAdvice(b, st, want, cmd))
+			fmt.Fprintf(stdout, "not ready: %s: %s.\n", tg.c.ID(), geckoAdvice(b, st, want, cmd))
 			code = 1
 			continue
 		}
 		id := ids[tg.dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
 		if err := b.Bind(tg.bin, tg.dir, uuid, id, reported); err != nil {
-			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", tg.c.Name, err, cmd)
+			fmt.Fprintf(stdout, "not bound: %s: %v, then run %s.\n", tg.c.ID(), err, cmd)
 			code = 1
 			continue
 		}
-		fmt.Fprintf(stdout, "bound: %s -> %s\n", tg.c.Name, id)
+		fmt.Fprintf(stdout, "bound: %s -> %s\n", tg.c.ID(), id)
 	}
 	if code == 0 {
 		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), b.Name, p.LogFile())
@@ -438,43 +540,41 @@ func sudo(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	return cmd.Run()
 }
 
-// choose returns the profiles named in picks, by directory or by a name
-// only one profile has, or every profile if picks is empty.
-func choose(all []chrome.Profile, picks []string) ([]chrome.Profile, error) {
-	if len(picks) == 0 {
-		return all, nil
-	}
+// choose returns the profiles picks names, by ID or by number in the
+// list, in the order first named. list is the command that lists them.
+// Names are not taken: they need not be unique, and the list shows them.
+func choose(all []chrome.Profile, picks []string, list string) ([]chrome.Profile, error) {
 	var got []chrome.Profile
 	for _, want := range picks {
-		i := slices.IndexFunc(all, func(p chrome.Profile) bool { return p.Dir == want })
-		if i < 0 {
-			var named []int
-			for j, p := range all {
-				if p.Name == want {
-					named = append(named, j)
-				}
+		var hits []int
+		for i, p := range all {
+			if p.ID() == want {
+				hits = append(hits, i)
 			}
-			if len(named) > 1 {
-				return nil, fmt.Errorf("more than one profile is named %q; name its directory instead: %s", want, listProfiles(all))
-			}
-			if len(named) == 0 {
-				return nil, fmt.Errorf("no profile %q; the profiles are %s", want, listProfiles(all))
-			}
-			i = named[0]
 		}
-		if !slices.Contains(got, all[i]) {
-			got = append(got, all[i])
+		if len(hits) > 1 {
+			var nums []string
+			for _, i := range hits {
+				nums = append(nums, strconv.Itoa(i))
+			}
+			return nil, fmt.Errorf("%d profiles have the ID %q (numbers %s); name one by its number", len(hits), want, strings.Join(nums, ", "))
+		}
+		if len(hits) == 0 {
+			// Only plain digits are a number: Atoi would also take "+1".
+			n, err := strconv.Atoi(want)
+			if err != nil || strings.Trim(want, "0123456789") != "" {
+				return nil, fmt.Errorf("no profile %q; run %s to list them", want, list)
+			}
+			if n >= len(all) {
+				return nil, fmt.Errorf("no profile number %s; run %s to list them", want, list)
+			}
+			hits = []int{n}
+		}
+		if !slices.Contains(got, all[hits[0]]) {
+			got = append(got, all[hits[0]])
 		}
 	}
 	return got, nil
-}
-
-func listProfiles(all []chrome.Profile) string {
-	var s []string
-	for _, p := range all {
-		s = append(s, fmt.Sprintf("%s (%s)", p.Dir, p.Name))
-	}
-	return strings.Join(s, ", ")
 }
 
 // ensureDB returns the database id of the browser profile at path,

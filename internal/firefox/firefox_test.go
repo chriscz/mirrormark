@@ -34,12 +34,12 @@ func TestProfilesFromIniAndScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Sorted by ID, the directory's base name, wherever the directory is.
 	want := []chrome.Profile{
-		{Dir: abs, Name: "work"},
 		{Dir: "ab12.dev-edition-default", Name: "dev-edition-default"},
 		{Dir: "cd34.Original profile", Name: "Original profile"},
+		{Dir: abs, Name: "work"},
 	}
-	slices.SortFunc(want, func(a, b chrome.Profile) int { return strings.Compare(a.Dir, b.Dir) })
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
@@ -76,6 +76,9 @@ func TestProfilesListsAnAbsoluteIniPathOnce(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Name != "default" || Dir(root, got[0]) != dir {
 		t.Fatalf("got %+v", got)
+	}
+	if id := got[0].ID(); id != "ab12.default" {
+		t.Fatalf("ID %q of an absolute Path, want its base name", id)
 	}
 }
 

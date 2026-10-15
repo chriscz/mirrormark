@@ -32,6 +32,37 @@ func TestProfilesFromLocalState(t *testing.T) {
 	}
 }
 
+func TestProfilesSortByIDWithNumbersAsNumbers(t *testing.T) {
+	udd := t.TempDir()
+	os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"info_cache":{
+		"Profile 10":{"name":"j"},"Profile 2":{"name":"b"},"Default":{"name":"d"},"Profile 1":{"name":"a"}}}}`), 0o600)
+	ps, err := Chrome.Profiles(udd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, p := range ps {
+		ids = append(ids, p.ID())
+	}
+	if want := []string{"Default", "Profile 1", "Profile 2", "Profile 10"}; !slices.Equal(ids, want) {
+		t.Fatalf("order %q, want %q", ids, want)
+	}
+}
+
+func TestCompareIDs(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"Profile 2", "Profile 10", -1}, {"Profile 10", "Profile 9", 1}, {"Default", "Profile 1", -1},
+		{"abc.default", "abc.default", 0}, {"a01", "a1", 1}, {"x9.y", "x10.a", -1},
+	} {
+		if got := CompareIDs(c.a, c.b); got != c.want {
+			t.Errorf("CompareIDs(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 func TestProfilesWithoutLocalStateFails(t *testing.T) {
 	if _, err := Chrome.Profiles(t.TempDir()); err == nil {
 		t.Fatal("no error for a data directory Chrome never used")

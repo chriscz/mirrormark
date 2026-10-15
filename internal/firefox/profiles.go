@@ -14,6 +14,7 @@
 package firefox
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -80,7 +81,7 @@ func (b Browser) DefaultRoot() (string, error) {
 	return filepath.Join(home, b.HomeRoot), nil
 }
 
-// Profiles lists root's profiles, sorted by Dir: those in profiles.ini,
+// Profiles lists root's profiles, sorted by ID, numbers as numbers: those in profiles.ini,
 // with Dir as the file gives it (relative to root, or absolute), and every
 // other directory in root that holds a prefs.js, named by what follows its
 // first ".". Firefox's new profile switcher lists its profiles only in an
@@ -123,7 +124,11 @@ func (b Browser) Profiles(root string) ([]chrome.Profile, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no %s profiles in %s; start %s once and close it", b.Name, root, b.Name)
 	}
-	slices.SortFunc(out, func(a, b chrome.Profile) int { return strings.Compare(a.Dir, b.Dir) })
+	// Ties (two absolute paths with one base name) go by Dir, so the
+	// numbers install prints stay the same from one run to the next.
+	slices.SortFunc(out, func(a, b chrome.Profile) int {
+		return cmp.Or(chrome.CompareIDs(a.ID(), b.ID()), strings.Compare(a.Dir, b.Dir))
+	})
 	return out, nil
 }
 

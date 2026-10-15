@@ -56,13 +56,19 @@ func TestInstallAndBind(t *testing.T) {
 		roundDone(t, c.b, c.b.Name+" round after binding")
 	}
 
+	// Without --profile, install lists and changes nothing.
+	out := e.mm(t, "install", "--user-data-dir", e.A.UDD)
+	if !strings.Contains(out, "  0  Default") || !strings.Contains(out, "bound") || !strings.Contains(out, "Nothing was changed.") {
+		t.Fatalf("listing:\n%s", out)
+	}
+
 	// Installing again in a bound profile keeps its database, and the
 	// extension lets go of the old host and connects to a new one.
 	old := hostPIDs(t, e, e.DBA)
 	if len(old) != 1 {
 		t.Fatalf("want one host for a before binding again, got pids %v", old)
 	}
-	if out := e.mm(t, "install", "--user-data-dir", e.A.UDD); !strings.Contains(out, "bound: Default -> "+e.DBA) {
+	if out := e.mm(t, "install", "--user-data-dir", e.A.UDD, "--profile", "Default"); !strings.Contains(out, "bound: Default -> "+e.DBA) {
 		t.Fatalf("second install rebound to another database:\n%s", out)
 	}
 	// The host logs its hello only once it holds the database's lock, so a
