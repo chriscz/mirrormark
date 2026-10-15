@@ -153,8 +153,29 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **Effect:** a spurious red `make`. It passed 10 times alone and in 3 more
   full runs.
 - **Found:** a full `make` while building the profile listing, 2026-10-15.
-- **Fix:** find the timing assumption the test makes and wait for the
-  condition instead.
+  Seen again in a full `make` while building `mirrormark serve`,
+  2026-10-15; it passed 20 times alone straight after.
+- **Cause (likely):** the test calls `a.sendTree()` and only then reads
+  `rounds` from `a.count()`. If the round that tree starts sends its status
+  before the read, `rounds` already counts it, and nothing else starts a
+  round, so "the next round" never comes.
+- **Fix:** read `rounds` before `a.sendTree()`.
+
+### `TestClosedBrowserCatchesUpOnStart/firefox-firefox` failed once
+
+- **Where:** `e2e/sync_test.go`, `TestClosedBrowserCatchesUpOnStart`, the
+  Developer Edition pair.
+- **What:** after B restarted, the test timed out after 10 s waiting for B
+  to catch up, and printed no connect latency for B, so B's host most
+  likely never connected within the wait.
+- **Effect:** a spurious red `check-e2e`. The test passed 3 times alone
+  straight after, with B connecting about 1.2 s after launch.
+- **Found:** a full `make check-e2e` while building `mirrormark serve`
+  (native messaging, which this change did not alter), 2026-10-15.
+- **Fix:** none yet. A likely cause is Gecko dropping an extension's first
+  connection about 10 s after start, as the localhost transport spike saw,
+  and the reconnect alarm coming after the wait ends. Look at the host log
+  of a failing run before widening the wait.
 
 ## Manual checks still to do
 
