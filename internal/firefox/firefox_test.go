@@ -226,6 +226,50 @@ func TestCheckTakesOnlyDeveloperEdition(t *testing.T) {
 	}
 }
 
+// Each file Check reads that is missing, unreadable or says nothing makes
+// it refuse, never take the profile: only a profile known to be Developer
+// Edition's may have its add-on checks turned off.
+func TestCheckRefusesWhatItCannotRead(t *testing.T) {
+	compat := func(body string) func(t *testing.T, ff, dir string) {
+		return func(t *testing.T, ff, dir string) {
+			must(t, os.WriteFile(filepath.Join(dir, "compatibility.ini"), []byte(body), 0o644))
+		}
+	}
+	unreadable := func(path func(ff, dir string) string) func(t *testing.T, ff, dir string) {
+		return func(t *testing.T, ff, dir string) {
+			p := path(ff, dir)
+			must(t, os.Remove(p))
+			must(t, os.Mkdir(p, 0o755)) // reading it fails, even as root
+		}
+	}
+	prefsOf := func(ff, _ string) string { return filepath.Join(ff, "defaults", "pref", "channel-prefs.js") }
+	for _, c := range []struct {
+		name  string
+		spoil func(t *testing.T, ff, dir string)
+		want  string
+	}{
+		{"compatibility.ini without LastPlatformDir", compat("[Compatibility]\nLastVersion=159.0\n"), "names no browser (LastPlatformDir)"},
+		{"LastPlatformDir outside [Compatibility]", compat("[Other]\nLastPlatformDir=/x\n"), "names no browser (LastPlatformDir)"},
+		{"unreadable compatibility.ini", unreadable(func(_, dir string) string { return filepath.Join(dir, "compatibility.ini") }), "cannot tell which browser uses"},
+		{"missing channel-prefs.js", func(t *testing.T, ff, dir string) { must(t, os.Remove(prefsOf(ff, dir))) }, "cannot read the update channel"},
+		{"unreadable channel-prefs.js", unreadable(prefsOf), "cannot read the update channel"},
+		{"channel-prefs.js without a channel", func(t *testing.T, ff, dir string) {
+			must(t, os.WriteFile(prefsOf(ff, dir), []byte("// nothing\n"), 0o644))
+		}, "no update channel"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ff, dir := geckoInstall(t, "Firefox", "aurora")
+			if _, err := Firefox.Check(dir); err != nil {
+				t.Fatalf("before: %v", err)
+			}
+			c.spoil(t, ff, dir)
+			if bin, err := Firefox.Check(dir); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %q, %v; want a refusal saying %q", bin, err, c.want)
+			}
+		})
+	}
+}
+
 func TestUUIDFromPrefs(t *testing.T) {
 	dir := t.TempDir()
 	if u, err := UUID(dir); u != "" || err != nil {
