@@ -1671,7 +1671,13 @@ func TestUninstallFromABrowserNeverInstalledSaysSo(t *testing.T) {
 			if code := run([]string{"uninstall", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			if strings.Contains(out.String(), "Brave removes mirrormark") || !strings.Contains(out.String(), "mirrormark is not installed in Brave") {
+			// Without the key no extension id exists, so Brave's file
+			// cannot be looked for.
+			want := "mirrormark is not installed in Brave: no Brave database, and without the key its file cannot be checked.\n"
+			if chromeInstalled {
+				want = "mirrormark is not installed in Brave: no Brave file and no Brave database.\n"
+			}
+			if strings.Contains(out.String(), "Brave removes mirrormark") || !strings.Contains(out.String(), want) {
 				t.Fatalf("output:\n%s", out.String())
 			}
 			if chromeInstalled {
@@ -1966,6 +1972,25 @@ func TestServiceWithoutSystemd(t *testing.T) {
 	}
 	mustBeGone(t, "uninstall", unitPath(p))
 	if !strings.Contains(out.String(), "Removed "+unitPath(p)+". If you run mirrormark serve yourself, stop it.") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+// Without the key, uninstalling one Chromium browser still keeps the CRX
+// and the unpacked extension while the other one uses them.
+func TestKeylessUninstallKeepsTheFilesTheOtherBrowserUses(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	installChromium(t, "chrome", "brave")
+	must(t, os.Remove(filepath.Join(p.Data, "extension.pem")))
+	var out, errb bytes.Buffer
+	if code := run([]string{"uninstall", "--browser", "brave"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustExist(t, "uninstall", filepath.Join(p.Data, "mirrormark.crx"), filepath.Join(p.Data, "extension"))
+	if !strings.Contains(out.String(), "Kept the CRX, which Chrome still uses.") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 }

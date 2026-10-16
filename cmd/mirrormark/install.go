@@ -762,6 +762,10 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
+		// Without the id, the other Chromium browsers that use the shared
+		// files are those with a database or a file that names the CRX.
+		others = otherUsers(p, cb.Config, stderr)
+		users = others.chromium
 		fmt.Fprintf(stdout, "No key in %s, so the extension id is unknown. Remove %s by hand if it is there.\n",
 			keyFile, filepath.Join(sysroot, cb.ExternalFile("<id>")))
 		if _, err := os.Stat(unitPath(p)); err == nil {
@@ -778,9 +782,12 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	if installed {
+	switch {
+	case installed:
 		fmt.Fprintf(stdout, "%s removes mirrormark from every profile when it next starts. Your bookmarks stay in %s.\n", cb.Name, cb.Name)
-	} else {
+	case key == nil:
+		fmt.Fprintf(stdout, "mirrormark is not installed in %s: no %s database, and without the key its file cannot be checked.\n", cb.Name, cb.Name)
+	default:
 		fmt.Fprintf(stdout, "mirrormark is not installed in %s: no %s file and no %s database.\n", cb.Name, cb.Name, cb.Name)
 	}
 	if len(users) > 0 {
