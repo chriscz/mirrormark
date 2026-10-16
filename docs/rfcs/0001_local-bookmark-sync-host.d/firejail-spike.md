@@ -19,11 +19,19 @@ The question came from a desktop: Brave started through firecfg's
 
 | Browser | Under firejail, without a rule | Rule that fixes it | `.local` file |
 | --- | --- | --- | --- |
-| Brave | not installed: the CRX in `~/.local/share/mirrormark` is hidden | `whitelist ${HOME}/.local/share/mirrormark` | `brave.local` |
+| Brave | not installed: the CRX in `~/.local/share/mirrormark` is hidden | `whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx` | `brave.local` |
 | Chrome | not installed: the CRX and `/usr/share/google-chrome/extensions` are hidden | that line **and** `whitelist /usr/share/google-chrome/extensions`; the first alone is not enough | `google-chrome.local` |
 | Developer Edition | installs, binds, connects | none | (`firefox.local`) |
 | LibreWolf | installs, binds, connects | none | (`librewolf.local`) |
 
+- The user's rule, `whitelist ${HOME}/.local/share/mirrormark`, works too,
+  but shows the jailed browser the whole data directory: the databases,
+  with every profile's token, and `serve.lock`. Whitelisting the CRX file
+  alone works as well, and then the jail shows only `mirrormark.crx` in
+  that directory: `profiles/*.yaml` does not exist there, and a file written
+  beside the CRX stays in the jail's tmpfs. The jailed browser can still
+  write the CRX itself; a changed CRX no longer matches the key, so the
+  browser would refuse it rather than run it.
 - With the rule, `install --profile Default` bound Brave and Chrome. The bind
   page was opened by the jailed browser (`firejail /spike-real/brave-browser
   --profile-directory=Default chrome-extension://…`), and the server logged
@@ -101,5 +109,7 @@ Brave still need `--no-sandbox`, which a wrapper on `PATH` after
   (run as the user inside the container), `stopb` and `local_` (write the
   `.local` file).
 - `exp.sh`: prints the layout and the profiles firejail reads, then installs
-  and binds B under firejail, without a rule and with each rule.
+  and binds B under firejail, without a rule and with each rule, and lists
+  what the jail shows of the data directory. The first run whitelisted the
+  data directory; the CRX-only rule replaced it after review.
 - `dbg.sh`: Developer Edition step by step, kept for debugging.

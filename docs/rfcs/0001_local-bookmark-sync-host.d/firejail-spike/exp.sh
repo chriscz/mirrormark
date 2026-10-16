@@ -23,10 +23,19 @@ brave|chrome)
   U $MM install --browser $B --profile Default >/dev/null 2>&1   # writes the files
   echo "## external file: $(ls /usr/share/google-chrome/extensions /opt/brave.com/brave/extensions)"
   echo "## no rule"; start; ready
-  local_ 'whitelist ${HOME}/.local/share/mirrormark'; start; ready
+  # Only the CRX, not the data directory with the databases and tokens.
+  CRX='whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx'
   if [ $B = chrome ]; then
-    local_ 'whitelist ${HOME}/.local/share/mirrormark' 'whitelist /usr/share/google-chrome/extensions'; start; ready
-  fi
+    local_ "$CRX"; start; ready
+    local_ "$CRX" 'whitelist /usr/share/google-chrome/extensions'
+  else local_ "$CRX"; fi
+  start; ready
+  # What the jailed browser's profile shows of the data directory.
+  P=$([ $B = brave ] && echo brave-browser || echo google-chrome)
+  echo "## in the jail: ls data dir: $(U firejail --quiet --profile=$P ls /home/u/.local/share/mirrormark 2>&1 | tr '\n' ' ')"
+  echo "## in the jail: cat profiles/*.yaml: $(U firejail --quiet --profile=$P sh -c 'cat /home/u/.local/share/mirrormark/profiles/*.yaml' 2>&1 | head -2 | tr '\n' ' ')"
+  echo "## in the jail: write next to the CRX: $(U firejail --quiet --profile=$P sh -c 'touch /home/u/.local/share/mirrormark/x && echo wrote || echo refused' 2>&1 | tail -1)"
+  echo "## outside: $(ls /home/u/.local/share/mirrormark | tr '\n' ' ')"
   echo "## the browser the bind opened: $(pgrep -u u -a firejail | head -1 | cut -c1-120)"
   sleep 2; stopb
   ;;

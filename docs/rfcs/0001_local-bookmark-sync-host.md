@@ -552,21 +552,21 @@ Chosen by us within those decisions:
 
 ### 12. Firejail
 
-A user's Brave, started through `firecfg`'s `/usr/local/bin/brave-browser` (a symlink to `/usr/bin/firejail`), never installed mirrormark: firejail's Brave profile hides `~/.local/share/mirrormark`, where the external JSON points at the CRX. Adding `whitelist ${HOME}/.local/share/mirrormark` to `~/.config/firejail/brave.local` fixed it. The user asked that `install` detect firejail and suggest the rule. The firejail spike (`0001_local-bookmark-sync-host.d/firejail-spike.md`) ran firejail 0.9.72 from Ubuntu 24.04 with all four browsers in Docker:
+A user's Brave, started through `firecfg`'s `/usr/local/bin/brave-browser` (a symlink to `/usr/bin/firejail`), never installed mirrormark: firejail's Brave profile hides `~/.local/share/mirrormark`, where the external JSON points at the CRX. Adding `whitelist ${HOME}/.local/share/mirrormark` to `~/.config/firejail/brave.local` fixed it, but that line also shows the jailed browser the databases and their tokens. The user asked that `install` detect firejail and suggest the rule. The firejail spike (`0001_local-bookmark-sync-host.d/firejail-spike.md`) ran firejail 0.9.72 from Ubuntu 24.04 with all four browsers in Docker:
 
-- **Brave** needs `whitelist ${HOME}/.local/share/mirrormark` in `brave.local`, which every Brave command's profile reads. Its external JSON in `/opt/brave.com/brave/extensions` is visible.
+- **Brave** needs `whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx` in `brave.local`, which every Brave command's profile reads. Firejail then shows only the CRX in that directory: no database, token or `serve.lock`. Its external JSON in `/opt/brave.com/brave/extensions` is visible.
 - **Chrome** needs that line and `whitelist /usr/share/google-chrome/extensions` in `google-chrome.local`: its profile shows only listed parts of `/usr/share`, which leave out the external extensions directory.
 - **Developer Edition and LibreWolf** need nothing: the XPI lives in the profile, which their firejail profiles show.
 - With the rule, the jailed extension binds and reaches `ws://127.0.0.1`.
 - Firejail reads `.local` files only from `~/.config/firejail`, not `$XDG_CONFIG_HOME/firejail`.
 
-**Detection.** `install --browser chrome|brave` already finds the browser's command on `PATH`. It counts the browser as jailed when that command, with symlinks followed, is `firejail`, or is a short script (`#!`, at most 4 KiB) that names `firejail`. For a jailed browser it reads `~/.config/firejail/<file>.local`, `brave.local` or `google-chrome.local`, and finds the lines the browser needs that the file lacks. A line counts as present written with `${HOME}` or with the home directory spelled out. When mirrormark's data directory is not under the home directory, `install` suggests no line for it: the spike found `/srv`, `/opt` and `/tmp` paths visible in the jail, and `/mnt` and `/media` blacklisted, where a `whitelist` line does not help.
+**Detection.** `install --browser chrome|brave` looks up the browser's command on `PATH` and its other names (`google-chrome-stable`; `brave-browser-stable` and `brave`, which firecfg may link). It counts the browser as jailed when any of them, with symlinks followed, is `firejail`, or is a short script (`#!`, at most 4 KiB) that runs `firejail` as a command: first on a line or after `;`, `&&`, `||`, `|`, `exec`, `env` or variable assignments, not in a test, an `echo` or a variable's name. For a jailed browser it reads `~/.config/firejail/<file>.local`, `brave.local` or `google-chrome.local`, as text, without following `include`, and finds the lines the browser needs that the file lacks. A line counts as present with the home directory written as `${HOME}`, `$HOME`, `~` or spelled out, with or without a trailing `/`. The line names the CRX only, never the data directory. When mirrormark's data directory is not under the home directory, `install` suggests no line for it, since the spike found `/srv`, `/opt` and `/tmp` paths visible in the jail and `/mnt` and `/media` blacklisted, where a `whitelist` line does not help; it says instead that firejail may hide the directory, and to move it under the home folder or allow it in the `.local` file.
 
 **What `install` says.** When lines are missing, `install` says, for example:
 
 ```
 Brave runs under firejail, which hides mirrormark's extension from it. Add the line below to ~/.config/firejail/brave.local, then quit Brave completely (close every window) and start it again.
-  whitelist ${HOME}/.local/share/mirrormark
+  whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx
 ```
 
 It says this in three places: after the profile listing, when some profile is `not installed yet`; before "Restart Brave", when `install` has just written the external file; and in the `not ready` line of a profile that is `not installed yet`, ending with the command to run again. `mirrormark help` notes that a browser under firejail needs a rule, which `install` prints.
@@ -574,7 +574,8 @@ It says this in three places: after the profile listing, when some profile is `n
 **User decisions.**
 
 - `install` detects firejail and prints the lines and the file to add them to; it never edits firejail's files itself;
-- it says nothing when the file already has the lines.
+- it says nothing when the file already has the lines;
+- after review: the line shows only the CRX, never the databases and tokens; a jail is detected only from `firejail` in command position; a data directory outside home gets a hint instead of silence; `-stable` names count.
 
 Chosen by us within those decisions: the 4 KiB limit for a wrapper script; no advice for Developer Edition and LibreWolf, or for a data directory outside the home directory; `brave.local` rather than `brave-browser.local`.
 
@@ -771,3 +772,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-16 — by the user's decisions after restarting the service: a close the server caused reads "mirrormark restarted or stopped; reconnecting…", never a close code, and the extension retries once after 2 s with the alarm as the fallback; opening the popup connects at once when not connected, except after an error a retry cannot fix, with one attempt at a time and a spinner while it tries.
 - 2026-10-16 — as built after the re-review: a dial that timed out gets the same quick retry as a close; a refused upgrade's once-a-minute Info line carries its `Host` and `Origin`; a profile bound without a token is marked `refused`, so the popup shows no spinner for it; `install` does not restart the service over a server started by hand, and says to stop that server.
 - 2026-10-16 — Section 12 and Phase 9 after the firejail spike, at the user's request: `install` detects a Chrome or Brave started through firejail and prints the `whitelist` lines its `.local` file lacks, and the file; it never edits firejail's files, and says nothing when the lines are there. Developer Edition and LibreWolf need no rule.
+- 2026-10-16 — after review of the firejail detection: the rule whitelists only `mirrormark.crx` (verified in the spike: Brave and Chrome install and bind, and the jail shows no database); wrappers count only when they run `firejail` as a command; every name of the browser's command is checked; a data directory outside home gets a hint; the present-line check takes `~`, `$HOME` and a trailing `/`.
