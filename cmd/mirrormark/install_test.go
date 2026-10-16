@@ -799,6 +799,8 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 		t.Fatalf("output does not say what it kept:\n%s", out.String())
 	}
 
+	// A server that has run leaves its lock file behind.
+	must(t, os.WriteFile(p.ServeLock(), nil, 0o600))
 	out.Reset()
 	if code := run([]string{"uninstall", "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())

@@ -776,8 +776,8 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 // browser's databases, with their backups and lock files, and a Chromium
 // browser's key unless keyInUse (another Chromium browser still has the
 // extension) or another Chromium browser's database is left. The config,
-// the log and the rest of the data directory go only with the last
-// database: another browser's profiles still sync through them, and its
+// the log, the server's lock and the rest of the data directory go only
+// with the last database: another browser's profiles still sync through them, and its
 // uninstall needs its databases to find its profiles.
 func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
@@ -818,7 +818,7 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 		files = append(files, filepath.Join(p.Data, "extension.pem"))
 	}
 	if len(others) == 0 {
-		files = append(files, p.ConfigFile(), p.GlobalLock())
+		files = append(files, p.ConfigFile(), p.GlobalLock(), p.ServeLock())
 		dirs = append(dirs, p.ProfilesDir(), filepath.Join(p.Data, "backups"), p.State)
 	}
 	if err := chrome.RemoveFiles(files); err != nil {
