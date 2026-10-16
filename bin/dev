@@ -26,16 +26,34 @@ EOF
 
 image_build() { docker build -t "$IMAGE" "$ROOT"; }
 
+# accounts writes copies of the image's /etc/passwd and /etc/group to
+# .cache/, with an entry for your UID and GID if the image lacks one, and
+# sets MOUNTS to the -v options that mount them. dbus-daemon, which the e2e
+# tests start, refuses to run as a user it cannot look up.
+accounts() {
+    local uid gid dir="$ROOT/.cache/accounts"
+    uid="$(id -u)" gid="$(id -g)"
+    mkdir -p "$dir"
+    docker run --rm "$IMAGE" cat /etc/passwd >"$dir/passwd"
+    docker run --rm "$IMAGE" cat /etc/group >"$dir/group"
+    grep -q "^[^:]*:[^:]*:$uid:" "$dir/passwd" ||
+        echo "dev:x:$uid:$gid:dev:/tmp:/bin/bash" >>"$dir/passwd"
+    grep -q "^[^:]*:[^:]*:$gid:" "$dir/group" ||
+        echo "dev:x:$gid:" >>"$dir/group"
+    MOUNTS=(-v "$dir/passwd:/etc/passwd:ro" -v "$dir/group:/etc/group:ro")
+}
+
 container() {
     docker image inspect "$IMAGE" >/dev/null 2>&1 || image_build
     local tty=()
     [ -t 0 ] && tty=(-t)
+    accounts
     # HOME=/tmp: your UID has no home directory in the image. --init: as
     # PID 1, make would ignore the SIGTERM a stopped bin/dev passes on and
     # keep the container up; an init process ends it with its children.
     docker run --rm -i --init "${tty[@]}" -u "$(id -u):$(id -g)" -e HOME=/tmp \
         -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/mod -e GOFLAGS=-modcacherw \
-        -v "$ROOT":/src "$IMAGE" "$@"
+        "${MOUNTS[@]}" -v "$ROOT":/src "$IMAGE" "$@"
 }
 
 case "${1:-help}" in
