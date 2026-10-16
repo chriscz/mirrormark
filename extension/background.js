@@ -165,8 +165,9 @@ async function open() {
   const { db, token } = await chrome.storage.local.get(["db", "token"]);
   if (!db) return; // not bound: stay dormant
   if (!token) {
-    // Bound by a build that had no tokens: nothing could prove itself.
-    await setStatus({ error: NOT_BOUND, problems: [] });
+    // Bound by a build that had no tokens: nothing could prove itself, and
+    // nothing will until install runs again, so the popup shows no spinner.
+    await setStatus({ error: NOT_BOUND, problems: [], refused: true });
     return;
   }
   const { sock: s, failure, hostError: refused, timedOut } = await dial(db, token);
@@ -216,7 +217,8 @@ async function open() {
     sock = null;
     console.info("mirrormark: the connection closed with code", ev.code);
     // The host's own error says more than the close.
-    if (!hostError) setStatus({ error: CLOSED });
+    // A refusal from before this connection no longer holds.
+    if (!hostError) setStatus({ error: CLOSED, refused: false });
     if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
     // The alarm stays as the fallback, for a background stopped before
     // the quick retry runs.
