@@ -60,8 +60,9 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	defer cancel()
 	sv := &server{ctx: ctx, o: o, addr: ln.Addr().String(), port: port}
 	sv.refused.msg, sv.unproven.msg = "refused a connection", "dropped a connection that did not prove itself"
-	// Only the handshake goes through HTTP, so its headers are small.
-	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10, Handler: sv}
+	// Only the handshake goes through HTTP, so its headers are small, and a
+	// keep-alive connection that only got refused is closed once idle.
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, IdleTimeout: helloWait, MaxHeaderBytes: 8 << 10, Handler: sv}
 	go func() {
 		<-ctx.Done()
 		srv.Close() // stops accepting; hijacked connections end with their hosts

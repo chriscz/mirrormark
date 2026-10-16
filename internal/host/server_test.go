@@ -592,6 +592,30 @@ func TestServeLogsUnprovenConnectionsBriefly(t *testing.T) {
 	}
 }
 
+// A keep-alive connection that only ever gets refused is closed once it
+// has been idle for the hello wait, so no program can hold one for ever.
+func TestServeClosesIdleKeepAliveConnections(t *testing.T) {
+	host.SetHelloWait(t, 100*time.Millisecond)
+	p := paths(t)
+	addr := serve(t, p, time.Hour)
+	nc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	nc.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\n\r\n")
+	br := bufio.NewReader(nc)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("got %v %v, want 403", resp, err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Fatalf("read %v, want the server to close the idle connection", err)
+	}
+}
+
 // A database file that exists but cannot be read is the server's problem:
 // the log has the details, and the unproven peer only db-missing.
 func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {
