@@ -36,6 +36,7 @@ Commands:
   unpack      Write the extension, with this install's key, for Load unpacked
               [DIR]
   serve       Run the server the extensions connect to
+  version     Print the version
   help        Show this help
 
 Sharing folders:
@@ -91,6 +92,18 @@ func unionExample(indent string, ids ...string) string {
 	return indent + strings.Join(lines, "\n"+indent) + "\n"
 }
 
+// version is the release version, set by make dist with -ldflags -X.
+var version string
+
+// releaseVersion is the release version, or for any other build the version of
+// the extension it embeds, which make dist requires to be the same.
+func releaseVersion() (string, error) {
+	if version != "" {
+		return version, nil
+	}
+	return extension.Version()
+}
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage(stderr)
@@ -108,6 +121,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdUnpack(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stderr)
+	case "version", "--version":
+		v, err := releaseVersion()
+		if err != nil {
+			fmt.Fprintln(stderr, "mirrormark:", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "mirrormark", v)
+		return 0
 	}
 	fmt.Fprintf(stderr, "mirrormark: unknown command %q\n", args[0])
 	usage(stderr)

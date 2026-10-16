@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/db"
 )
 
@@ -35,6 +36,23 @@ func TestHelp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage: mirrormark") {
 		t.Fatalf("stdout %q has no usage", out.String())
+	}
+}
+
+// A build without a release version prints the embedded extension's.
+func TestVersion(t *testing.T) {
+	want, err := extension.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{"version", "--version"} {
+		var out, errb bytes.Buffer
+		if code := run([]string{arg}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit code %d, want 0; stderr %q", arg, code, errb.String())
+		}
+		if got := out.String(); got != "mirrormark "+want+"\n" {
+			t.Fatalf("%s: stdout %q, want %q", arg, got, "mirrormark "+want+"\n")
+		}
 	}
 }
 
