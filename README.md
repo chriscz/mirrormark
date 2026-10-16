@@ -103,11 +103,11 @@ for a restart, and the second binds each profile again, so that it gets
 its token. A native messaging host manifest that such a build left
 (`/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`,
 or `~/.mozilla/native-messaging-hosts/` for Firefox) does nothing now, and
-`uninstall` removes it. If the new
-build has the same extension version, `install` leaves the system file
-alone and Chrome keeps its copy of the extension, even if the extension's
-files changed (see [Development](#development)). `install` restarts the
-service on every run, so after upgrading the binary it runs the new one.
+`uninstall` removes it. If the new build has the same extension version,
+`install` leaves the system file alone and Chrome keeps its copy of the
+extension, even if the extension's files changed (see
+[Development](#development)). `install` restarts the service on every run,
+so after upgrading the binary it runs the new one.
 
 `mirrormark uninstall` removes Chrome's system file (with `sudo rm` if
 needed), the CRX and the unpacked extension, and an old host manifest if it
@@ -294,7 +294,9 @@ lose its binding at each restart; the popup then says it is not bound.
 | `~/.config/systemd/user/mirrormark.service` | The systemd user service that runs `mirrormark serve`, written by `install`; `uninstall` removes it with the last browser. |
 | `~/.local/state/mirrormark/log` | The server's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when the server starts. |
 
-The token travels in the bind page's URL, which is a command-line argument of the browser process. On Linux, other local users can read it with `ps` or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
+The token travels in the bind page's URL, which is a command-line argument
+of the browser process. On Linux, other local users can read it with `ps`
+or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set;
 `mirrormark help` lists them where they are for you.
@@ -373,8 +375,8 @@ shows:
 
 - the database the profile syncs as, such as `Syncs as chrome-work.`, or
   that the profile is not bound;
-- why the host stopped, if it did, such as `db-locked: …`, or that
-  mirrormark is not running;
+- why the server stopped syncing the profile, if it did, such as
+  `db-locked: …`, or that mirrormark is not running;
 - each problem the last round found, as `<code>: <message>`, such as
   `union-skipped: …` or `db-mismatch: …`. A problem stays until a round no
   longer finds it, so nothing below the binding means the last round synced
@@ -491,7 +493,7 @@ only the dev image lets your user write. Besides installing and binding
 in each of the four browsers, they share a folder between the two instances and check that each kind of
 edit, a delete, restore and purge, a conflict, the first sync of two filled
 folders and a closed browser's catch-up reach both, with no warning in the
-host's log. One test stops the server, puts a program that cannot prove
+server's log. One test stops the server, puts a program that cannot prove
 itself on the first port, starts the server again on the second, and
 checks that the extension skips that program and syncs again. Each edit
 must reach the other running browser within 3
