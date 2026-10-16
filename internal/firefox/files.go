@@ -1,8 +1,6 @@
 package firefox
 
 import (
-	"archive/zip"
-	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -45,30 +43,7 @@ var zipTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // XPI zips the embedded extension as it is: Firefox ignores Chrome's
 // service_worker, and the XPI needs no key.
-func XPI() ([]byte, error) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	err := fs.WalkDir(extension.Files, ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		data, err := extension.Files.ReadFile(name)
-		if err != nil {
-			return err
-		}
-		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: zipTime})
-		if err != nil {
-			return err
-		}
-		_, err = w.Write(data)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	err = zw.Close()
-	return buf.Bytes(), err
-}
+func XPI() ([]byte, error) { return extension.Zip(zipTime) }
 
 // XPIPath is where Firefox looks for the add-on in one profile.
 func XPIPath(profileDir string) string {

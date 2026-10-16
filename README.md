@@ -524,6 +524,7 @@ machine except Docker.
     bin/dev run make check-race  # the unit tests under the race detector
     bin/dev run make check-e2e   # end-to-end tests in real browsers
     bin/dev run make check-e2e RUN=TestInstallAndBind  # one of them
+    bin/dev run make dist        # release archives and SHA256SUMS in build/dist/
     bin/dev shell                # a shell in the dev container
 
 The end-to-end tests run real browsers from the dev image under Xvfb:

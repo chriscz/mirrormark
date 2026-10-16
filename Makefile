@@ -41,6 +41,36 @@ check-e2e: build
 		$(GO) test -tags e2e -count=1 -timeout 60m -v ./e2e/ $(if $(RUN),-run '$(RUN)')
 .PHONY: check-e2e
 
+# Release artefacts in build/dist/, with their SHA256SUMS. VERSION defaults
+# to the extension's version in extension/manifest.json, the one place it is
+# written, and must equal it: raise it there to release. Every archive entry
+# is dated SOURCE_DATE_EPOCH, by default the HEAD commit's time, so building
+# one commit twice gives the same bytes.
+MANIFEST_VERSION := $(shell sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' extension/manifest.json)
+VERSION ?= $(MANIFEST_VERSION)
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)
+DIST := build/dist
+ARCHES := amd64 arm64
+DIST_FILES := $(foreach a,$(ARCHES),mirrormark_$(VERSION)_linux_$(a).tar.gz) \
+	mirrormark-extension_$(VERSION).zip mirrormark_$(VERSION).xpi
+
+dist:
+	@[ "$(VERSION)" = "$(MANIFEST_VERSION)" ] || { echo "VERSION $(VERSION) is not $(MANIFEST_VERSION), the version in extension/manifest.json: raise it there first"; exit 1; }
+	rm -rf $(DIST) build/stage
+	mkdir -p $(DIST)
+	set -e; for a in $(ARCHES); do \
+		d=mirrormark_$(VERSION)_linux_$$a; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -trimpath -buildvcs=false \
+			-ldflags '-X main.version=$(VERSION)' -o build/stage/$$d/mirrormark ./cmd/mirrormark; \
+		SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(GO) run ./cmd/dist tar $(DIST)/$$d.tar.gz $$d \
+			build/stage/$$d/mirrormark LICENSE README.md; \
+	done
+	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(GO) run ./cmd/dist zip $(DIST)/mirrormark-extension_$(VERSION).zip
+	$(GO) run ./cmd/dist xpi $(DIST)/mirrormark_$(VERSION).xpi
+	cd $(DIST) && sha256sum $(DIST_FILES) > SHA256SUMS
+	cat $(DIST)/SHA256SUMS
+.PHONY: dist
+
 clean:
 	rm -rf build
 .PHONY: clean

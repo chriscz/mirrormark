@@ -20,12 +20,15 @@
 package extension
 
 import (
+	"archive/zip"
+	"bytes"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // GeckoID is the extension's id in Firefox. Firefox does not derive ids from
@@ -63,6 +66,33 @@ func Unpack(dir string, publicKeyDER []byte) error {
 		}
 		return os.WriteFile(filepath.Join(dir, name), data, 0o644)
 	})
+}
+
+// Zip zips the extension's files as they are embedded, in name order,
+// each dated modified, so the same files and time give the same bytes.
+func Zip(modified time.Time) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err := fs.WalkDir(Files, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := Files.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: modified})
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = zw.Close()
+	return buf.Bytes(), err
 }
 
 // Version is the extension's version from manifest.json, the one place it
