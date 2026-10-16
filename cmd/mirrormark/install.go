@@ -172,6 +172,10 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
 		return 0
 	}
+	if !serverRunning(p) {
+		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", again(cb.InstallCommand(), uddFlag, chosen[0].ID()))
+		return 1
+	}
 	want, err := extension.Version()
 	if err != nil {
 		return fail(err)
@@ -410,6 +414,10 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	if !current {
 		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run mirrormark install --browser %s again to bind them.\n", b.Name, b.Config)
 		return 0
+	}
+	if !serverRunning(p) {
+		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", again("mirrormark install --browser "+b.Config, udd, targets[0].c.ID()))
+		return 1
 	}
 	want, err := extension.Version()
 	if err != nil {

@@ -2,10 +2,14 @@
 // binary so one file installs everything. The extension is plain JavaScript
 // with no build step: these files are what Chrome and Firefox load.
 //
-// The extension stays dormant until bind.html#<database id> stores the
-// profile's binding in chrome.storage.local. It then connects to the native
-// host, says hello, and sends the whole bookmark tree after hello, after each
-// batch it applies, and after 0.5 s without bookmark events. At the first
+// The extension stays dormant until bind.html#<database id>.<token> stores
+// the profile's binding in chrome.storage.local. It then connects to
+// mirrormark serve over a WebSocket on 127.0.0.1, trying the ports in
+// ports.json in order, and says hello. The server proves it holds the
+// profile's token before the extension proves it does; the token itself
+// never goes on the socket. The extension sends the whole bookmark tree
+// after the proof, after each batch it applies, and after 0.5 s without
+// bookmark events. At the first
 // bookmark event of a burst it sends "changed", so the host waits for that
 // tree. It runs each apply batch's ops in order, stops at the first failure
 // and answers the rest "not run". The popup shows the binding, why the host
@@ -23,7 +27,8 @@ import (
 	"path/filepath"
 )
 
-// HostName is the native messaging host name; background.js uses the same.
+// HostName is the native messaging host name, which the binary still
+// installs; the extension no longer connects to it.
 const HostName = "com.github.chriscz.mirrormark"
 
 // GeckoID is the extension's id in Firefox. Firefox does not derive ids from

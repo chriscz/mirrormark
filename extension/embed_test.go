@@ -35,6 +35,9 @@ func TestUnpackWritesFilesAndKey(t *testing.T) {
 		HostPermissions        []string `json:"host_permissions"`
 		WebAccessibleResources []string `json:"web_accessible_resources"`
 		Version                string   `json:"version"`
+		CSP                    struct {
+			ExtensionPages string `json:"extension_pages"`
+		} `json:"content_security_policy"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
@@ -42,21 +45,19 @@ func TestUnpackWritesFilesAndKey(t *testing.T) {
 	if m.Key != base64.StdEncoding.EncodeToString(pub) {
 		t.Fatalf("key %q", m.Key)
 	}
-	if strings.Join(m.Permissions, ",") != "alarms,bookmarks,nativeMessaging,storage" {
+	if strings.Join(m.Permissions, ",") != "alarms,bookmarks,storage" {
 		t.Fatalf("permissions %v", m.Permissions)
 	}
 	if m.HostPermissions != nil || m.WebAccessibleResources != nil {
 		t.Fatalf("host permissions %v, web-accessible resources %v", m.HostPermissions, m.WebAccessibleResources)
 	}
+	// Gecko's default policy upgrades ws:// to wss://, which no local
+	// server answers; this one leaves it alone.
+	if m.CSP.ExtensionPages != "script-src 'self'" {
+		t.Fatalf("content security policy %q", m.CSP.ExtensionPages)
+	}
 	if v, _ := Version(); v != m.Version || v == "" {
 		t.Fatalf("Version() %q, manifest %q", v, m.Version)
-	}
-}
-
-func TestBackgroundUsesHostName(t *testing.T) {
-	js, _ := Files.ReadFile("background.js")
-	if !strings.Contains(string(js), `const HOST = "`+HostName+`";`) {
-		t.Fatal("background.js and HostName disagree")
 	}
 }
 

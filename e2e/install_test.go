@@ -4,18 +4,25 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/chriscz/mirrormark/extension"
 	"github.com/chriscz/mirrormark/internal/db"
+	"github.com/chriscz/mirrormark/internal/host"
+	"github.com/chriscz/mirrormark/internal/ws"
 )
 
 // roundDone waits until the host has finished a round for b with nothing
@@ -67,17 +74,17 @@ func TestInstallAndBind(t *testing.T) {
 
 	// Installing again in a bound profile keeps its database, and the
 	// extension lets go of the old host and connects to a new one.
-	old := hostPIDs(t, e, e.DBA)
+	old := connections(t, e, e.DBA)
 	if len(old) != 1 {
-		t.Fatalf("want one host for a before binding again, got pids %v", old)
+		t.Fatalf("want one connection for a before binding again, got %v", old)
 	}
 	if out := e.mm(t, "install", "--user-data-dir", e.A.UDD, "--profile", "Default"); !strings.Contains(out, "bound: Default -> "+e.DBA) {
 		t.Fatalf("second install rebound to another database:\n%s", out)
 	}
 	// The host logs its hello only once it holds the database's lock, so a
 	// second hello means the old host let go of it.
-	eventually(t, 10*time.Second, "a new host for a", func() bool { return len(hostPIDs(t, e, e.DBA)) == 2 })
-	eventually(t, 10*time.Second, "the old host to exit", func() bool { return exited(old[0]) })
+	eventually(t, 10*time.Second, "a new connection for a", func() bool { return len(connections(t, e, e.DBA)) == 2 })
+	eventually(t, 10*time.Second, "the old connection to close", func() bool { return closed(t, e, old[0]) })
 	// With the old host gone, a status after an edit comes from the new one.
 	eval[bool](t, e.A, `chrome.storage.local.remove("status").then(() => true)`)
 	e.A.Add(t, "other", "Example", "https://example.com/")
@@ -98,6 +105,76 @@ func TestInstallAndBind(t *testing.T) {
 	eventually(t, 15*time.Second, "a hello after restart", func() bool {
 		return db.Connected(e.Paths, e.DBA, before)
 	})
+}
+
+// impostor holds the first port with a program that accepts any upgrade
+// and answers every hello with a challenge it cannot back, as another
+// user's program could. It returns the types of the messages it received.
+func impostor(t *testing.T) func() []string {
+	ports, err := extension.Ports()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(ports[0])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := ws.Upgrade(w, r, 1<<20)
+		if err != nil {
+			return
+		}
+		defer c.Close(1000, "")
+		for {
+			b, err := c.Read()
+			if err != nil {
+				return
+			}
+			var m host.Msg
+			json.Unmarshal(b, &m)
+			mu.Lock()
+			got = append(got, m.Type)
+			mu.Unlock()
+			if m.Type == "hello" {
+				b, _ := json.Marshal(host.Msg{V: host.Version, Type: "challenge", Nonce: strings.Repeat("0", 64), Proof: strings.Repeat("0", 64)})
+				c.Write(b)
+			}
+		}
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(got)
+	}
+}
+
+// TestReconnectsAfterServerRestart: with the server gone, the popup says
+// mirrormark is not running. Once it is back, on the second port because a
+// program that cannot prove itself holds the first, the extension skips
+// that program, tells it nothing more than its hello, and syncs again.
+func TestReconnectsAfterServerRestart(t *testing.T) {
+	e := setup(t)
+	roundDone(t, e.A, "a's first round")
+	e.stopServer(t)
+	// The close sets the 30 s reconnect alarm; the attempt it starts finds
+	// no server.
+	eventually(t, 70*time.Second, "the popup to say mirrormark is not running", func() bool {
+		return eval[bool](t, e.A, `chrome.storage.local.get("status").then((r) => (r.status?.error ?? "").startsWith("mirrormark is not running"))`)
+	})
+	got := impostor(t)
+	before := time.Now()
+	e.serve(t) // the first port is taken, so it listens on the second
+	eventually(t, 70*time.Second, "a proven connection after the server came back", func() bool {
+		return db.Connected(e.Paths, e.DBA, before)
+	})
+	roundDone(t, e.A, "a round after the restart")
+	if types := got(); !slices.Contains(types, "hello") || slices.Contains(types, "proof") || slices.Contains(types, "tree") {
+		t.Fatalf("the program on the first port received %q; want hellos only", types)
+	}
 }
 
 // TestBindStartsChrome follows a user who runs install's second pass
@@ -160,12 +237,12 @@ func TestFirefoxInstallAndBind(t *testing.T) {
 
 	// Binding a running profile again goes through D-Bus to the running
 	// Firefox, and the extension moves to a new host.
-	old := hostPIDs(t, e, e.DBA)
+	old := connections(t, e, e.DBA)
 	if out := e.mm(t, "install", "--browser", "firefox", "--profile", "a"); !strings.Contains(out, "bound: a -> "+e.DBA) {
 		t.Fatalf("second install:\n%s", out)
 	}
-	eventually(t, 10*time.Second, "a new host for a", func() bool { return len(hostPIDs(t, e, e.DBA)) == len(old)+1 })
-	eventually(t, 10*time.Second, "the old host to exit", func() bool { return exited(old[len(old)-1]) })
+	eventually(t, 10*time.Second, "a new connection for a", func() bool { return len(connections(t, e, e.DBA)) == len(old)+1 })
+	eventually(t, 10*time.Second, "the old connection to close", func() bool { return closed(t, e, old[len(old)-1]) })
 
 	// A restart keeps the binding: the event page starts with the profile.
 	before := time.Now()
@@ -301,20 +378,32 @@ func exited(pid int) bool {
 	return err != nil || strings.HasPrefix(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " Z")
 }
 
-var connectedRe = regexp.MustCompile(`msg=connected pid=(\d+) db=(\S+)`)
+var (
+	connectedRe    = regexp.MustCompile(`msg=connected pid=\d+ conn=(\d+) db=(\S+)`)
+	disconnectedRe = regexp.MustCompile(`msg=disconnected pid=\d+ conn=(\d+)`)
+)
 
-// hostPIDs lists the pids of the hosts that said hello for database id, in
-// the order of the log.
-func hostPIDs(t *testing.T, e *Env, id string) []int {
+// connections lists the numbers of the connections whose hello for
+// database id the server accepted, in the order of the log.
+func connections(t *testing.T, e *Env, id string) []string {
 	t.Helper()
-	var pids []int
+	var out []string
 	for _, m := range connectedRe.FindAllStringSubmatch(hostLog(t, e), -1) {
 		if m[2] == id {
-			pid, _ := strconv.Atoi(m[1])
-			pids = append(pids, pid)
+			out = append(out, m[1])
 		}
 	}
-	return pids
+	return out
+}
+
+// closed reports whether connection conn has ended.
+func closed(t *testing.T, e *Env, conn string) bool {
+	for _, m := range disconnectedRe.FindAllStringSubmatch(hostLog(t, e), -1) {
+		if m[1] == conn {
+			return true
+		}
+	}
+	return false
 }
 
 func hostLog(t *testing.T, e *Env) string {

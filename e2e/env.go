@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,6 +44,8 @@ type Env struct {
 	A, B           *Browser
 	DBA, DBB       string
 	LabelA, LabelB string
+	server         *exec.Cmd // the running mirrormark serve, or nil
+	listens        int       // how many times a server of this test has listened
 }
 
 var extIDRe = regexp.MustCompile(`Extension ID: ([a-p]{32})`)
@@ -107,7 +111,37 @@ func newEnv(t *testing.T) *Env {
 		}
 	}
 	e.env = append(e.env, "HOME="+home)
+	e.serve(t)
 	return e
+}
+
+// serve starts the test's mirrormark server, as the user's systemd service
+// would; the dev image has no user session for systemd. It stops when the
+// test ends, before the home directory goes.
+func (e *Env) serve(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command(bin, "serve")
+	cmd.Env = e.env
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	e.server = cmd
+	t.Cleanup(func() { e.stopServer(t) })
+	eventually(t, 5*time.Second, "the server to listen", func() bool {
+		b, _ := os.ReadFile(e.Paths.LogFile())
+		return bytes.Count(b, []byte("msg=listening")) > e.listens
+	})
+	e.listens++
+}
+
+// stopServer stops the test's server, as a crash or systemctl stop would.
+func (e *Env) stopServer(t *testing.T) {
+	if e.server == nil {
+		return
+	}
+	e.server.Process.Signal(syscall.SIGTERM)
+	e.server.Wait()
+	e.server = nil
 }
 
 // firstInstall prepares both profiles and runs install's first pass,

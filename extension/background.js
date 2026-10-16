@@ -1,16 +1,25 @@
 // mirrormark: sends this profile's bookmark tree to the local mirrormark
-// program and applies the changes it sends back. It stays idle, with no
+// server and applies the changes it sends back. It stays idle, with no
 // connection, until `mirrormark install` binds the profile to a database.
 // Chrome and Firefox install it in every bound profile, so it never
 // uninstalls itself.
-const HOST = "com.github.chriscz.mirrormark";
 const V = 1;
 const QUIET_MS = 500; // send a tree after this long without bookmark events
-const REBIND_MS = 1000; // time for the old host to let go of the database
-// Reconnects wait for an alarm, which Chrome fires no sooner than 30 s.
+const REBIND_MS = 1000; // time for the old connection's host to let go of the database
+// Reconnects wait for an alarm, which the browser fires no sooner than 30 s.
 const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
-const RECONNECT = "reconnect"; // the alarm's name
+const DIAL_MS = 5000; // a port that does not finish the challenge in this time is skipped
+const RECONNECT = "reconnect"; // the one-shot alarm after a connection fails or closes
+// A browser that stops an idle background closes its socket without
+// running onclose; this alarm starts the background again, and it
+// reconnects.
+const TICK = "tick";
+const NOT_RUNNING =
+  "mirrormark is not running. Start it with `systemctl --user start mirrormark`, or run `mirrormark serve`.";
+// The ports the server may listen on, in the order it tries them. The
+// binary reads the same file.
+const PORTS = fetch(chrome.runtime.getURL("ports.json")).then((r) => r.json());
 const ROOTS = { "bookmarks-bar": "toolbar", other: "other", mobile: "mobile" };
 // Firefox has no folderType; its top-level folders have fixed ids.
 const FIREFOX_ROOTS = {
@@ -25,7 +34,7 @@ const [, BROWSER = "Chrome", VERSION = ""] =
 // nothing to sync, and Chrome could not hold them.
 const isSeparator = (n) => n.type === "separator";
 
-let port = null;
+let sock = null;
 let connecting = null;
 let quiet = null;
 let unsent = false; // bookmark events since the last tree; the host knows
@@ -37,16 +46,21 @@ const refs = new Map(); // create ref -> new bookmark id, for later ops' parents
 
 // Chrome starts the service worker for these events and the top-level
 // connect() below runs. Without an onStartup listener the worker does not
-// start when a profile opens. An open native port keeps the worker alive.
+// start when a profile opens.
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
-// The worker stops about 30 s after its port closes, and its timers with
+// The worker stops about 30 s after its socket closes, and its timers with
 // it, so a reconnect waits for an alarm, which starts the worker again.
 chrome.alarms.onAlarm.addListener(async (a) => {
+  if (a.name === TICK) {
+    connect(); // which does nothing while connected or while a reconnect waits
+    return;
+  }
   if (a.name !== RECONNECT) return;
   await chrome.alarms.clear(RECONNECT);
   connect();
 });
+chrome.alarms.get(TICK).then((a) => a ?? chrome.alarms.create(TICK, { periodInMinutes: 1 }));
 // Firefox lacks onChildrenReordered and the import events; adding a
 // listener to a missing one would stop this script here.
 for (const e of [
@@ -60,13 +74,13 @@ for (const e of [
   e?.addListener(changed);
 }
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !(changes.db || changes.boundAt)) return;
+  if (area !== "local" || !(changes.db || changes.token || changes.boundAt)) return;
   // A new binding: reconnect so the host sees a fresh hello. The old host
-  // holds the database's lock until it sees the port close; connecting at
+  // holds the database's lock until it sees the socket close; connecting at
   // once would meet db-locked and the long back-off, so wait a moment.
   binding++;
-  if (port) port.disconnect();
-  port = null;
+  if (sock) sock.close();
+  sock = null;
   backoff = MIN_BACKOFF;
   clearTimeout(rebinding);
   rebinding = setTimeout(async () => {
@@ -79,22 +93,22 @@ chrome.storage.onChanged.addListener((changes, area) => {
 connect();
 
 function changed() {
-  if (!port) {
+  if (!sock) {
     connect(); // which waits out a pending reconnect
     return;
   }
   // Tell the host at once, so it runs no round on the tree before this
   // event while the quiet time runs.
-  if (!unsent) post(port, { v: V, type: "changed" });
+  if (!unsent) post(sock, { v: V, type: "changed" });
   unsent = true;
   clearTimeout(quiet);
   quiet = setTimeout(sendTree, QUIET_MS);
 }
 
-// connect opens the port unless one is open or opening. The finally runs
+// connect opens the socket unless one is open or opening. The finally runs
 // after the assignment even when open returns at once; clearing connecting
 // inside open would run first and leave a settled promise behind, and no
-// later connect would open a port.
+// later connect would open a socket.
 function connect() {
   connecting ??= open().finally(() => {
     connecting = null;
@@ -103,58 +117,151 @@ function connect() {
 }
 
 async function open() {
-  if (port || rebinding) return;
+  if (sock || rebinding) return;
   // After a failed connection the alarm sets the pace, not bookmark events
   // or a restarted worker.
   if (await chrome.alarms.get(RECONNECT)) return;
   const bound = binding;
-  const { db } = await chrome.storage.local.get("db");
+  const { db, token } = await chrome.storage.local.get(["db", "token"]);
   if (!db) return; // not bound: stay dormant
-  if (bound !== binding || port || rebinding) return; // rebound meanwhile
+  const { sock: s, failure, hostError: refused } = await dial(db, token ?? "");
+  if (bound !== binding || sock || rebinding) {
+    s?.close(); // rebound meanwhile
+    return;
+  }
+  if (!s) {
+    await setStatus({ error: failure ?? NOT_RUNNING, problems: [] });
+    // A server that refused this profile will refuse it again; don't ask
+    // every 30 s.
+    chrome.alarms.create(RECONNECT, { when: Date.now() + (refused ? MAX_BACKOFF : MIN_BACKOFF) });
+    return;
+  }
   refs.clear();
-  const p = chrome.runtime.connectNative(HOST);
   const opened = Date.now();
   let hostError = false;
-  port = p;
-  p.onMessage.addListener((m) => {
+  sock = s;
+  s.onmessage = (ev) => {
+    let m;
+    try {
+      m = JSON.parse(ev.data);
+    } catch (e) {
+      console.warn("mirrormark: bad message", e);
+      return;
+    }
+    if (m.type === "ping") {
+      // Gecko stops an event page 30 s after its last extension event,
+      // socket traffic or not; an API call counts as one.
+      chrome.runtime.getPlatformInfo();
+      return;
+    }
     if (m.type === "error") {
-      // The host stops after an error; don't restart it every 30 s. Set
-      // here, not in the queue, so the disconnect that follows already
-      // waits the longer time.
+      // The host stops after an error; don't reconnect every 30 s. Set
+      // here, not in the queue, so the close that follows already waits
+      // the longer time.
       hostError = true;
       backoff = MAX_BACKOFF;
     }
     queue = queue
-      .then(() => onMessage(p, m))
+      .then(() => onMessage(s, m))
       .catch((e) => console.warn("mirrormark: handling", m.type, "failed:", e));
-  });
-  p.onDisconnect.addListener((dp) => {
-    // Firefox puts the reason on the port; Chrome in runtime.lastError.
-    const err = dp?.error?.message ?? chrome.runtime.lastError?.message;
-    if (port !== p) return; // replaced by a newer connection
-    port = null;
-    // The host's own error says more than "Native host has exited".
-    if (err && !hostError) setStatus({ error: err });
+  };
+  s.onclose = (ev) => {
+    if (sock !== s) return; // replaced by a newer connection
+    sock = null;
+    // The host's own error says more than the close.
+    if (!hostError) setStatus({ error: `the connection to mirrormark closed (code ${ev.code})` });
     if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
     chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
-  });
-  // The hello goes out in the same task that sets port, so no tree can
-  // precede it.
-  p.postMessage({ v: V, type: "hello", db, browser: BROWSER.toLowerCase() + "/" + VERSION });
+  };
+  // The hello and the proof went out in dial, so no tree can precede them.
   await sendTree();
 }
 
-function post(p, m) {
-  try {
-    p.postMessage(m);
-  } catch (e) {
-    console.warn("mirrormark: cannot send", m.type, e); // the port closed
+// dial returns { sock } for the first port whose server proves it holds
+// this profile's token, once the extension has sent its own proof. If none
+// does, it returns the first answer to show instead: { failure, hostError }
+// for a server's error, { failure } for a wrong proof, or {} if nothing
+// answered. A port where nothing listens fails at once, and so does one
+// whose server refuses the upgrade, such as another user's mirrormark,
+// which does not know this profile's origin.
+async function dial(db, token) {
+  let first = {};
+  for (const p of await PORTS) {
+    const r = await challenge(p, db, token);
+    if (r.sock) return r;
+    if (first.failure === undefined) first = r;
   }
+  return first;
+}
+
+// challenge runs the hello on port p. The server must prove it holds the
+// token before the extension proves it does, so a program posing as
+// mirrormark learns only the database id and a nonce it cannot use. The
+// token itself never goes on the socket.
+function challenge(p, db, token) {
+  return new Promise((resolve) => {
+    const s = new WebSocket(`ws://127.0.0.1:${p}/`);
+    const nonceE = hex(crypto.getRandomValues(new Uint8Array(32)));
+    let over = false;
+    const done = (r) => {
+      if (over) return;
+      over = true;
+      clearTimeout(t);
+      s.onopen = s.onmessage = s.onerror = s.onclose = null;
+      if (!r.sock) s.close();
+      resolve(r);
+    };
+    const t = setTimeout(() => done({}), DIAL_MS);
+    s.onerror = s.onclose = () => done({});
+    s.onopen = () => post(s, { v: V, type: "hello", db, nonce: nonceE, browser: BROWSER.toLowerCase() + "/" + VERSION });
+    s.onmessage = async (ev) => {
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        m = {};
+      }
+      if (m.type === "ping") return;
+      if (m.type === "error") return done({ failure: `${m.code}: ${m.message}`, hostError: true });
+      // A plain comparison is enough here: each attempt has a new nonce,
+      // so timing it teaches nothing about the next. Without a token
+      // nothing can match, and an empty HMAC key would throw.
+      if (m.type !== "challenge" || !token || m.proof !== (await mac(token, `server:${p}:${nonceE}`))) {
+        return done({ failure: `the program on port ${p} could not prove it is your mirrormark` });
+      }
+      const proof = await mac(token, `extension:${m.nonce}`);
+      if (over) return; // timed out meanwhile
+      post(s, { v: V, type: "proof", proof });
+      done({ sock: s });
+    };
+  });
+}
+
+// mac is HMAC-SHA256 of msg, keyed by the token as text, in lowercase hex,
+// as the server computes it.
+async function mac(token, msg) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(token), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  return hex(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(msg))));
+}
+
+function hex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function post(s, m) {
+  if (s.readyState !== WebSocket.OPEN) {
+    console.warn("mirrormark: cannot send", m.type, "on a closed connection");
+    return;
+  }
+  s.send(JSON.stringify(m));
 }
 
 async function sendTree() {
-  const p = port;
+  const p = sock;
   if (!p) return;
   unsent = false; // an event from here on sends "changed" after this tree
   const [root] = await chrome.bookmarks.getTree();
@@ -180,11 +287,11 @@ async function sendTree() {
 
 async function onMessage(p, m) {
   if (m.type === "error") {
-    // Why the host stopped; shown even if the port has closed since.
+    // Why the host stopped; shown even if the socket has closed since.
     await setStatus({ error: `${m.code}: ${m.message}`, problems: [] });
     return;
   }
-  if (p !== port) return; // from a connection since closed
+  if (p !== sock) return; // from a connection since closed
   if (m.type === "apply") {
     // One at a time, in order: each op assumes the ones before it landed.
     // After the first failure the rest are not run.

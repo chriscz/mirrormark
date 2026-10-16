@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/chriscz/mirrormark/internal/chrome"
 	"github.com/chriscz/mirrormark/internal/db"
@@ -65,6 +66,29 @@ func startServer(p db.Paths, self string, stdout io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// serverWait is how long install waits for a server systemd is starting.
+var serverWait = 5 * time.Second
+
+// serverRunning reports whether a server holds the serve lock. A server
+// that starts during the brief test finds the lock taken, exits, and
+// systemd starts it again.
+func serverRunning(p db.Paths) bool {
+	deadline := time.Now().Add(serverWait)
+	for {
+		unlock, err := db.TryLock(p.ServeLock())
+		if errors.Is(err, db.ErrLocked) {
+			return true
+		}
+		if err == nil {
+			unlock()
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // stopServer stops and removes the user unit unless users, the other

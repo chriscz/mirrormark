@@ -247,13 +247,55 @@ func fakeSystem(t *testing.T) (root string, calls *[][]string) {
 	return root, calls
 }
 
+// fakeServers holds, by path, how to stop each fake server, so a test with
+// two fake browsers starts one and stopFakeServer can stop it.
+var fakeServers = map[string]func(){}
+
+// fakeServer holds the serve lock as a running server would.
+func fakeServer(t *testing.T, p db.Paths) {
+	if _, ok := fakeServers[p.ServeLock()]; ok {
+		return
+	}
+	_, err := os.Stat(p.Data)
+	made := errors.Is(err, fs.ErrNotExist)
+	unlock, err := db.TryLock(p.ServeLock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeServers[p.ServeLock()] = func() {
+		unlock()
+		os.Remove(p.ServeLock())
+		if made {
+			os.Remove(p.Data) // only if nothing else is in it
+		}
+	}
+	t.Cleanup(func() { stopFakeServer(p) })
+}
+
+// stopFakeServer stops the fake server and removes the files it made.
+func stopFakeServer(p db.Paths) {
+	if stop, ok := fakeServers[p.ServeLock()]; ok {
+		stop()
+		delete(fakeServers, p.ServeLock())
+	}
+}
+
+// noServerWait makes install's check for a running server answer at once.
+func noServerWait(t *testing.T) {
+	old := serverWait
+	serverWait = 0
+	t.Cleanup(func() { serverWait = old })
+}
+
 // fakeChromeOnPath puts a google-chrome and a brave-browser on PATH that does what the
 // extension's hello does: touch the lock file of the database the bind URL
-// names, unless $FAKE_NO_HELLO names that database. It logs each call.
+// names, unless $FAKE_NO_HELLO names that database. It logs each call. The
+// hello needs a server, so it holds the serve lock as one would.
 // It sets the time from the clock rather than letting touch take the
 // kernel's file time, which lags the clock by up to a tick and so can fall
 // before the moment Bind started waiting.
 func fakeChromeOnPath(t *testing.T, p db.Paths) (log string) {
+	fakeServer(t, p)
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls")
 	script := "#!/bin/sh\nfor a; do url=$a; done\necho \"$@\" >> " + log + "\n" +
@@ -471,6 +513,31 @@ func TestInstallOpensNothingWhereMirrormarkIsNotReady(t *testing.T) {
 	}
 }
 
+// TestInstallBindsNothingWithoutAServer: no profile can report in while
+// no server runs, so install opens no bind page and says how to start one.
+func TestInstallBindsNothingWithoutAServer(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	log := fakeChromeOnPath(t, p)
+	noServerWait(t)
+	udd := chromeData(t)
+	var out, errb bytes.Buffer
+	run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb)
+	chromiumReady(t, filepath.Join(udd, "Default"), installedID(t, p))
+	stopFakeServer(p)
+	out.Reset()
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --user-data-dir " + udd + " --profile Default again.\n"; !strings.HasSuffix(out.String(), want) {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if calls, _ := os.ReadFile(log); len(calls) != 0 {
+		t.Fatalf("chrome calls:\n%s", calls)
+	}
+}
+
 // removedAndTurnedOff makes Profile 2 of udd one the user removed
 // mirrormark from, and Profile 3 one where they turned it off.
 func removedAndTurnedOff(t *testing.T, udd, id string) {
@@ -509,6 +576,27 @@ func TestFirefoxInstallOpensNothingWhereTheAddonIsNotReady(t *testing.T) {
 		if !strings.Contains(out.String(), line) {
 			t.Errorf("no %q in:\n%s", line, out.String())
 		}
+	}
+	if c, _ := os.ReadFile(calls); len(c) != 0 {
+		t.Fatalf("calls:\n%s", c)
+	}
+}
+
+func TestFirefoxInstallBindsNothingWithoutAServer(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, calls := firefoxData(t, p, "aurora")
+	noServerWait(t)
+	var out, errb bytes.Buffer
+	run([]string{"install", "--browser", "firefox", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb)
+	geckoReady(t, filepath.Join(root, "xbeta.beta"), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b")
+	stopFakeServer(p)
+	out.Reset()
+	if code := run([]string{"install", "--browser", "firefox", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --browser firefox --profile xbeta.beta again.\n"; !strings.HasSuffix(out.String(), want) {
+		t.Fatalf("output:\n%s", out.String())
 	}
 	if c, _ := os.ReadFile(calls); len(c) != 0 {
 		t.Fatalf("calls:\n%s", c)
@@ -622,6 +710,7 @@ func TestInstallWithoutProfileListsAndWritesNothing(t *testing.T) {
 	p := testHome(t)
 	_, sudoCalls := fakeSystem(t)
 	log := fakeChromeOnPath(t, p)
+	stopFakeServer(p) // a listing needs none
 	systemctl := fakeSystemctl(t, "")
 	udd := braveData(t)
 	var out, errb bytes.Buffer
@@ -722,6 +811,7 @@ func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
 	skipIfRoot(t)
 	p := testHome(t)
 	root, calls := firefoxData(t, p, "aurora")
+	stopFakeServer(p) // a listing needs none
 	neverRun(t, root, "gamma")
 	release := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(release, "defaults", "pref"), 0o755))
@@ -849,6 +939,7 @@ func TestEnsureDBNamesFirefoxProfiles(t *testing.T) {
 // channel. The fake logs its calls to calls and, given a bind URL, touches
 // the lock file of the database it names.
 func geckoData(t *testing.T, p db.Paths, root, bin, app, channel string) (calls string) {
+	fakeServer(t, p)
 	ff := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(ff, "defaults", "pref"), 0o755))
 	must(t, os.WriteFile(filepath.Join(ff, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "`+channel+`");`), 0o644))

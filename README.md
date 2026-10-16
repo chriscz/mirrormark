@@ -2,7 +2,8 @@
 
 mirrormark keeps chosen bookmark folders the same across browser profiles on
 one computer. It is a browser extension plus one Go program, and it stores
-everything in YAML files you can read. No server, no account, no network.
+everything in YAML files you can read. No account and no network: the
+extension talks only to the program, on 127.0.0.1.
 
 Status: early. It works with Google Chrome, Brave, Firefox Developer
 Edition and LibreWolf on Linux.
@@ -10,8 +11,8 @@ Edition and LibreWolf on Linux.
 ## Install (Google Chrome on Linux)
 
 You need the `mirrormark` binary (`make` builds `build/mirrormark`). Copy it
-somewhere stable such as `~/.local/bin`, because Chrome runs it from there:
-the host manifest names the path `install` ran it from, with symlinks
+somewhere stable such as `~/.local/bin`, because the service runs it from
+there: the service names the path `install` ran it from, with symlinks
 resolved. If you move or rename the binary, run `mirrormark install` again.
 
 1. Run `mirrormark install` as yourself, not with `sudo`, to see the
@@ -33,8 +34,10 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
    it starts.
-3. Run `mirrormark install --profile ...` again. It first checks each named
-   profile's files. In each profile where mirrormark is installed and turned
+3. Run `mirrormark install --profile ...` again. It first checks that
+   `mirrormark serve` is running, waiting up to 5 seconds for the service
+   to start; if it is not, it says how to start it, opens nothing and exits
+   with status 1. It then checks each named profile's files. In each profile where mirrormark is installed and turned
    on, it opens a tab once, waits up to 30 seconds for mirrormark to report
    in, and prints `bound: <profile> -> <id>`. For any other profile it prints
    `not ready: <profile>: ...`, which says what to do, or
@@ -92,16 +95,19 @@ The first `install` or `unpack` creates `~/.local/share/mirrormark/extension.pem
 The extension id comes from this key, so keep it: a new key is a new
 extension.
 
-The host manifest has one fixed path for the whole computer and lets one
-extension id start the host. Two installs with different keys, such as two
-users on one computer, replace each other's manifest, and only the last
-one to run `install` reaches its host. `install` warns when it replaces a
-manifest that names another extension.
+The host manifest has one fixed path for the whole computer and names one
+extension id. Two installs with different keys, such as two users on one
+computer, replace each other's manifest. `install` warns when it replaces
+a manifest that names another extension. The extension no longer uses
+the host manifest, so this cuts neither install off.
 
 ### Upgrade, uninstall, unpack
 
 Upgrading: replace the binary and run `mirrormark install --profile ...`
-again for the profiles you bound, then restart Chrome if it asks. If the new
+again for the profiles you bound, then restart Chrome if it asks. After
+upgrading from a build before `mirrormark serve`, the first `install` asks
+for a restart, and the second binds each profile again, so that it gets
+its token. If the new
 build has the same extension version, `install` changes neither system file
 and Chrome keeps its copy of the extension, even if the extension's files
 changed (see [Development](#development)). `install` restarts the
@@ -124,7 +130,7 @@ browser's database is left: its profiles still sync through them, and its
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
 Load unpacked in `chrome://extensions` (Developer mode). It still needs
-`install`'s host manifest to reach the host. For Load unpacked, give a
+the server and `install`'s binding to sync. For Load unpacked, give a
 folder of your own, such as `~/mirrormark-extension`: `install` deletes and
 rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 
@@ -134,8 +140,9 @@ a second one stops at once. `install` runs it as the systemd user service
 `mirrormark.service` (`systemctl --user status mirrormark`). Once the
 service runs, stop any `mirrormark serve` you started by hand: while that
 one holds `serve.lock`, the service's server exits at once, and systemd
-retries it quietly and then leaves the service failed. This release's extension still
-reaches mirrormark through the native messaging host.
+retries it quietly and then leaves the service failed. The extension
+connects to it over a WebSocket on 127.0.0.1, on the first of the ports
+61959, 63018 and 63454 whose server proves it holds the profile's token.
 
 ## Install (Brave on Linux)
 
@@ -227,7 +234,10 @@ The binary needs a stable place, as for Chrome.
 
 Upgrading: replace or move the binary, run
 `mirrormark install --browser firefox --profile ...` again for the
-profiles you bound, then restart Firefox in those profiles.
+profiles you bound, then restart Firefox in those profiles. After upgrading
+from a build before `mirrormark serve`, the first `install` asks for a
+restart, and the second binds each profile again, so that it gets its
+token.
 
 `mirrormark uninstall --browser firefox` removes the XPI from each profile
 whose database file says `browser: firefox`, and the host manifest if it
@@ -362,29 +372,39 @@ shows:
 
 - the database the profile syncs as, such as `Syncs as chrome-work.`, or
   that the profile is not bound;
-- why the host stopped, if it did, such as `db-locked: …`, or why Chrome
-  could not start it;
+- why the host stopped, if it did, such as `db-locked: …`, or that
+  mirrormark is not running;
 - each problem the last round found, as `<code>: <message>`, such as
   `union-skipped: …` or `db-mismatch: …`. A problem stays until a round no
   longer finds it, so nothing below the binding means the last round synced
   cleanly.
 
-### The popup says Chrome cannot reach the host
+Two errors concern the connection itself:
 
-`Specified native messaging host not found.` or
-`Access to the specified native messaging host is forbidden.` means Chrome
-could not start mirrormark. The host manifest is missing, or another install
-of mirrormark, with another key, replaced it, so it names another extension.
-Run `mirrormark install --profile <profile>` again, and restart Chrome if it
-asks. On a computer where two users install mirrormark, only the last one to
-run `install` reaches its host (see [Ids, labels and the
-key](#ids-labels-and-the-key)).
+- **`bad-token: …`.** The server does not know this profile's token: the
+  profile was bound by a build before `mirrormark serve`, or bound to a
+  database whose token has changed. Run `mirrormark install --profile
+  <profile>` for that profile again (with `--browser` for a browser other
+  than Chrome).
+- **`the program on port N could not prove it is your mirrormark`.**
+  Another program holds that port, perhaps another user's. The extension
+  tries the next port, where your server listens if the first was taken.
+  If sync does not resume, find the program with `ss -ltnp`.
+
+### The popup says mirrormark is not running
+
+The extension could not reach `mirrormark serve` on any of its ports. Start
+it with `systemctl --user start mirrormark`, or run `mirrormark serve`. If
+it does not stay up, `systemctl --user status mirrormark` and the log,
+`~/.local/state/mirrormark/log`, say why. The extension tries again every
+30 seconds, and syncs once the server is back.
 
 ### Installing and binding
 
 - **The token.** The bind page also stores the profile's token, a secret
-  that `install` writes into the profile's database file. It proves the
-  binding to the server once the extension uses it. Running `install` for a
+  that `install` writes into the profile's database file. Each time the
+  extension connects, the server proves it holds the token, then the
+  extension does; neither sends the token itself. Running `install` for a
   bound profile keeps its token.
 - **`not ready: <profile>`.** The profile's files say mirrormark is not
   installed there, is turned off, or is another build, so `install` opened
@@ -454,13 +474,18 @@ The end-to-end tests run real browsers from the dev image under Xvfb:
 Google Chrome and Brave, driven over the DevTools protocol, and Firefox
 Developer Edition and LibreWolf, driven over WebDriver BiDi in a D-Bus
 session, which carries `install`'s bind page to a running Firefox. Each test installs mirrormark
-into two browser instances with `mirrormark install` and binds them. They
+into two browser instances with `mirrormark install` and binds them, with
+its own `mirrormark serve` running in place of the systemd service, which
+the dev image cannot run. They
 run one at a time, because they share the Chromium browsers' system directories, which
 only the dev image lets your user write. Besides installing and binding,
 they share a folder between the two instances and check that each kind of
 edit, a delete, restore and purge, a conflict, the first sync of two filled
 folders and a closed browser's catch-up reach both, with no warning in the
-host's log. Each edit must reach the other running browser within 3
+host's log. One test stops the server, puts a program that cannot prove
+itself on the first port, starts the server again on the second, and
+checks that the extension skips that program and syncs again. Each edit
+must reach the other running browser within 3
 seconds; the tests log how long each took. The sync tests run three times:
 between two Chromes, between two Firefoxes, and between a Firefox and a
 Chrome, as subtests named `chrome-chrome`, `firefox-firefox` and
