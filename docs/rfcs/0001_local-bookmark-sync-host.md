@@ -346,6 +346,8 @@ Everything else is shared within a family: Chrome and Brave share the key, the C
 
 **Not supported.** Only the packagings the spikes ran are supported: Brave stable from Brave's `.deb` (`/opt/brave.com/brave`) and LibreWolf from its official tarball. Brave Beta and Nightly have other binaries and data directories; Flatpak and Snap browsers were not tried (Later). LibreWolf from its Debian/Ubuntu repository, AppImage or AUR runs from another directory; `install` may well work with it, since it reads the directory from `compatibility.ini`, but nobody has tried. The README lists these as untested.
 
+**Tested end to end.** The e2e suite installs and binds a Brave profile beside Chrome's and a LibreWolf profile beside Developer Edition's, on Section 11's server, and checks that uninstalling Brave or LibreWolf keeps what Chrome or Developer Edition still use. The sync tests run a fourth pair, Brave and LibreWolf, beside Chrome and Chrome, Firefox and Firefox, and Firefox and Chrome. It is one cross-engine pair, since the others would add little beyond what their families' pairs show and each pair adds minutes. The same 3 s latency target holds for it.
+
 **Decisions taken for the user.** The user was away when this section was written; each of these is the smallest safe choice and awaits sign-off:
 
 - Brave and LibreWolf are descriptions in the existing Chrome and Firefox packages, not new install paths;
@@ -526,10 +528,10 @@ Chosen by us within those decisions:
 
 **Not verified.**
 
-- Lifetimes beyond 9 minutes, sleep and resume, and a server that is down when the browser starts. The periodic alarm should cover the last, but only a server restart while the browser runs was tried.
+- Lifetimes beyond 9 minutes, sleep and resume, and a server that is down when the browser starts. The periodic alarm should cover the last, but only a server restart while the browser runs was tried. The e2e suite now runs the real server in all four browsers, and a Gecko keep-alive for the length of its tests (the longest, the restart test, takes under two minutes); no longer lifetime has been run.
 - Chrome and Brave with their own sandbox: the spike and the dev image run them with `--no-sandbox`.
 - Release Firefox, and Firefox's Local Network Access prompt. The `Origin` check refuses such pages whatever the prompt does.
-- Why Gecko drops its first socket about 10 s after the browser starts. The reconnect alarm covers it, at the cost of up to 30 s at start.
+- Why Gecko drops its first socket about 10 s after the browser starts. The reconnect alarm covers it, at the cost of up to 30 s at start. No e2e test failed because of it, and none had to wait longer.
 
 ## Alternatives considered
 
@@ -627,9 +629,9 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Tests:** unit tests that read each state in the profile-state spike from fixture files, for both families; that a profile that is not ready gets its message and no open; that each ready profile gets one open and a silent one ends in `not bound` after the wait; that a listing writes no file, starts no `sudo` and no browser, for Brave before and after an install and for Developer Edition with never-run and other-browser profiles; and the numeric-aware order and selection by ID and number (an exact ID beats a number, a number too large for any profile is refused as one). E2e: the existing Chrome and Firefox install tests with `--profile`, a listing of a bound Chrome profile, and a profile named before the browser installed the extension is reported not ready, then binds after a restart.
    - **Exit:** all pass, and the README's steps are run again on the desktop Brave that showed "blocked by Brave".
 
-8. **A local server instead of native messaging** (Section 11). In order: the host reads and writes messages through a connection type, not stdin and stdout; a standard-library WebSocket server package; `mirrormark serve`, which checks `Host` and `Origin` and runs the challenge but which no extension uses yet; `install` writing `origin` and `token` and handing the token to the bind page; the systemd user service, installed and uninstalled together; the switch, in which the extension connects to the server and the e2e harness starts `mirrormark serve`; then removing native messaging. Phase 6's Brave and LibreWolf end-to-end tests follow, on the new transport. Every commit up to the switch leaves native messaging working, and every commit from the switch on uses the server, so no prefix leaves a user without a working transport.
+8. **A local server instead of native messaging** (Section 11). In order: the host reads and writes messages through a connection type, not stdin and stdout; a standard-library WebSocket server package; `mirrormark serve`, which checks `Host` and `Origin` and runs the challenge but which no extension uses yet; `install` writing `origin` and `token` and handing the token to the bind page; the systemd user service, installed and uninstalled together; the switch, in which the extension connects to the server and the e2e harness starts `mirrormark serve`; then removing native messaging. Phase 6's Brave and LibreWolf end-to-end tests follow, on the new transport: install and bind first, then the sync tests as a fourth pair, so the five sync tests of Phase 6 run for the other pairs as before. Every commit up to the switch leaves native messaging working, and every commit from the switch on uses the server, so no prefix leaves a user without a working transport.
    - **Tests:** as in Section 11, Tests.
-   - **Exit:** all pass, the README's steps are run once on a desktop with Chrome and with Developer Edition, upgrading from the native-messaging build, and a server restart and a browser restart each reconnect.
+   - **Exit:** all pass, the README's steps are run once on a desktop with Chrome and with Developer Edition, upgrading from the native-messaging build, and a server restart and a browser restart each reconnect. The e2e part is done, in all four browsers; the desktop run is still to do and is listed in `TASKS.md`.
 
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
@@ -713,3 +715,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-15 — local server plan trimmed: the protocol version stays 1, since no peer of one transport meets the other; `install` restarts the service on every run instead of deciding when; the unit carries no `Environment=` lines; `install` leaves old host manifests for `uninstall`; the log still rotates only when the server starts, with rotating on write left in `TASKS.md`.
 - 2026-10-16 — after review of the switch: until a server proves itself the popup shows only fixed texts naming the port, a known error outranks a wrong proof, a profile without a token is told to bind again, and the last purge keeps `serve.lock` while a server holds it.
 - 2026-10-16 — native messaging removed as built: Sections 6 and 8 now say, as Section 11 does, that `install` leaves an old host manifest for `uninstall`; Section 11 adds that `uninstall` removes it even while another browser still uses mirrormark.
+- 2026-10-16 — local server built: the e2e suite runs the real server in Chrome, Brave, Developer Edition and LibreWolf, with the sync tests as a fourth pair, Brave and LibreWolf, inside the 3 s target; Phase 8's desktop upgrade run, and Phase 6's, stay in `TASKS.md`.

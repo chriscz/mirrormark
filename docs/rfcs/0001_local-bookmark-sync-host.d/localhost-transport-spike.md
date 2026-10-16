@@ -169,6 +169,13 @@ screenshots.
 - The cause of Gecko's socket drop about 10 s after start.
 - Anything about firejail (questions 5 to 9, deferred).
 
+## Checked since
+
+The implementation's e2e suite (Docker, `--no-sandbox`) has since covered two points from "Not verified":
+
+- The real `mirrormark serve` runs in all four browsers: install, bind, and every sync test, against the server instead of the spike's probe.
+- The Gecko keep-alive (a `runtime.getPlatformInfo()` call on each ping) holds for the e2e tests' lifetimes, the longest being the restart test at under two minutes, in Developer Edition and LibreWolf. Nothing longer was run, so "Lifetimes beyond 9 minutes" above stands.
+
 ## The scripts
 
 All in [`localhost-transport-spike/`](localhost-transport-spike/):
