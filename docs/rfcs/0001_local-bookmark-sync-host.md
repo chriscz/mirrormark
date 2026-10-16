@@ -698,7 +698,7 @@ Each is its own RFC or stack once the Chrome version works.
 - **Flatpak and Snap browsers.** The server runs outside the sandbox, so each needs only loopback access from inside it; neither was tried. Firejail is Section 12.
 - **A port setting**, for a computer where all three ports are taken.
 - **Windows and macOS**, which refuse local CRX files [R11].
-- **Release packaging**: `make release` and a README tested in a fresh container.
+- **Release packaging.** Built: `make dist` makes reproducible archives and `SHA256SUMS`, and a pushed `v*` tag publishes them as an attested, immutable GitHub release (`RELEASING.md`). Still to do: a README tested in a fresh container.
 - **`mirrormark status`**, summarising profiles, unions, last rounds and errors; until then the log and the popup carry them.
 - **A no-root install** for Chrome and Brave: Load unpacked in each profile.
 
@@ -773,3 +773,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-16 — as built after the re-review: a dial that timed out gets the same quick retry as a close; a refused upgrade's once-a-minute Info line carries its `Host` and `Origin`; a profile bound without a token is marked `refused`, so the popup shows no spinner for it; `install` does not restart the service over a server started by hand, and says to stop that server.
 - 2026-10-16 — Section 12 and Phase 9 after the firejail spike, at the user's request: `install` detects a Chrome or Brave started through firejail and prints the `whitelist` lines its `.local` file lacks, and the file; it never edits firejail's files, and says nothing when the lines are there. Developer Edition and LibreWolf need no rule.
 - 2026-10-16 — after review of the firejail detection: the rule whitelists only `mirrormark.crx` (verified in the spike: Brave and Chrome install and bind, and the jail shows no database); wrappers count only when they run `firejail` as a command; every name of the browser's command is checked; a data directory outside home gets a hint; the present-line check takes `~`, `$HOME` and a trailing `/`.
+- 2026-10-16 — release packaging built, from Later: `make dist` (reproducible archives for linux amd64 and arm64, the extension as a zip and an XPI, `SHA256SUMS`; the version is the manifest's), `mirrormark version`, and GitHub workflows for CI and tag-triggered, attested, immutable releases (`RELEASING.md`). No CRX is published: `install` signs its own.
