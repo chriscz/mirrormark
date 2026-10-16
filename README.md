@@ -74,8 +74,10 @@ Each bound profile gets a database id: the `<id>` in the
 file, `~/.local/share/mirrormark/profiles/<id>.yaml`. `config.yaml` names
 profiles by these ids. The id comes from the profile's name in Chrome: a
 profile named "Your Chrome" gets `chrome-your-chrome`, and a second profile
-of that name gets `chrome-your-chrome-2` (then `-3` and so on). To share a
-folder between those two:
+of that name gets `chrome-your-chrome-2` (then `-3` and so on). Once it has
+bound every profile named, `install` prints a `config.yaml` like the one
+below for the ids it just bound, ready to paste. To share a folder between
+those two:
 
     format: 1
     unions:

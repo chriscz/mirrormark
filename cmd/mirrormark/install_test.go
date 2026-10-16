@@ -429,6 +429,12 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 			t.Fatalf("no %q in:\n%s", line, out.String())
 		}
 	}
+	// What to do next, with the ids just bound in a config to paste.
+	if want := "Now list the folders to share in " + p.ConfigFile() + ", for example:\n\n" +
+		"format: 1\nunions:\n  work:\n    chrome-personal: toolbar/Work\n    chrome-work: toolbar/Work\n\n" +
+		"Export your bookmarks from Chrome first, so you have a copy.\nmirrormark logs to " + p.LogFile() + ".\n"; !strings.HasSuffix(out.String(), want) {
+		t.Fatalf("output:\n%s\nwant it to end with:\n%s", out.String(), want)
+	}
 	calls, _ := os.ReadFile(chromeLog)
 	if want := "--user-data-dir=" + udd + " --profile-directory=Default chrome-extension://" + id + "/bind.html#chrome-personal." + tokenOf(t, p, "chrome-personal") + "\n" +
 		"--user-data-dir=" + udd + " --profile-directory=Profile 1 chrome-extension://" + id + "/bind.html#chrome-work." + tokenOf(t, p, "chrome-work") + "\n"; string(calls) != want {
@@ -1044,6 +1050,12 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "bound: xbeta.beta -> firefox-beta\n") || strings.Contains(out.String(), "alpha") {
 		t.Fatalf("output:\n%s", out.String())
+	}
+	// One profile bound: a comment stands for the other member.
+	if want := "Now list the folders to share in " + p.ConfigFile() + ", for example:\n\n" +
+		"format: 1\nunions:\n  work:\n    firefox-beta: toolbar/Work\n    # another profile's id: toolbar/Work\n\n" +
+		"Export your bookmarks from Firefox Developer Edition first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nmirrormark logs to " + p.LogFile() + ".\n"; !strings.HasSuffix(out.String(), want) {
+		t.Fatalf("output:\n%s\nwant it to end with:\n%s", out.String(), want)
 	}
 	if c, _ := os.ReadFile(calls); !bytes.Contains(c, []byte("about:blank moz-extension://5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b/bind.html#firefox-beta."+tokenOf(t, p, "firefox-beta"))) {
 		t.Fatalf("calls:\n%s", c)

@@ -176,7 +176,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	code := 0
+	code, bound := 0, []string{}
 	for _, c := range chosen {
 		cmd := again(cb.InstallCommand(), uddFlag, c.ID())
 		// The external file is current here, so a profile without the
@@ -204,9 +204,10 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		fmt.Fprintf(stdout, "bound: %s -> %s\n", c.ID(), id)
+		bound = append(bound, id)
 	}
 	if code == 0 {
-		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first, so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), cb.Name, p.LogFile())
+		nextSteps(p, cb.Name, "", bound, stdout)
 	}
 	return code
 }
@@ -420,7 +421,7 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	if err != nil {
 		return fail(err)
 	}
-	code := 0
+	code, bound := 0, []string{}
 	for _, tg := range targets {
 		cmd := again("mirrormark install --browser "+b.Config, udd, tg.c.ID())
 		st, uuid, err := firefox.ReadState(tg.dir, want)
@@ -446,11 +447,20 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 			continue
 		}
 		fmt.Fprintf(stdout, "bound: %s -> %s\n", tg.c.ID(), id)
+		bound = append(bound, id)
 	}
 	if code == 0 {
-		fmt.Fprintf(stdout, "Now list the folders to share in %s.\nExport your bookmarks from %s first (Bookmarks, Manage bookmarks, Import and Backup), so you have a copy.\nThe host logs to %s.\n", p.ConfigFile(), b.Name, p.LogFile())
+		nextSteps(p, b.Name, " (Bookmarks, Manage bookmarks, Import and Backup)", bound, stdout)
 	}
 	return code
+}
+
+// nextSteps says, once every profile named is bound, what to do next: a
+// config that shares a folder of the databases just bound, ready to paste,
+// exporting the bookmarks from browser first (how says where), and the log.
+func nextSteps(p db.Paths, browser, how string, bound []string, stdout io.Writer) {
+	fmt.Fprintf(stdout, "Now list the folders to share in %s, for example:\n\n%s\nExport your bookmarks from %s first%s, so you have a copy.\nmirrormark logs to %s.\n",
+		p.ConfigFile(), unionExample("", bound...), browser, how, p.LogFile())
 }
 
 // again is the command that runs install for the profiles with these IDs
