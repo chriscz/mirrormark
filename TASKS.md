@@ -221,8 +221,8 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **Where:** `cmd/mirrormark/install.go`, `geckoSafety`.
 - **What:** the text printed before the first Gecko install names
   `xpinstall.signatures.required` and `extensions.autoDisableScopes`, but
-  install also sets `extensions.startupScanScopes`, as the README says.
-- **Effect:** the message says less than the README.
+  install also sets `extensions.startupScanScopes`, as `docs/guide.md` says.
+- **Effect:** the message says less than `docs/guide.md`.
 - **Found:** the final fix wave, 2026-10-16.
 - **Fix:** name the third pref, or say why it is not worth naming there.
 
@@ -245,12 +245,12 @@ Each entry says where, what, its effect, how it was found and the fix.
 
 ## Manual checks still to do
 
-- Run `mirrormark install` from the README on a real Linux desktop with
-  Google Chrome and real `sudo` (the Docker image makes the system
-  directories writable, so the e2e tests never run `sudo`). Check that the
+- Run `mirrormark install` from the README and `docs/guide.md` on a real
+  Linux desktop with Google Chrome and real `sudo` (the Docker image makes
+  the system directories writable, so the e2e tests never run `sudo`). Check that the
   data piped to `sudo install -D -m 0644 /dev/stdin <target>` gets through
   while `sudo` asks for a password, and that `uninstall`'s `sudo rm` works.
-- Run the README's Firefox steps on a real Linux desktop with Firefox
+- Run the Firefox steps in `docs/guide.md` on a real Linux desktop with Firefox
   Developer Edition installed the usual way: a profile that has been used,
   under `~/.config/mozilla/firefox` or `~/.mozilla/firefox`, with
   `LastPlatformDir` from a real install. Run the first `install` with
@@ -261,7 +261,7 @@ Each entry says where, what, its effect, how it was found and the fix.
   build runs. Then uninstall after real use. Phase 5 is done when this run
   is recorded.
 - On the desktop Brave that showed "This page has been blocked by Brave",
-  run the README's Brave steps again: `mirrormark install --browser brave`,
+  run the Brave steps in `docs/guide.md` again: `mirrormark install --browser brave`,
   check the listing, then `--profile` one profile and follow the messages.
   Run it under firejail as well: `install` should print the `whitelist`
   line for `~/.config/firejail/brave.local`, and Brave should install and
@@ -269,7 +269,7 @@ Each entry says where, what, its effect, how it was found and the fix.
   `/opt/brave.com/brave/extensions/` visible in the jail). Phase 7 is done,
   and Phase 9's desktop check, when this run is recorded.
 - On the desktop, upgrade from the native-messaging build in Chrome and
-  Developer Edition, following the README. Check that the first `install`
+  Developer Edition, following `docs/guide.md`. Check that the first `install`
   asks for a restart and starts the service (`systemctl --user status
   mirrormark`), the second binds, the popup clears, and a server restart
   (`systemctl --user restart mirrormark`) and a browser restart each
