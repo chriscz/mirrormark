@@ -515,6 +515,13 @@ member:
 A new member's first round deletes nothing, so bookmarks that profile still
 holds and the others deleted come back into the union. Delete them again.
 
+## Releases
+
+Each [GitHub release](https://github.com/chriscz/mirrormark/releases) has
+the binary for Linux amd64 and arm64, the extension, `SHA256SUMS` and a
+build provenance attestation. `RELEASING.md` says how to verify a download
+and how releases are made.
+
 ## Development
 
 Everything builds and tests in a Docker image; nothing is installed on your
@@ -560,8 +567,8 @@ The binary lands in `build/mirrormark`.
 
 The Chrome extension in `extension/` is plain JavaScript with no build step;
 the binary embeds it. Its version is written only in
-`extension/manifest.json`. Raise it in every release that changes the
-extension: Chrome installs a new copy only when the version changes.
+`extension/manifest.json`, and each release raises it (see
+`RELEASING.md`): Chrome installs a new copy only when the version changes.
 
 ## Licence
 
