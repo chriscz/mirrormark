@@ -497,26 +497,27 @@ machine except Docker.
 The end-to-end tests run real browsers from the dev image under Xvfb:
 Google Chrome and Brave, driven over the DevTools protocol, and Firefox
 Developer Edition and LibreWolf, driven over WebDriver BiDi in a D-Bus
-session, which carries `install`'s bind page to a running Firefox. Each test installs mirrormark
-into two browser instances with `mirrormark install` and binds them, with
-its own `mirrormark serve` running in place of the systemd service, which
-the dev image cannot run. They
-run one at a time, because they share the Chromium browsers' system directories, which
-only the dev image lets your user write. Besides installing and binding
-in each of the four browsers, they share a folder between the two instances and check that each kind of
-edit, a delete, restore and purge, a conflict, the first sync of two filled
-folders and a closed browser's catch-up reach both, with no warning in the
-server's log. One test stops the server, puts a program that cannot prove
-itself on the first port, starts the server again on the second, and
-checks that the extension skips that program and syncs again. Each edit
-must reach the other running browser within 3
+session, which carries `install`'s bind page to a running Firefox. Each
+test installs mirrormark into two browser instances with `mirrormark
+install` and binds them, with its own `mirrormark serve` running in place
+of the systemd service, which the dev image cannot run. They run one at a
+time, because they share the Chromium browsers' system directories, which
+only the dev image lets your user write. Besides installing and binding in
+each of the four browsers, they share a folder between the two instances
+and check that each kind of edit, a delete, restore and purge, a conflict,
+the first sync of two filled folders and a closed browser's catch-up reach
+both, with no warning in the server's log. One test stops the server, puts
+a program that cannot prove itself on the first port, starts the server
+again on the second, and checks that the extension skips that program and
+syncs again. Each edit must reach the other running browser within 3
 seconds; the tests log how long each took. The sync tests run four times:
-between two Chromes, between two Firefoxes, between a Firefox and a Chrome,
-and between Brave and LibreWolf, as subtests named `chrome-chrome`,
-`firefox-firefox`, `firefox-chrome` and `brave-librewolf` (for example
-`RUN=TestEditsPropagate/brave-librewolf`). A failing test keeps the
-server's log and each browser's output in `build/e2e-logs/<test>/`.
-Run `bin/dev image build` first after the `Dockerfile` changes.
+between two Chromes, between two Firefoxes, between a Firefox and a
+Chrome, and between Brave and LibreWolf, as subtests named
+`chrome-chrome`, `firefox-firefox`, `firefox-chrome` and `brave-librewolf`
+(for example `RUN=TestEditsPropagate/brave-librewolf`). A failing test
+keeps the server's log and each browser's output in
+`build/e2e-logs/<test>/`. Run `bin/dev image build` first after the
+`Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
 run more with, for example,
