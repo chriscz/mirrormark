@@ -1,6 +1,5 @@
 // Package host runs sync rounds for one extension connection, and Serve
-// accepts the connections. It also runs as the native messaging host
-// Chrome starts, for that one profile.
+// accepts the connections.
 //
 // A round runs when the extension sends a tree (on connect, after a burst of
 // bookmark events and after each batch) and when the poll sees that
@@ -16,10 +15,8 @@
 package host
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 
 	"github.com/chriscz/mirrormark/internal/merge"
 	"github.com/chriscz/mirrormark/internal/round"
@@ -30,15 +27,15 @@ const Version = 1
 
 // Msg is every message in either direction; Type says which fields count.
 //
-// Through the server, the hello carries the extension's nonce and the host
-// answers "challenge" with its own nonce and its proof; the extension
-// answers "proof" with its own. The host runs only after a right proof.
+// The hello carries the extension's nonce, and the host answers
+// "challenge" with its own nonce and its proof; the extension answers
+// "proof" with its own. The host runs only after a right proof.
 //
 // The host sends "error" only when it stops, with one of these codes:
 // unsupported-version, bad-db, db-missing (no database file), db-locked
 // (another host uses the database), db-lock-error (the lock file cannot be
-// locked), bad-token (through the server: the database has no token or
-// another origin, the nonce is malformed, or the proof is wrong).
+// locked), bad-token (the database has no token or another origin, the
+// nonce is malformed, or the proof is wrong).
 //
 // After every round the host sends "status" with the problems the round
 // found, none when it synced cleanly, so the popup shows only what is still
@@ -78,32 +75,6 @@ const (
 	maxIn  = 64 << 20
 )
 
-func ReadMsg(r io.Reader) (Msg, error) {
-	var n uint32
-	if err := binary.Read(r, binary.NativeEndian, &n); err != nil {
-		return Msg{}, err
-	}
-	if n > maxIn {
-		return Msg{}, fmt.Errorf("message of %d bytes is too large", n)
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return Msg{}, err
-	}
-	return decode(buf)
-}
-
-func WriteMsg(w io.Writer, m Msg) error {
-	b, err := encode(m)
-	if err != nil {
-		return err
-	}
-	// One write, so a reader never sees a length without its message.
-	out := binary.NativeEndian.AppendUint32(make([]byte, 0, 4+len(b)), uint32(len(b)))
-	_, err = w.Write(append(out, b...))
-	return err
-}
-
 // Conn carries whole messages between the host and one extension.
 type Conn interface {
 	// Read returns the next message, or io.EOF once the extension has gone.
@@ -111,18 +82,6 @@ type Conn interface {
 	// Write sends one message.
 	Write(Msg) error
 }
-
-// Stream is a Conn in native messaging's framing: each message is its
-// length as a native-endian uint32, then that many bytes of JSON.
-func Stream(r io.Reader, w io.Writer) Conn { return stream{r, w} }
-
-type stream struct {
-	r io.Reader
-	w io.Writer
-}
-
-func (s stream) Read() (Msg, error) { return ReadMsg(s.r) }
-func (s stream) Write(m Msg) error  { return WriteMsg(s.w, m) }
 
 // encode is m as JSON, refused when the browsers could not take it.
 func encode(m Msg) ([]byte, error) {

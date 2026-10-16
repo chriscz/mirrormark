@@ -14,9 +14,10 @@ import (
 	"github.com/chriscz/mirrormark/internal/db"
 )
 
-// SystemHostDir: native host manifests here reach every data directory of
-// every Chromium browser mirrormark supports, not only the default ones.
-const SystemHostDir = "/etc/opt/chrome/native-messaging-hosts"
+// LegacyHostManifest is where builds before the server put the native
+// host manifest every Chromium browser read. uninstall removes it when it
+// names this install's extension.
+const LegacyHostManifest = "/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json"
 
 // Extension is the unpacked extension and its CRX, under the install's key.
 type Extension struct{ ID, Version, Dir, CRX string }
@@ -71,16 +72,8 @@ type externalJSON struct {
 	Version string `json:"external_version"` // must equal the CRX's manifest version
 }
 
-type hostManifestJSON struct {
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	Path           string   `json:"path"`
-	Type           string   `json:"type"`
-	AllowedOrigins []string `json:"allowed_origins"`
-}
-
-func indented[T externalJSON | hostManifestJSON](v T) []byte {
-	b, _ := json.MarshalIndent(v, "", "  ") // cannot fail for these types
+func indented(v externalJSON) []byte {
+	b, _ := json.MarshalIndent(v, "", "  ") // cannot fail for this type
 	return append(b, '\n')
 }
 
@@ -101,18 +94,10 @@ func ExternalCRX(path string) (string, error) {
 	return e.CRX, nil
 }
 
-// HostManifestPath is the native host manifest every browser in Browsers
-// reads.
-func HostManifestPath() string { return filepath.Join(SystemHostDir, extension.HostName+".json") }
-
-// SystemFiles are the two files that tell b about the extension and let it
-// start bin as the native host: b's external file, then the host manifest.
-func (b Browser) SystemFiles(e Extension, bin string) []File {
-	return []File{
-		{b.ExternalFile(e.ID), indented(externalJSON{CRX: e.CRX, Version: e.Version})},
-		{HostManifestPath(), indented(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
-			Path: bin, Type: "stdio", AllowedOrigins: []string{"chrome-extension://" + e.ID + "/"}})},
-	}
+// SystemFiles is the file that tells b to install the extension: b's
+// external file.
+func (b Browser) SystemFiles(e Extension) []File {
+	return []File{{b.ExternalFile(e.ID), indented(externalJSON{CRX: e.CRX, Version: e.Version})}}
 }
 
 // FilesCurrent reports whether every file exists with exactly its data.

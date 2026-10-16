@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/chriscz/mirrormark/extension"
@@ -35,7 +34,6 @@ Commands:
   unpack      Write the extension, with this install's key, for Load unpacked
               [DIR]
   serve       Run the server the extensions connect to
-  host        Run as the native messaging host (the browser does this)
   help        Show this help
 `
 
@@ -45,12 +43,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage(stderr)
 		return 2
-	}
-	// Chrome runs the host with the extension's origin as its only argument;
-	// Firefox with the host manifest's path and the extension's id.
-	if strings.HasPrefix(args[0], "chrome-extension://") ||
-		strings.HasSuffix(args[0], "/"+extension.HostName+".json") || args[0] == "host" {
-		return cmdHost(stdin, stdout, stderr)
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -70,29 +62,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 2
 }
 
-// cmdHost logs to the log file: stdout belongs to the protocol.
-func cmdHost(stdin io.Reader, stdout, stderr io.Writer) int {
-	p, err := db.DefaultPaths()
-	if err != nil {
-		fmt.Fprintln(stderr, "mirrormark:", err)
-		return 1
-	}
-	log, f, err := openLog(p)
-	if err != nil {
-		fmt.Fprintln(stderr, "mirrormark:", err)
-		return 1
-	}
-	defer f.Close()
-	if err := host.Run(context.Background(), host.Stream(stdin, stdout), host.Options{Paths: p, Log: log}); err != nil {
-		log.Warn("host stopped", "err", err)
-		return 1
-	}
-	return 0
-}
-
-// openLog opens the log every host and the server append to, rotating it
-// first if it is large. Two hosts starting at once may both rotate, and so
-// lose the old log. The caller closes the file.
+// openLog opens the log the server appends to, rotating it first if it is
+// large. The caller closes the file.
 func openLog(p db.Paths) (*slog.Logger, *os.File, error) {
 	if err := os.MkdirAll(p.State, 0o700); err != nil {
 		return nil, nil, err
@@ -160,7 +131,7 @@ func cmdServe(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// maxLog is the size above which a starting host moves the log to log.1,
+// maxLog is the size above which a starting server moves the log to log.1,
 // replacing the previous one.
 const maxLog = 1 << 20
 

@@ -82,7 +82,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
 		return 1
 	}
-	if refuseRoot("install", "; it uses sudo only to copy two files into place", stderr) {
+	if refuseRoot("install", "; it uses sudo only to copy one file into place", stderr) {
 		return 1
 	}
 	p, err := db.DefaultPaths()
@@ -136,7 +136,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	system := cb.SystemFiles(ext, self)
+	system := cb.SystemFiles(ext)
 	for i := range system {
 		system[i].Path = filepath.Join(sysroot, system[i].Path)
 	}
@@ -144,12 +144,6 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	// restart, so the extension is installed and profiles can be bound now.
 	ready := chrome.FilesCurrent(system)
 	if !ready {
-		// The host manifest's name is fixed, so another install's (another
-		// user's key, say) is in the same place; replacing it cuts that
-		// install off from its host.
-		if data, err := os.ReadFile(system[1].Path); err == nil && !namesExtension(data, ext.ID) {
-			fmt.Fprintf(stderr, "mirrormark: warning: %s lets another extension, not %s, start mirrormark; replacing it. If another install of mirrormark (with another key) uses it, that one stops working.\n", system[1].Path, ext.ID)
-		}
 		if err := writeSystemFiles(system, stdout, stderr); err != nil {
 			return fail(fmt.Errorf("could not copy the files %s needs into place (with sudo): %w", cb.Name, err))
 		}
@@ -327,9 +321,9 @@ mirrormark uninstall --browser %s sets them back.`, b.Name, b.Config)
 }
 
 // installFirefox installs into profiles of b, as the user: Gecko browsers
-// read add-ons and host manifests from the user's own directories, so no
-// sudo. It refuses profiles of any other browser before writing anything,
-// since those install only signed add-ons.
+// read add-ons from the profile's own directory, so no sudo. It refuses
+// profiles of any other browser before writing anything, since those
+// install only signed add-ons.
 func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []string, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "mirrormark:", err)
@@ -397,7 +391,7 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	for _, tg := range targets {
 		dirs = append(dirs, tg.dir)
 	}
-	files, err := firefox.Files(dirs, self)
+	files, err := firefox.Files(dirs)
 	if err != nil {
 		return fail(err)
 	}
@@ -715,7 +709,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	}
 	if isGecko {
 		others := otherUsers(p, fb.Config, stderr)
-		if err := uninstallFirefox(p, fb, others.gecko, stdout, stderr); err != nil {
+		if err := uninstallFirefox(p, fb, stdout); err != nil {
 			return fail(err)
 		}
 		if err := stopServer(p, others.all(), stdout); err != nil {
@@ -726,7 +720,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	cb, _ := chrome.Lookup(*browser) // checked above
 	keyFile := filepath.Join(p.Data, "extension.pem")
 	key, err := chrome.LoadKey(keyFile)
-	host := filepath.Join(sysroot, chrome.HostManifestPath())
+	legacy := filepath.Join(sysroot, chrome.LegacyHostManifest)
 	var users []string // other Chromium browsers that still have the extension
 	var others browserUsers
 	installed := hasDatabase(p, cb.Config)
@@ -739,11 +733,11 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		if _, err := os.Stat(paths[0]); !errors.Is(err, fs.ErrNotExist) {
 			installed = true
 		}
-		// The host manifest serves every Chromium browser, so it goes with
-		// the last one's external file. Its name is fixed; one that names
+		// An earlier build's host manifest starts nothing now, so it goes
+		// whatever the other browsers do. Its name is fixed; one that names
 		// another extension belongs to another install.
-		if data, err := os.ReadFile(host); err == nil && namesExtension(data, id) && len(users) == 0 {
-			paths = append(paths, host)
+		if data, err := os.ReadFile(legacy); err == nil && namesExtension(data, id) {
+			paths = append(paths, legacy)
 		}
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {
 			return fail(err)
@@ -752,8 +746,8 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
-		fmt.Fprintf(stdout, "No key in %s, so the extension id is unknown. Remove %s and %s by hand if they are there.\n",
-			keyFile, filepath.Join(sysroot, cb.ExternalFile("<id>")), host)
+		fmt.Fprintf(stdout, "No key in %s, so the extension id is unknown. Remove %s by hand if it is there.\n",
+			keyFile, filepath.Join(sysroot, cb.ExternalFile("<id>")))
 		if _, err := os.Stat(unitPath(p)); err == nil {
 			fmt.Fprintf(stdout, "Kept the mirrormark service %s. If no other browser uses mirrormark, stop and remove it with systemctl --user disable --now %s and rm %s.\n", unitPath(p), unitName, quoteArg(unitPath(p)))
 		}
@@ -774,7 +768,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "mirrormark is not installed in %s: no %s file and no %s database.\n", cb.Name, cb.Name, cb.Name)
 	}
 	if len(users) > 0 {
-		fmt.Fprintf(stdout, "Kept the CRX and the host manifest, which %s still uses.\n", strings.Join(users, " and "))
+		fmt.Fprintf(stdout, "Kept the CRX, which %s still uses.\n", strings.Join(users, " and "))
 	}
 	return finishUninstall(p, cb.Config, cb.Name, *purge, len(users) > 0, stdout, stderr)
 }
@@ -879,18 +873,17 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 }
 
 // uninstallFirefox removes the add-on from every profile a database file
-// names as b's, puts back the two prefs that weakened its add-on
-// checks, and removes the host manifest if it is this one's and users, the
-// other Gecko browsers whose profiles still hold the add-on, is empty. It
-// writes user.js first, so if that fails the add-on is still there and
-// running uninstall again finishes the job.
-func uninstallFirefox(p db.Paths, b firefox.Browser, users []string, stdout, stderr io.Writer) error {
+// names as b's, puts back the two prefs that weakened its add-on checks,
+// and removes the native host manifest an earlier build left if it names
+// the add-on. It writes user.js first, so if that fails the add-on is still
+// there and running uninstall again finishes the job.
+func uninstallFirefox(p db.Paths, b firefox.Browser, stdout io.Writer) error {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
 		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a %s profile", err, b.Name)
 	}
 	var files []chrome.File
-	var gone []string // XPIs, and the host manifest if it is this one's
+	var gone []string // XPIs, and the old host manifest if it is this one's
 	for _, d := range dbs {
 		if d.Profile.Browser != b.Config {
 			continue
@@ -916,14 +909,14 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, users []string, stdout, std
 		}
 	}
 	found := len(gone) > 0
-	// Every Gecko browser reads the one host manifest; it goes with the
-	// last whose profiles still hold the add-on.
-	host, err := firefox.HostManifestPath()
+	// An earlier build's host manifest starts nothing now, so it goes
+	// whatever the other Gecko browsers do.
+	legacy, err := firefox.LegacyHostManifest()
 	if err != nil {
 		return err
 	}
-	if data, err := os.ReadFile(host); err == nil && len(users) == 0 && bytes.Contains(data, []byte(`"`+extension.GeckoID+`"`)) {
-		gone = append(gone, host)
+	if data, err := os.ReadFile(legacy); err == nil && bytes.Contains(data, []byte(`"`+extension.GeckoID+`"`)) {
+		gone = append(gone, legacy)
 	}
 	if err := chrome.WriteFiles(files); err != nil {
 		return err
@@ -935,9 +928,6 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, users []string, stdout, std
 		fmt.Fprintf(stdout, "No %s profile was found in mirrormark's databases in %s, so no user.js was changed. If a profile still has mirrormark, check its user.js for xpinstall.signatures.required and extensions.autoDisableScopes, and set them back to true and 15.\n", b.Name, p.ProfilesDir())
 	} else {
 		fmt.Fprintf(stdout, "%s removes mirrormark from each profile when it next starts, and checks add-on signatures there again. Your bookmarks stay in %s.\n", b.Name, b.Name)
-	}
-	if len(users) > 0 {
-		fmt.Fprintf(stdout, "Kept the host manifest %s, which %s's profiles still use.\n", host, strings.Join(users, "'s and "))
 	}
 	return nil
 }
@@ -965,10 +955,9 @@ func geckoUsers(dbs map[string]*db.DB, except string, stderr io.Writer) []string
 }
 
 // chromiumUsers names the Chromium browsers other than except whose
-// external extension file for id is in place: they still use the CRX, the
-// host manifest and the server except shares with them. A browser whose
-// file it cannot check counts as one, so a shared file goes only when it
-// is known to be unused.
+// external extension file for id is in place: they still use the CRX and
+// the server except shares with them. A browser whose file it cannot check
+// counts as one, so a shared file goes only when it is known to be unused.
 func chromiumUsers(except, id string, stderr io.Writer) []string {
 	var out []string
 	for _, o := range chrome.Browsers {

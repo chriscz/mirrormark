@@ -3,7 +3,8 @@ package host_test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"os"
@@ -21,13 +22,14 @@ import (
 	"github.com/chriscz/mirrormark/internal/merge"
 )
 
-// ext is a fake extension: it drives a real host.Run over pipes and applies
-// its ops to a fakebrowser.Browser, as the extension does in Chrome.
+// ext is a fake extension: it drives a real host.Run over an in-memory
+// connection and applies its ops to a fakebrowser.Browser, as the extension
+// does in Chrome.
 type ext struct {
 	t       *testing.T
 	mu      sync.Mutex
 	b       *fakebrowser.Browser
-	w       *io.PipeWriter
+	x       *end
 	o       extOpts
 	errs    []host.Msg     // errors, and the problems in status messages
 	status  []host.Problem // the last status message's problems
@@ -64,13 +66,69 @@ func (l *logBuf) String() string {
 	return l.b.String()
 }
 
+// end is one end of an in-memory connection between the fake extension
+// and the host. Messages cross it encoded, as they cross a socket, so a
+// test can send one that is not JSON. Closing one end tells the other it
+// has gone.
+type end struct {
+	in   <-chan []byte
+	out  chan<- []byte
+	gone <-chan struct{}
+	self chan struct{}
+	once sync.Once
+}
+
+func pipe() (h, x *end) {
+	hx, xh := make(chan []byte), make(chan []byte)
+	hs, xs := make(chan struct{}), make(chan struct{})
+	return &end{in: xh, out: hx, gone: xs, self: hs}, &end{in: hx, out: xh, gone: hs, self: xs}
+}
+
+func (e *end) Read() (host.Msg, error) {
+	select {
+	case b := <-e.in:
+		return host.Decode(b)
+	case <-e.gone:
+		return host.Msg{}, io.EOF
+	}
+}
+
+func (e *end) Write(m host.Msg) error {
+	b, err := host.Encode(m)
+	if err != nil {
+		return err
+	}
+	return e.writeRaw(b)
+}
+
+func (e *end) writeRaw(b []byte) error {
+	select {
+	case e.out <- b:
+		return nil
+	case <-e.gone:
+		return io.ErrClosedPipe
+	}
+}
+
+func (e *end) Close() { e.once.Do(func() { close(e.self) }) }
+
+// testOrigin is the extension origin the tests' databases are bound to.
+const testOrigin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+
+// token is the token install would have given database id: 64 lowercase
+// hex digits.
+func token(id string) string {
+	sum := sha256.Sum256([]byte("t-" + id))
+	return hex.EncodeToString(sum[:])
+}
+
 func paths(t *testing.T) db.Paths {
 	d := t.TempDir()
 	return db.Paths{Config: d + "/config", Data: d + "/data", State: d + "/state"}
 }
 
 func addProfile(t *testing.T, p db.Paths, id string) {
-	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: "chrome/" + id, Browser: "chrome"}}
+	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: "chrome/" + id, Browser: "chrome", Origin: testOrigin, Token: token(id)}}
 	if err := db.SaveDB(p.ProfileFile(id), d); err != nil {
 		t.Fatal(err)
 	}
@@ -84,13 +142,13 @@ func writeConfig(t *testing.T, p db.Paths, text string) {
 
 const workUnion = "format: 1\nunions:\n  work:\n    a: toolbar/Work\n    b: toolbar/Work\n"
 
-// start connects a fake extension bound to dbID and sends hello and a tree.
+// start connects a fake extension bound to dbID and sends hello. It answers
+// the host's challenge with its proof and a tree, as the extension does.
 func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extOpts) *ext {
-	hr, ew := io.Pipe()
-	er, hw := io.Pipe()
+	h, x := pipe()
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &ext{t: t, b: b, w: ew, o: o, done: make(chan error, 1)}
-	ho := host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	e := &ext{t: t, b: b, x: x, o: o, done: make(chan error, 1)}
+	ho := host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Origin: testOrigin, Port: "0"}
 	if o.log != nil {
 		ho.Log = slog.New(slog.NewTextHandler(o.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
@@ -102,21 +160,31 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 	}
 	exited := make(chan struct{})
 	go func() {
-		e.done <- host.Run(ctx, host.Stream(hr, hw), ho)
-		// As a host process's stdin and stdout close when it exits.
-		hr.Close()
-		hw.Close()
+		e.done <- host.Run(ctx, h, ho)
+		// As the server closes the socket when the host stops.
+		h.Close()
 		close(exited)
 	}()
 	// Wait for the host, so it does not write into a removed temp dir.
-	t.Cleanup(func() { cancel(); ew.Close(); <-exited })
+	t.Cleanup(func() { cancel(); x.Close(); <-exited })
 	go func() {
 		for {
-			m, err := host.ReadMsg(er)
+			m, err := x.Read()
 			if err != nil {
 				return
 			}
 			switch m.Type {
+			case "challenge":
+				if m.Proof != mac(token(dbID), "server:0:"+nonceE) {
+					e.t.Errorf("challenge %+v: not the host's proof", m)
+					continue
+				}
+				// Not from this goroutine: a host that refuses the proof
+				// writes its error while the tree is on its way.
+				go func() {
+					e.send(host.Msg{V: 1, Type: "proof", Proof: mac(token(dbID), "extension:"+m.Nonce)})
+					e.sendTree()
+				}()
 			case "apply":
 				e.mu.Lock()
 				e.applies++
@@ -148,14 +216,13 @@ func start(t *testing.T, p db.Paths, dbID string, b *fakebrowser.Browser, o extO
 		}
 	}()
 	if !o.noHello {
-		e.send(host.Msg{V: 1, Type: "hello", DB: dbID, Browser: "chrome/test"})
-		e.sendTree()
+		e.send(host.Msg{V: 1, Type: "hello", DB: dbID, Nonce: nonceE, Browser: "chrome/test"})
 	}
 	return e
 }
 
 func (e *ext) send(m host.Msg) {
-	if err := host.WriteMsg(e.w, m); err != nil {
+	if err := e.x.Write(m); err != nil {
 		e.t.Log("send:", err)
 	}
 }
@@ -363,11 +430,11 @@ func TestUnusableLockFileIsALockError(t *testing.T) {
 func TestOtherVersionIsRefused(t *testing.T) {
 	p := paths(t)
 	addProfile(t, p, "a")
-	hr, ew := io.Pipe()
-	er, hw := io.Pipe()
-	go host.Run(context.Background(), host.Stream(hr, hw), host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	go host.WriteMsg(ew, host.Msg{V: 2, Type: "hello", DB: "a"})
-	m, err := host.ReadMsg(er)
+	h, x := pipe()
+	t.Cleanup(x.Close)
+	go host.Run(context.Background(), h, host.Options{Paths: p, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Origin: testOrigin, Port: "0"})
+	go x.Write(host.Msg{V: 2, Type: "hello", DB: "a", Nonce: nonceE})
+	m, err := x.Read()
 	if err != nil || m.Code != "unsupported-version" {
 		t.Fatalf("got %+v, %v", m, err)
 	}
@@ -636,7 +703,7 @@ func TestEOFStopsCleanlyAndFreesTheLock(t *testing.T) {
 	addProfile(t, p, "a")
 	e := start(t, p, "a", fakebrowser.New(), extOpts{})
 	eventually(t, "hello", func() bool { return db.Connected(p, "a", time.Time{}) })
-	e.w.Close()
+	e.x.Close()
 	select {
 	case err := <-e.done:
 		if err != nil {
@@ -665,8 +732,7 @@ func TestMalformedMessages(t *testing.T) {
 		t.Fatalf("host stopped on an unknown type: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	frame := binary.NativeEndian.AppendUint32(nil, 5)
-	if _, err := e.w.Write(append(frame, "{oops"...)); err != nil {
+	if err := e.x.writeRaw([]byte("{oops")); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -698,8 +764,7 @@ func TestTreeBeforeHelloIsIgnored(t *testing.T) {
 	if applies, rounds := e.count(); applies != 0 || rounds != 0 {
 		t.Fatalf("%d applies and %d rounds before hello", applies, rounds)
 	}
-	e.send(host.Msg{V: 1, Type: "hello", DB: "a", Browser: "chrome/test"})
-	e.sendTree()
+	e.send(host.Msg{V: 1, Type: "hello", DB: "a", Nonce: nonceE, Browser: "chrome/test"})
 	eventually(t, "the member folder", func() bool { return e.has("Work") })
 }
 
@@ -737,20 +802,25 @@ func readers() int {
 // the error must not hold a goroutine and its memory until then.
 func TestStoppedHostLeavesNoReader(t *testing.T) {
 	before := readers()
-	hr, ew := io.Pipe()
-	er, hw := io.Pipe()
-	go io.Copy(io.Discard, er)
+	h, x := pipe()
+	go func() {
+		for {
+			if _, err := x.Read(); err != nil {
+				return
+			}
+		}
+	}()
 	done := make(chan error, 1)
 	go func() {
-		done <- host.Run(context.Background(), host.Stream(hr, hw), host.Options{Paths: paths(t), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		done <- host.Run(context.Background(), h, host.Options{Paths: paths(t), Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Origin: testOrigin, Port: "0"})
 	}()
-	host.WriteMsg(ew, host.Msg{V: host.Version, Type: "hello", DB: "nope"})
+	x.Write(host.Msg{V: host.Version, Type: "hello", DB: "nope", Nonce: nonceE})
 	if err := <-done; err == nil {
 		t.Fatal("host kept running")
 	}
 	// Nothing may be left to read it, so the write may never finish.
-	go host.WriteMsg(ew, host.Msg{V: host.Version, Type: "error", Message: strings.Repeat("x", 512<<10)})
+	go x.Write(host.Msg{V: host.Version, Type: "error", Message: strings.Repeat("x", 512<<10)})
 	eventually(t, "the reader to exit", func() bool { return readers() <= before })
-	hr.Close()
-	hw.Close()
+	x.Close()
+	h.Close()
 }

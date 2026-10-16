@@ -154,24 +154,20 @@ func TestFilesAppendOnlyMissingPrefs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "user.js"), []byte("user_pref(\"browser.startup.page\", 3);\n"+Prefs[1]+"\n"), 0o644)
-	files, err := Files([]string{dir}, "/usr/local/bin/mirrormark")
+	files, err := Files([]string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, _ := HostManifestPath()
-	if len(files) != 3 || files[0].Path != host || files[1].Path != XPIPath(dir) || files[2].Path != filepath.Join(dir, "user.js") {
+	if len(files) != 2 || files[0].Path != XPIPath(dir) || files[1].Path != filepath.Join(dir, "user.js") {
 		t.Fatalf("paths %v", files)
 	}
-	if !bytes.Contains(files[0].Data, []byte(`"allowed_extensions": [`+"\n    \""+extension.GeckoID+`"`)) ||
-		!bytes.Contains(files[0].Data, []byte(`"path": "/usr/local/bin/mirrormark"`)) {
-		t.Fatalf("host manifest %s", files[0].Data)
-	}
 	want := "user_pref(\"browser.startup.page\", 3);\n" + Prefs[1] + "\n" + Prefs[0] + "\n" + Prefs[2] + "\n"
-	if string(files[2].Data) != want {
-		t.Fatalf("user.js %q", files[2].Data)
+	if string(files[1].Data) != want {
+		t.Fatalf("user.js %q", files[1].Data)
 	}
-	if !strings.HasSuffix(host, "/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json") {
-		t.Fatal(host)
+	host, err := LegacyHostManifest()
+	if err != nil || host != filepath.Join(os.Getenv("HOME"), ".mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json") {
+		t.Fatal(host, err)
 	}
 }
 
@@ -183,13 +179,13 @@ func TestFilesReplaceResetLinesInPlace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "user.js"), []byte(ResetPrefs[Prefs[0]]+"\nuser_pref(\"browser.startup.page\", 3);\n"+ResetPrefs[Prefs[1]]+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	files, err := Files([]string{dir}, "/usr/local/bin/mirrormark")
+	files, err := Files([]string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Prefs[0] + "\nuser_pref(\"browser.startup.page\", 3);\n" + Prefs[1] + "\n" + Prefs[2] + "\n"
-	if string(files[2].Data) != want {
-		t.Fatalf("user.js %q", files[2].Data)
+	if string(files[1].Data) != want {
+		t.Fatalf("user.js %q", files[1].Data)
 	}
 }
 

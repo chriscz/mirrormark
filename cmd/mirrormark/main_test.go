@@ -37,55 +37,27 @@ func TestHelp(t *testing.T) {
 	}
 }
 
+// The arguments browsers started the native host with are unknown
+// commands now: nothing runs the host that way any more.
 func TestUnknownCommand(t *testing.T) {
-	var out, errb bytes.Buffer
-	if code := run([]string{"frobnicate"}, strings.NewReader(""), &out, &errb); code != 2 {
-		t.Fatalf("exit code %d, want 2", code)
+	for _, arg := range []string{"frobnicate", "host", "chrome-extension://abc/", "/home/u/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json"} {
+		var out, errb bytes.Buffer
+		if code := run([]string{arg}, strings.NewReader(""), &out, &errb); code != 2 {
+			t.Fatalf("%s: exit code %d, want 2", arg, code)
+		}
 	}
 }
 
-// Chrome's extension-origin argument selects host mode, which logs to the
-// log file and exits cleanly when the browser closes the port.
-func TestExtensionOriginRunsTheHost(t *testing.T) {
+// A log over 1 MiB moves to log.1, replacing the one before, when the
+// server opens it.
+func TestOpenLogRotatesALargeLog(t *testing.T) {
 	d := t.TempDir()
 	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(v, d+"/"+v)
 	}
-	var out, errb bytes.Buffer
-	if code := run([]string{"chrome-extension://abc/"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit code %d, stderr %q", code, errb.String())
-	}
-	if out.Len() != 0 {
-		t.Fatalf("host wrote %q to stdout", out.String())
-	}
-	if _, err := os.Stat(d + "/XDG_STATE_HOME/mirrormark/log"); err != nil {
+	p, err := db.DefaultPaths()
+	if err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Firefox starts the host with the host manifest's path and the
-// extension's id.
-func TestFirefoxArgumentsRunTheHost(t *testing.T) {
-	d := t.TempDir()
-	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-		t.Setenv(v, d+"/"+v)
-	}
-	var out, errb bytes.Buffer
-	args := []string{"/home/u/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json", "mirrormark@chriscz.github.io"}
-	if code := run(args, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit code %d, stderr %q", code, errb.String())
-	}
-	if out.Len() != 0 {
-		t.Fatalf("host wrote %q to stdout", out.String())
-	}
-}
-
-// A log over 1 MiB moves to log.1, replacing the one before, when a host
-// starts.
-func TestHostRotatesALargeLog(t *testing.T) {
-	d := t.TempDir()
-	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-		t.Setenv(v, d+"/"+v)
 	}
 	log := d + "/XDG_STATE_HOME/mirrormark/log"
 	if err := os.MkdirAll(d+"/XDG_STATE_HOME/mirrormark", 0o700); err != nil {
@@ -98,10 +70,15 @@ func TestHostRotatesALargeLog(t *testing.T) {
 	if err := os.WriteFile(log+".1", []byte("older"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var out, errb bytes.Buffer
-	if code := run([]string{"host"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit code %d, stderr %q", code, errb.String())
+	open := func() {
+		t.Helper()
+		_, f, err := openLog(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
 	}
+	open()
 	if old, _ := os.ReadFile(log + ".1"); !bytes.Equal(old, big) {
 		t.Fatalf("log.1 holds %d bytes, want the old log", len(old))
 	}
@@ -110,9 +87,7 @@ func TestHostRotatesALargeLog(t *testing.T) {
 	}
 
 	// A small log stays.
-	if code := run([]string{"host"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit code %d", code)
-	}
+	open()
 	if old, _ := os.ReadFile(log + ".1"); !bytes.Equal(old, big) {
 		t.Fatal("a small log was rotated")
 	}

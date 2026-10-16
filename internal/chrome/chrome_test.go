@@ -314,26 +314,17 @@ func TestWriteFilesKeepsALinkAndTheMode(t *testing.T) {
 
 func TestSystemFiles(t *testing.T) {
 	e := Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "0.1.0", CRX: "/h/.local/share/mirrormark/mirrormark.crx"}
-	fs := Chrome.SystemFiles(e, "/usr/local/bin/mirrormark")
-	if fs[0].Path != "/usr/share/google-chrome/extensions/pjjjaeommfpeolloibnafkcmkindkagl.json" ||
-		!bytes.Contains(fs[0].Data, []byte(`"external_version": "0.1.0"`)) {
-		t.Fatalf("external file %s %s", fs[0].Path, fs[0].Data)
+	fs := Chrome.SystemFiles(e)
+	if len(fs) != 1 || fs[0].Path != "/usr/share/google-chrome/extensions/pjjjaeommfpeolloibnafkcmkindkagl.json" ||
+		fs[0].Path != Chrome.ExternalFile(e.ID) || !bytes.Contains(fs[0].Data, []byte(`"external_version": "0.1.0"`)) {
+		t.Fatalf("system files %v", fs)
 	}
 	var ext map[string]string
 	if err := json.Unmarshal(fs[0].Data, &ext); err != nil || len(ext) != 2 || ext["external_crx"] != e.CRX {
 		t.Fatalf("external file %s: %v", fs[0].Data, err)
 	}
-	if fs[1].Path != "/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json" ||
-		!bytes.Contains(fs[1].Data, []byte(`"chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/"`)) {
-		t.Fatalf("host manifest %s %s", fs[1].Path, fs[1].Data)
-	}
-	var host hostManifestJSON
-	if err := json.Unmarshal(fs[1].Data, &host); err != nil || host.Name != "com.github.chriscz.mirrormark" ||
-		host.Path != "/usr/local/bin/mirrormark" || host.Type != "stdio" || len(host.AllowedOrigins) != 1 {
-		t.Fatalf("host manifest %s: %v", fs[1].Data, err)
-	}
-	if fs[0].Path != Chrome.ExternalFile(e.ID) || fs[1].Path != HostManifestPath() || len(fs) != 2 {
-		t.Fatalf("paths %s %s", fs[0].Path, fs[1].Path)
+	if LegacyHostManifest != "/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json" {
+		t.Fatal(LegacyHostManifest)
 	}
 }
 

@@ -74,40 +74,26 @@ func XPIPath(profileDir string) string {
 	return filepath.Join(profileDir, "extensions", extension.GeckoID+".xpi")
 }
 
-// HostManifestPath is Firefox's per-user native host manifest. Firefox
-// reads only ~/.mozilla/native-messaging-hosts, even when its profiles live
-// under ~/.config/mozilla.
-func HostManifestPath() (string, error) {
+// LegacyHostManifest is where builds before the server put the native host
+// manifest Firefox and LibreWolf read; uninstall removes it when it names
+// the gecko id.
+func LegacyHostManifest() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".mozilla", "native-messaging-hosts", extension.HostName+".json"), nil
+	return filepath.Join(home, ".mozilla", "native-messaging-hosts", "com.github.chriscz.mirrormark.json"), nil
 }
 
-type hostManifestJSON struct {
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	Path              string   `json:"path"`
-	Type              string   `json:"type"`
-	AllowedExtensions []string `json:"allowed_extensions"`
-}
-
-// Files are the files install writes: the host manifest letting the add-on
-// start bin, then for each profile the XPI and its user.js with the prefs
-// set (see withPrefs). The user's own lines stay as they are.
-func Files(profileDirs []string, bin string) ([]chrome.File, error) {
-	host, err := HostManifestPath()
-	if err != nil {
-		return nil, err
-	}
-	m, _ := json.MarshalIndent(hostManifestJSON{Name: extension.HostName, Description: "mirrormark bookmark sync",
-		Path: bin, Type: "stdio", AllowedExtensions: []string{extension.GeckoID}}, "", "  ") // cannot fail
-	files := []chrome.File{{Path: host, Data: append(m, '\n')}}
+// Files are the files install writes: for each profile the XPI and its
+// user.js with the prefs set (see withPrefs). The user's own lines stay as
+// they are.
+func Files(profileDirs []string) ([]chrome.File, error) {
 	xpi, err := XPI()
 	if err != nil {
 		return nil, err
 	}
+	var files []chrome.File
 	for _, dir := range profileDirs {
 		user, err := os.ReadFile(filepath.Join(dir, "user.js"))
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {

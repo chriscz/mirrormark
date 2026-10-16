@@ -27,10 +27,6 @@ import (
 	"path/filepath"
 )
 
-// HostName is the native messaging host name, which the binary still
-// installs; the extension no longer connects to it.
-const HostName = "com.github.chriscz.mirrormark"
-
 // GeckoID is the extension's id in Firefox. Firefox does not derive ids from
 // a key, so every install shares it.
 const GeckoID = "mirrormark@chriscz.github.io"

@@ -24,8 +24,6 @@ import (
 	"github.com/chriscz/mirrormark/internal/ws"
 )
 
-const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-
 // bound writes a database file for id with org and token.
 func bound(t *testing.T, p db.Paths, id, org, token string) {
 	d := &db.DB{Format: 1, Profile: db.Profile{ID: id, Label: "chrome/" + id, Browser: "chrome", Origin: org, Token: token}}
@@ -127,11 +125,11 @@ func next(t *testing.T, c *ws.Conn) host.Msg {
 
 func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
+	bound(t, p, "a", testOrigin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	for _, c := range []struct{ name, host, origin string }{
-		{"another host name", "localhost:" + port, origin},
+		{"another host name", "localhost:" + port, testOrigin},
 		{"a web page", "", "http://127.0.0.1:8000"},
 		{"no origin", "", ""},
 	} {
@@ -145,8 +143,8 @@ func TestServeRefusesBeforeTheUpgrade(t *testing.T) {
 // answers with an error and no challenge.
 func TestServeChallengesOnlyForABinding(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "untokened", origin, "")
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "untokened", testOrigin, "")
 	bound(t, p, "other", "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", tok3)
 	addr := serve(t, p, time.Hour)
 	for _, c := range []struct{ id, nonce, code string }{
@@ -155,7 +153,7 @@ func TestServeChallengesOnlyForABinding(t *testing.T) {
 		{"other", nonceE, "bad-token"},
 		{"a", "short", "bad-token"},
 	} {
-		conn, err := dialAs(t, addr, "", origin)
+		conn, err := dialAs(t, addr, "", testOrigin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -170,10 +168,10 @@ func TestServeChallengesOnlyForABinding(t *testing.T) {
 // and the hello after it still gets a challenge.
 func TestServeIgnoresAProofBeforeTheHello(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
+	bound(t, p, "a", testOrigin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
-	c, err := dialAs(t, addr, "", origin)
+	c, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,13 +181,13 @@ func TestServeIgnoresAProofBeforeTheHello(t *testing.T) {
 
 func TestServeRefusesAWrongProof(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	refused := func(name string, proof func(nonceS string) string) {
 		t.Helper()
-		c, err := dialAs(t, addr, "", origin)
+		c, err := dialAs(t, addr, "", testOrigin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,7 +206,7 @@ func TestServeRefusesAWrongProof(t *testing.T) {
 	}
 
 	// A proof that was right once is refused against a new nonce.
-	c, _ := dialAs(t, addr, "", origin)
+	c, _ := dialAs(t, addr, "", testOrigin)
 	old := mac(tok1, "extension:"+challenged(t, c, port, "a", tok1))
 	send(t, c, host.Msg{Type: "proof", Proof: old})
 	send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
@@ -221,15 +219,15 @@ func TestServeRefusesAWrongProof(t *testing.T) {
 
 func TestServeRunsAHostPerConnection(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
 	tokens := map[string]string{"a": tok1, "b": tok2}
 	since := time.Now()
 	for _, id := range []string{"a", "b"} {
-		c, err := dialAs(t, addr, "", origin)
+		c, err := dialAs(t, addr, "", testOrigin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +248,7 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 		}
 	}
 	// A second connection for a database in use is a copied profile.
-	c, _ := dialAs(t, addr, "", origin)
+	c, _ := dialAs(t, addr, "", testOrigin)
 	nonceS := challenged(t, c, port, "a", tok1)
 	send(t, c, host.Msg{Type: "proof", Proof: mac(tok1, "extension:"+nonceS)})
 	if m := next(t, c); m.Code != "db-locked" {
@@ -260,8 +258,8 @@ func TestServeRunsAHostPerConnection(t *testing.T) {
 
 func TestServePings(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	c, err := dialAs(t, serve(t, p, 20*time.Millisecond), "", origin)
+	bound(t, p, "a", testOrigin, tok1)
+	c, err := dialAs(t, serve(t, p, 20*time.Millisecond), "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,15 +306,15 @@ func TestListenTakesTheFirstFreePort(t *testing.T) {
 func TestServeDropsASilentConnection(t *testing.T) {
 	host.SetHelloWait(t, 100*time.Millisecond)
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
+	bound(t, p, "a", testOrigin, tok1)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
-	silent, err := dialAs(t, addr, "", origin)
+	silent, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// One that says hello but never answers the challenge is dropped too.
-	halfway, err := dialAs(t, addr, "", origin)
+	halfway, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,12 +345,12 @@ func TestServeDropsASilentConnection(t *testing.T) {
 func TestServeKeepsAProvenQuietConnection(t *testing.T) {
 	host.SetHelloWait(t, 100*time.Millisecond)
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
-	c, err := dialAs(t, addr, "", origin)
+	c, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,13 +368,13 @@ func TestServeKeepsAProvenQuietConnection(t *testing.T) {
 // warning in the peer's words.
 func TestServeIgnoresMessagesBeforeTheProof(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	writeConfig(t, p, workUnion)
 	log := &logBuf{}
 	addr := serveLog(t, p, time.Hour, log)
 	_, port, _ := net.SplitHostPort(addr)
-	c, err := dialAs(t, addr, "", origin)
+	c, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +403,7 @@ func rawConn(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
 	}
 	t.Cleanup(func() { nc.Close() })
 	nc.SetDeadline(time.Now().Add(5 * time.Second))
-	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nOrigin: "+origin+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nOrigin: "+testOrigin+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 	br := bufio.NewReader(nc)
 	resp, err := http.ReadResponse(br, nil)
@@ -438,7 +436,7 @@ func closeCode(t *testing.T, br *bufio.Reader) uint16 {
 // that claims 1 MB is refused at once, before any of it is read.
 func TestServeRefusesALargeMessageBeforeTheProof(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
+	bound(t, p, "a", testOrigin, tok1)
 	nc, br := rawConn(t, serve(t, p, time.Hour))
 	nc.Write([]byte{0x81, 0xff, 0, 0, 0, 0, 0, 0x10, 0, 0, 1, 2, 3, 4})
 	if code := closeCode(t, br); code != 1009 {
@@ -453,8 +451,8 @@ func TestServeRefusesALargeMessageBeforeTheProof(t *testing.T) {
 // for an answer; the tree may be far larger than a hello.
 func TestServeTakesALargeTreeRightAfterTheProof(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	writeConfig(t, p, workUnion)
 	addr := serve(t, p, time.Hour)
 	_, port, _ := net.SplitHostPort(addr)
@@ -467,7 +465,7 @@ func TestServeTakesALargeTreeRightAfterTheProof(t *testing.T) {
 		t.Fatalf("the tree is only %d bytes", len(tree))
 	}
 	for range 20 {
-		c, err := dialAs(t, addr, "", origin)
+		c, err := dialAs(t, addr, "", testOrigin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -506,7 +504,7 @@ func TestServeAdmitsOnlyExtensionOrigins(t *testing.T) {
 // that keeps knocking does not grow the log.
 func TestServeLogsRefusalsBriefly(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
+	bound(t, p, "a", testOrigin, tok1)
 	log := &logBuf{}
 	addr := serveLog(t, p, time.Hour, log)
 	for range 3 {
@@ -528,13 +526,13 @@ func TestServeLogsRefusalsBriefly(t *testing.T) {
 // the log has the details, and the unproven peer only db-missing.
 func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "broken", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "broken", testOrigin, tok2)
 	if err := os.WriteFile(p.ProfileFile("broken"), []byte("format: [\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	log := &logBuf{}
-	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", origin)
+	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,9 +548,9 @@ func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {
 // the server says so in the log and proves nothing with it.
 func TestServeRefusesAMalformedToken(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, strings.ToUpper(tok1))
+	bound(t, p, "a", testOrigin, strings.ToUpper(tok1))
 	log := &logBuf{}
-	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", origin)
+	c, err := dialAs(t, serveLog(t, p, time.Hour, log), "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,8 +565,8 @@ func TestServeRefusesAMalformedToken(t *testing.T) {
 // rather than wait for hosts nothing will stop.
 func TestServeStopsItsHostsWhenTheListenerFails(t *testing.T) {
 	p := paths(t)
-	bound(t, p, "a", origin, tok1)
-	bound(t, p, "b", origin, tok2)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
 	writeConfig(t, p, workUnion)
 	ln, err := host.Listen([]int{0})
 	if err != nil {
@@ -581,7 +579,7 @@ func TestServeStopsItsHostsWhenTheListenerFails(t *testing.T) {
 	}()
 	addr := ln.Addr().String()
 	_, port, _ := net.SplitHostPort(addr)
-	c, err := dialAs(t, addr, "", origin)
+	c, err := dialAs(t, addr, "", testOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}

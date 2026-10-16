@@ -381,8 +381,8 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	}
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
 	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-	paths := []string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}
-	if len(*sudoCalls) != 2 {
+	paths := []string{chrome.Chrome.ExternalFile(id)}
+	if len(*sudoCalls) != 1 {
 		t.Fatalf("sudo calls %v", *sudoCalls)
 	}
 	for i, c := range *sudoCalls {
@@ -398,9 +398,7 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	if !bytes.Contains(ext, []byte(filepath.Join(p.Data, "mirrormark.crx"))) {
 		t.Fatalf("external file %s", ext)
 	}
-	if host, _ := os.ReadFile(filepath.Join(root, paths[1])); !bytes.Contains(host, []byte(`"chrome-extension://`+id+`/"`)) {
-		t.Fatalf("host manifest %s", host)
-	}
+	mustBeGone(t, "install", filepath.Join(root, chrome.LegacyHostManifest))
 	for dir, id := range map[string]string{"Default": "chrome-personal", "Profile 1": "chrome-work"} {
 		d, err := db.LoadDB(p.ProfileFile(id))
 		if err != nil || d.Profile.Path != filepath.Join(udd, dir) || d.Profile.Label != "chrome/"+strings.TrimPrefix(id, "chrome-") {
@@ -423,7 +421,7 @@ func TestInstallWritesSystemFilesWithSudoThenBinds(t *testing.T) {
 	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if len(*sudoCalls) != 2 || strings.Contains(out.String(), "Restart Chrome") {
+	if len(*sudoCalls) != 1 || strings.Contains(out.String(), "Restart Chrome") {
 		t.Fatalf("second run: sudo %v\n%s", *sudoCalls, out.String())
 	}
 	for _, line := range []string{"bound: Default -> chrome-personal\n", "bound: Profile 1 -> chrome-work\n"} {
@@ -668,28 +666,6 @@ func TestCommandsRefuseToRunAsRoot(t *testing.T) {
 	mustBeGone(t, "as root", unitPath(p))
 }
 
-// Two installs with different keys share the host manifest's one name, so
-// each replaces the other's. install goes ahead but says so.
-func TestInstallWarnsWhenItReplacesAnotherExtensionsHostManifest(t *testing.T) {
-	skipIfRoot(t)
-	p := testHome(t)
-	root, _ := fakeSystem(t)
-	fakeChromeOnPath(t, p)
-	other := chrome.Chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
-	other.Path = filepath.Join(root, other.Path)
-	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
-	var out, errb bytes.Buffer
-	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
-		t.Fatalf("exit %d: %s", code, errb.String())
-	}
-	if !strings.Contains(errb.String(), "warning: "+other.Path+" lets another extension") {
-		t.Fatalf("stderr %q", errb.String())
-	}
-	if chrome.FilesCurrent([]chrome.File{other}) {
-		t.Fatal("the host manifest was not replaced")
-	}
-}
-
 func TestInstallRejectsAnUnknownProfile(t *testing.T) {
 	testHome(t)
 	_, calls := fakeSystem(t)
@@ -843,8 +819,7 @@ func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
 	for _, n := range []string{"alpha", "beta", "delta", "gamma"} {
 		mustBeGone(t, "listing", filepath.Join(root, "x"+n+"."+n, "user.js"), filepath.Join(root, "x"+n+"."+n, "extensions"))
 	}
-	host, _ := firefox.HostManifestPath()
-	mustBeGone(t, "listing", host, p.Data, calls, unitPath(p))
+	mustBeGone(t, "listing", p.Data, calls, unitPath(p))
 	if len(*systemctl) != 0 {
 		t.Fatalf("systemctl %q", *systemctl)
 	}
@@ -860,14 +835,14 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 	run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb)
 	key, _ := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
 	id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-	paths := []string{chrome.Chrome.ExternalFile(id), chrome.HostManifestPath()}
+	paths := []string{chrome.Chrome.ExternalFile(id)}
 
 	out.Reset()
 	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	last := (*sudoCalls)[len(*sudoCalls)-1]
-	if !slices.Equal(last, []string{"rm", "-f", "--", filepath.Join(root, paths[0]), filepath.Join(root, paths[1])}) {
+	if !slices.Equal(last, []string{"rm", "-f", "--", filepath.Join(root, paths[0])}) {
 		t.Fatalf("sudo %v", last)
 	}
 	for _, f := range paths {
@@ -903,16 +878,15 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 	}
 }
 
-// The host manifest's name is fixed; another install's manifest (another
-// user's key, say) is not this one's to remove.
+// The old host manifest's name is fixed; another install's (another user's
+// key, say) is not this one's to remove.
 func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	skipIfRoot(t)
 	testHome(t)
 	root, sudoCalls := fakeSystem(t)
 	var out, errb bytes.Buffer
 	run([]string{"unpack"}, strings.NewReader(""), &out, &errb)
-	other := chrome.Chrome.SystemFiles(chrome.Extension{ID: "pjjjaeommfpeolloibnafkcmkindkagl", Version: "1", CRX: "/x.crx"}, "/bin/x")[1]
-	other.Path = filepath.Join(root, other.Path)
+	other := chrome.File{Path: filepath.Join(root, chrome.LegacyHostManifest), Data: []byte(`{"allowed_origins": ["chrome-extension://pjjjaeommfpeolloibnafkcmkindkagl/"]}`)}
 	runSudo(bytes.NewReader(other.Data), nil, nil, "install", "-D", "-m", "0644", "/dev/stdin", other.Path)
 	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
@@ -922,6 +896,59 @@ func TestUninstallLeavesAnotherExtensionsHostManifest(t *testing.T) {
 	}
 	if len(*sudoCalls) != 1 {
 		t.Fatalf("sudo for nothing: %v", *sudoCalls)
+	}
+}
+
+// uninstall removes the native host manifest a build before the server
+// left, when it is this install's.
+func TestUninstallRemovesTheOldHostManifest(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	root, _ := fakeSystem(t)
+	var out, errb bytes.Buffer
+	run([]string{"unpack"}, strings.NewReader(""), &out, &errb) // creates the key
+	key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem"))
+	must(t, err)
+	legacy := filepath.Join(root, chrome.LegacyHostManifest)
+	// Root's directories are read-only here; put it in place as sudo would.
+	must(t, runSudo(strings.NewReader(`{"allowed_origins": ["chrome-extension://`+chrome.ExtensionID(chrome.PublicKeyDER(key))+`/"]}`), io.Discard, io.Discard,
+		"install", "-D", "-m", "0644", "/dev/stdin", legacy))
+	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("old host manifest after uninstall: %v", err)
+	}
+}
+
+// uninstall --browser firefox removes the native host manifest a build
+// before the server left when it names the add-on, and leaves one that
+// names another extension.
+func TestFirefoxUninstallRemovesTheOldHostManifest(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	_, _ = firefoxData(t, p, "aurora")
+	var out, errb bytes.Buffer
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	legacy, err := firefox.LegacyHostManifest()
+	must(t, err)
+	mustBeGone(t, "install", legacy)
+	for _, c := range []struct {
+		id   string
+		gone bool
+	}{{extension.GeckoID, true}, {"someone-else@example.org", false}} {
+		must(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
+		must(t, os.WriteFile(legacy, []byte(`{"allowed_extensions": ["`+c.id+`"]}`), 0o644))
+		if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+			t.Fatalf("%s: exit %d: %s", c.id, code, errb.String())
+		}
+		if c.gone {
+			mustBeGone(t, "uninstall", legacy)
+		} else {
+			mustExist(t, "uninstall", legacy)
+		}
 	}
 }
 
@@ -1003,10 +1030,6 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 			t.Fatalf("%s: %+v %v", n, d, err)
 		}
 	}
-	host, _ := firefox.HostManifestPath()
-	if data, err := os.ReadFile(host); err != nil || !bytes.Contains(data, []byte(extension.GeckoID)) {
-		t.Fatalf("host manifest %s %v", data, err)
-	}
 	if _, err := os.Stat(calls); err == nil {
 		t.Fatal("bound before Firefox restarted")
 	}
@@ -1078,10 +1101,6 @@ func TestInstallWithOneReleaseProfileWritesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "xbeta.beta", "user.js")); err == nil {
 		t.Error("wrote beta's user.js")
 	}
-	host, _ := firefox.HostManifestPath()
-	if _, err := os.Stat(host); err == nil {
-		t.Error("wrote the host manifest")
-	}
 	if _, err := os.Stat(p.ProfilesDir()); err == nil {
 		t.Error("made the databases directory")
 	}
@@ -1110,10 +1129,6 @@ func TestUninstallFromFirefoxRestoresItsChecks(t *testing.T) {
 	want := "user_pref(\"browser.startup.page\", 3);\n" + firefox.ResetPrefs[firefox.Prefs[0]] + "\n" + firefox.ResetPrefs[firefox.Prefs[1]] + "\n" + firefox.Prefs[2] + "\n"
 	if got, _ := os.ReadFile(filepath.Join(dir, "user.js")); string(got) != want {
 		t.Fatalf("user.js %q", got)
-	}
-	host, _ := firefox.HostManifestPath()
-	if _, err := os.Stat(host); err == nil {
-		t.Fatal("host manifest left")
 	}
 	if _, err := os.Stat(p.ProfileFile("firefox-alpha")); err != nil {
 		t.Fatal("database removed without --purge")
@@ -1179,8 +1194,8 @@ func TestFirefoxUninstallLeavesAnUnchangedUserJSAlone(t *testing.T) {
 }
 
 // Uninstall puts user.js back before it removes the add-on, so if a write
-// fails, the add-on and host manifest are still there and running
-// uninstall again finishes the job.
+// fails, the add-on is still there and running uninstall again finishes
+// the job.
 func TestFirefoxUninstallWritesUserJSFirst(t *testing.T) {
 	skipIfRoot(t)
 	p := testHome(t)
@@ -1211,8 +1226,7 @@ func TestFirefoxUninstallWritesUserJSFirst(t *testing.T) {
 	if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	host, _ := firefox.HostManifestPath()
-	mustExist(t, "failed uninstall", firefox.XPIPath(filepath.Join(root, "xalpha.alpha")), firefox.XPIPath(filepath.Join(root, "xbeta.beta")), host)
+	mustExist(t, "failed uninstall", firefox.XPIPath(filepath.Join(root, "xalpha.alpha")), firefox.XPIPath(filepath.Join(root, "xbeta.beta")))
 }
 
 // Installing again after an uninstall turns the reset lines back into the
@@ -1483,7 +1497,7 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	id := installedID(t, p)
-	mustExist(t, "install", filepath.Join(root, chrome.Brave.ExternalFile(id)), filepath.Join(root, chrome.HostManifestPath()))
+	mustExist(t, "install", filepath.Join(root, chrome.Brave.ExternalFile(id)))
 	mustBeGone(t, "install", filepath.Join(root, chrome.Chrome.ExternalFile(id)))
 	for dir, id := range map[string]string{"Default": "brave-personal", "Profile 1": "brave-work"} {
 		d, err := db.LoadDB(p.ProfileFile(id))
@@ -1520,11 +1534,11 @@ func TestInstallIntoAbsentBraveWritesNothing(t *testing.T) {
 	if !strings.Contains(errb.String(), "Brave") || len(*calls) != 0 {
 		t.Fatalf("stderr %q, sudo calls %q", errb.String(), *calls)
 	}
-	mustBeGone(t, "absent brave", filepath.Join(root, "opt", "brave.com"), filepath.Join(root, chrome.HostManifestPath()), p.Data)
+	mustBeGone(t, "absent brave", filepath.Join(root, "opt", "brave.com"), p.Data)
 }
 
-// The CRX and the host manifest serve every Chromium browser: they go with
-// the last one's external file, whichever goes first.
+// The CRX serves every Chromium browser: it goes with the last one's
+// external file, whichever goes first.
 func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
 	for _, c := range []struct{ gone, stays chrome.Browser }{{chrome.Brave, chrome.Chrome}, {chrome.Chrome, chrome.Brave}} {
 		t.Run(c.gone.Config, func(t *testing.T) {
@@ -1534,20 +1548,20 @@ func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
 			fakeChromeOnPath(t, p)
 			installChromium(t, "chrome", "brave")
 			id := installedID(t, p)
-			host, crx := filepath.Join(root, chrome.HostManifestPath()), filepath.Join(p.Data, "mirrormark.crx")
+			crx := filepath.Join(p.Data, "mirrormark.crx")
 			var out, errb bytes.Buffer
 			if code := run([]string{"uninstall", "--browser", c.gone.Config}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
 			mustBeGone(t, "first uninstall", filepath.Join(root, c.gone.ExternalFile(id)))
-			mustExist(t, "first uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"), unitPath(p))
-			if !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.stays.Name+" still uses.") {
+			mustExist(t, "first uninstall", filepath.Join(root, c.stays.ExternalFile(id)), crx, filepath.Join(p.Data, "extension"), unitPath(p))
+			if !strings.Contains(out.String(), "Kept the CRX, which "+c.stays.Name+" still uses.") || !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.stays.Name+" still uses.") {
 				t.Fatalf("output:\n%s", out.String())
 			}
 			if code := run([]string{"uninstall", "--browser", c.stays.Config}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"), unitPath(p))
+			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), crx, filepath.Join(p.Data, "extension"), unitPath(p))
 		})
 	}
 }
@@ -1616,7 +1630,7 @@ func TestInstallRefusesABrowserThatIsNotInstalled(t *testing.T) {
 	if !strings.Contains(errb.String(), "Brave is not installed (no brave-browser on PATH)") || len(*calls) != 0 {
 		t.Fatalf("stderr %q, sudo calls %q", errb.String(), *calls)
 	}
-	mustBeGone(t, "brave not installed", filepath.Join(root, "opt", "brave.com"), filepath.Join(root, chrome.HostManifestPath()), p.Data)
+	mustBeGone(t, "brave not installed", filepath.Join(root, "opt", "brave.com"), p.Data)
 }
 
 // When uninstall cannot tell whether another browser's external file is
@@ -1634,7 +1648,7 @@ func TestUninstallKeepsTheSharedFilesWhenItCannotTell(t *testing.T) {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	mustBeGone(t, "uninstall", filepath.Join(root, chrome.Brave.ExternalFile(id)))
-	mustExist(t, "uninstall", filepath.Join(root, chrome.HostManifestPath()), filepath.Join(p.Data, "mirrormark.crx"),
+	mustExist(t, "uninstall", filepath.Join(p.Data, "mirrormark.crx"),
 		filepath.Join(p.Data, "extension"), filepath.Join(root, chrome.Chrome.ExternalFile(id)))
 	if strings.Count(errb.String(), "cannot tell whether Chrome still uses mirrormark") != 1 {
 		t.Fatalf("stderr:\n%s", errb.String())
@@ -1662,7 +1676,7 @@ func TestUninstallFromABrowserNeverInstalledSaysSo(t *testing.T) {
 			}
 			if chromeInstalled {
 				id := installedID(t, p)
-				mustExist(t, "uninstall", filepath.Join(root, chrome.Chrome.ExternalFile(id)), filepath.Join(root, chrome.HostManifestPath()),
+				mustExist(t, "uninstall", filepath.Join(root, chrome.Chrome.ExternalFile(id)),
 					filepath.Join(p.Data, "mirrormark.crx"), filepath.Join(p.Data, "extension"))
 			}
 		})
@@ -1691,8 +1705,6 @@ func TestInstallIntoLibreWolfThenBind(t *testing.T) {
 			t.Fatalf("%s: %+v %v", n, d, err)
 		}
 	}
-	host, _ := firefox.HostManifestPath()
-	mustExist(t, "install", host)
 
 	for _, n := range []string{"alpha", "beta"} {
 		geckoReady(t, filepath.Join(root, "x"+n+"."+n), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4"+n[:1])
@@ -1731,8 +1743,7 @@ func TestEachGeckoBrowserTakesOnlyItsOwnProfiles(t *testing.T) {
 	if dbs, _ := db.LoadAll(p); len(dbs) != 0 {
 		t.Fatalf("made databases %v", dbs)
 	}
-	host, _ := firefox.HostManifestPath()
-	mustBeGone(t, "refused install", host, filepath.Join(ffRoot, "xalpha.alpha", "user.js"), filepath.Join(lwRoot, "xalpha.alpha", "user.js"))
+	mustBeGone(t, "refused install", filepath.Join(ffRoot, "xalpha.alpha", "user.js"), filepath.Join(lwRoot, "xalpha.alpha", "user.js"))
 }
 
 // installGecko installs mirrormark into Developer Edition's and LibreWolf's
@@ -1751,9 +1762,9 @@ func installGecko(t *testing.T) (p db.Paths, ffRoot, lwRoot string) {
 	return p, ffRoot, lwRoot
 }
 
-// Developer Edition and LibreWolf read one host manifest: it goes with the
+// Developer Edition and LibreWolf share the one server: it goes with the
 // last browser whose profiles still hold the add-on.
-func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
+func TestUninstallingOneGeckoBrowserKeepsTheService(t *testing.T) {
 	for _, c := range []struct{ first, firstName, last string }{
 		{"librewolf", "Firefox Developer Edition", "firefox"},
 		{"firefox", "LibreWolf", "librewolf"},
@@ -1761,24 +1772,23 @@ func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
 		t.Run(c.first+" first", func(t *testing.T) {
 			p, ffRoot, lwRoot := installGecko(t)
 			roots := map[string]string{"firefox": ffRoot, "librewolf": lwRoot}
-			host, _ := firefox.HostManifestPath()
 			var out, errb bytes.Buffer
 			if code := run([]string{"uninstall", "--browser", c.first}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
 			mustBeGone(t, c.first+" uninstall", firefox.XPIPath(filepath.Join(roots[c.first], "xalpha.alpha")))
-			mustExist(t, c.first+" uninstall", host, firefox.XPIPath(filepath.Join(roots[c.last], "xalpha.alpha")), unitPath(p))
+			mustExist(t, c.first+" uninstall", firefox.XPIPath(filepath.Join(roots[c.last], "xalpha.alpha")), unitPath(p))
 			if user, _ := os.ReadFile(filepath.Join(roots[c.last], "xalpha.alpha", "user.js")); !bytes.Contains(user, []byte(firefox.Prefs[0])) {
 				t.Fatalf("%s's user.js was reset: %q", c.last, user)
 			}
-			if !strings.Contains(out.String(), c.firstName+"'s profiles still use") || !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.firstName+" still uses.") {
+			if !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.firstName+" still uses.") {
 				t.Fatalf("output:\n%s", out.String())
 			}
 			out.Reset()
 			if code := run([]string{"uninstall", "--browser", c.last}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			mustBeGone(t, c.last+" uninstall", host, unitPath(p))
+			mustBeGone(t, c.last+" uninstall", unitPath(p))
 			if strings.Contains(out.String(), "still use") {
 				t.Fatalf("output:\n%s", out.String())
 			}
@@ -1787,10 +1797,10 @@ func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
 }
 
 // When uninstall cannot tell whether another Gecko browser's profile still
-// holds the add-on, it keeps the host manifest and says why. No Developer
+// holds the add-on, it keeps the service and says why. No Developer
 // Edition profile can be checked, so only that keeps it.
-func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
-	_, ffRoot, _ := installGecko(t)
+func TestGeckoUninstallKeepsTheServiceWhenItCannotCheck(t *testing.T) {
+	p, ffRoot, _ := installGecko(t)
 	for _, n := range []string{"alpha", "beta"} {
 		ext := filepath.Join(ffRoot, "x"+n+"."+n, "extensions")
 		must(t, os.RemoveAll(ext))
@@ -1800,10 +1810,12 @@ func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
 	if code := run([]string{"uninstall", "--browser", "librewolf"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	host, _ := firefox.HostManifestPath()
-	mustExist(t, "uninstall", host)
-	if strings.Count(errb.String(), "cannot tell whether Firefox Developer Edition still uses mirrormark") != 1 {
+	mustExist(t, "uninstall", unitPath(p))
+	if strings.Count(errb.String(), "cannot tell whether Firefox Developer Edition still uses mirrormark, so keeping the files it shares") != 1 {
 		t.Fatalf("stderr %q", errb.String())
+	}
+	if !strings.Contains(out.String(), "Kept the mirrormark service, which Firefox Developer Edition still uses.") {
+		t.Fatalf("output:\n%s", out.String())
 	}
 }
 

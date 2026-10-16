@@ -83,8 +83,7 @@ var Chrome = Browser{Config: "chrome", Name: "Chrome", DataDir: "google-chrome",
 	ExternalDir: "/usr/share/google-chrome/extensions", ExtensionsPage: "chrome://extensions"}
 
 // Brave is Brave stable from Brave's package. It reads external extension
-// files from its own install directory, and native host manifests from
-// Chrome's system directory, so it shares Chrome's host manifest.
+// files from its own install directory.
 var Brave = Browser{Config: "brave", Name: "Brave", DataDir: "BraveSoftware/Brave-Browser", Bin: "brave-browser",
 	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions"}
 

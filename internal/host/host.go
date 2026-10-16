@@ -29,7 +29,7 @@ type Options struct {
 	Timeout time.Duration // how long the browser may take to apply a batch; default 10 s
 	Poll    time.Duration // how often to look for changed files; default 1 s
 	Ping    time.Duration // Serve: how often to ping each connection; default 20 s
-	Origin  string        // the connection's Origin; Serve sets it, and then the hello starts a challenge
+	Origin  string        // the connection's Origin, which the database must name; Serve sets it
 	Port    string        // the port the server listens on, named in the host's proof; Serve sets it
 }
 
@@ -195,9 +195,8 @@ func (s *state) handle(m Msg) error {
 	if m.V != Version {
 		return s.fail("unsupported-version", fmt.Sprintf("protocol version %d is not %d; restart the browser after upgrading mirrormark", m.V, Version))
 	}
-	// Until a hello (and, through the server, a proof) names the database,
-	// the peer is nobody: what else it sends changes nothing and is not
-	// logged in its words.
+	// Until a hello and a proof name the database, the peer is nobody:
+	// what else it sends changes nothing and is not logged in its words.
 	if s.self == "" && m.Type != "hello" && m.Type != "proof" {
 		s.o.Log.Debug("message before the host runs ignored", "type", m.Type)
 		return nil
@@ -243,13 +242,7 @@ func (s *state) hello(m Msg) error {
 	if _, err := os.Stat(s.o.Paths.ProfileFile(m.DB)); err != nil {
 		return s.fail("db-missing", fmt.Sprintf("no database file for %s; run mirrormark install", m.DB))
 	}
-	// Through the server, a connection must prove which database it is
-	// before the host runs: native messaging needed no proof, since the
-	// browser started the host for its own extension.
-	if s.o.Origin != "" {
-		return s.challenge(m)
-	}
-	return s.accept(m.DB, m.Browser)
+	return s.challenge(m)
 }
 
 // accept runs the host for database id from now on.
@@ -287,9 +280,9 @@ type pending struct{ db, browser, token, nonce string }
 // and install writes a token.
 var hex32 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// challenge answers a hello through the server. The connection came from
-// the database's origin, but any program can send any Origin, and in
-// Chromium every profile has the same one. So each side proves it holds
+// challenge answers a hello. The connection came from the database's
+// origin, but any program can send any Origin, and in Chromium every
+// profile has the same one. So each side proves it holds
 // the token install handed this profile, without sending it: the host
 // first, so the extension tells a program posing as mirrormark nothing.
 // The port in the host's proof stops a program on another port relaying

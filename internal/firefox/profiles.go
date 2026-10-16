@@ -1,8 +1,7 @@
 // Package firefox installs mirrormark into Gecko browsers on Linux,
 // Firefox Developer Edition and LibreWolf, one profile at a time and
 // without root: it lists the profiles, writes the XPI and three user.js
-// prefs into each, writes the per-user native host manifest they share,
-// and binds each profile by opening bind.html in it.
+// prefs into each, and binds each profile by opening bind.html in it.
 //
 // Release Firefox installs only add-ons Mozilla signed, so only browsers
 // that honour xpinstall.signatures.required are supported. That pref lets

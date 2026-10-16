@@ -1,8 +1,6 @@
 package host_test
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -22,14 +20,12 @@ func TestMessageRoundTrip(t *testing.T) {
 		{V: 1, Type: "applied", Batch: 7, Results: []merge.OpResult{{OK: true, ID: "9"}}},
 		{V: 1, Type: "status", Problems: []host.Problem{{Code: "union-skipped", Message: "m"}}},
 	}
-	var buf bytes.Buffer
-	for _, m := range in {
-		if err := host.WriteMsg(&buf, m); err != nil {
+	for _, want := range in {
+		b, err := host.Encode(want)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	for _, want := range in {
-		got, err := host.ReadMsg(&buf)
+		got, err := host.Decode(b)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,53 +33,25 @@ func TestMessageRoundTrip(t *testing.T) {
 			t.Fatalf("got %+v, want %+v", got, want)
 		}
 	}
-	if buf.Len() != 0 {
-		t.Fatalf("%d bytes left over", buf.Len())
-	}
 }
 
-// Chrome refuses a message to the extension over 1 MB; the host must not
-// send a length without its message.
-func TestWriteMsgRefusesOversize(t *testing.T) {
-	var buf bytes.Buffer
+// Both browsers refuse a message to the extension over 1 MB.
+func TestEncodeRefusesOversize(t *testing.T) {
 	m := host.Msg{V: 1, Type: "error", Message: strings.Repeat("x", host.MaxOut)}
-	if err := host.WriteMsg(&buf, m); err == nil {
-		t.Fatal("wrote a message over 1 MB")
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("wrote %d bytes of a refused message", buf.Len())
+	if b, err := host.Encode(m); err == nil {
+		t.Fatalf("encoded a message of %d bytes", len(b))
 	}
 	// Just under the limit goes.
 	b, _ := json.Marshal(host.Msg{V: 1, Type: "error"})
 	m.Message = strings.Repeat("x", host.MaxOut-len(b)-len(`,"message":""`))
-	if err := host.WriteMsg(&buf, m); err != nil {
+	if _, err := host.Encode(m); err != nil {
 		t.Fatalf("refused a message of exactly 1 MB: %v", err)
 	}
 }
 
-func TestReadMsgRefusesOversize(t *testing.T) {
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.NativeEndian, uint32(host.MaxIn+1))
-	if _, err := host.ReadMsg(&buf); err == nil || !strings.Contains(err.Error(), "too large") {
+func TestDecodeRefusesBadJSON(t *testing.T) {
+	if _, err := host.Decode([]byte("{x}")); err == nil || !strings.Contains(err.Error(), "bad message") {
 		t.Fatalf("err %v", err)
-	}
-}
-
-func TestReadMsgRefusesBadJSON(t *testing.T) {
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.NativeEndian, uint32(3))
-	buf.WriteString("{x}")
-	if _, err := host.ReadMsg(&buf); err == nil || !strings.Contains(err.Error(), "bad message") {
-		t.Fatalf("err %v", err)
-	}
-}
-
-func TestReadMsgRefusesTruncated(t *testing.T) {
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.NativeEndian, uint32(10))
-	buf.WriteString(`{"v":1}`)
-	if _, err := host.ReadMsg(&buf); err == nil {
-		t.Fatal("read a truncated message")
 	}
 }
 
@@ -126,7 +94,7 @@ func TestSplitHonoursByteBudget(t *testing.T) {
 			t.Fatalf("a batch of %d bytes is over the %d budget", len(enc), host.BatchBytes)
 		}
 		// Room for the rest of the message: it must fit Chrome's limit.
-		if err := host.WriteMsg(&bytes.Buffer{}, host.Msg{V: 1, Type: "apply", Batch: 1 << 30, Ops: b}); err != nil {
+		if _, err := host.Encode(host.Msg{V: 1, Type: "apply", Batch: 1 << 30, Ops: b}); err != nil {
 			t.Fatal(err)
 		}
 		all = append(all, b...)

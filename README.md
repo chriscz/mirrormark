@@ -53,25 +53,19 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
 ### What `sudo` does
 
 Chrome installs a local extension only if a file in a root-owned directory
-names it, and it looks for native messaging hosts in one, so `install` asks
-for your password once. For each of two small JSON files it runs
-`sudo install -D -m 0644 /dev/stdin <target>` and writes the file's
-contents to that command's input; no mirrormark code runs as root. The
-targets are:
-
-- `/usr/share/google-chrome/extensions/<extension id>.json`, naming
-  `~/.local/share/mirrormark/mirrormark.crx` and its version. Chrome installs
-  the extension from it, without a prompt, into every profile of every Chrome
-  on this computer. Profiles you don't bind leave it idle.
-- `/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`,
-  which lets only that extension start the `mirrormark` binary.
+names it, so `install` asks for your password once. It runs
+`sudo install -D -m 0644 /dev/stdin <target>` and writes one small JSON
+file's contents to that command's input; no mirrormark code runs as root.
+The target is `/usr/share/google-chrome/extensions/<extension id>.json`,
+naming `~/.local/share/mirrormark/mirrormark.crx` and its version. Chrome
+installs the extension from it, without a prompt, into every profile of
+every Chrome on this computer. Profiles you don't bind leave it idle.
 
 Before this step, `install` has written the key, `extension/` and
 `mirrormark.crx` in `~/.local/share/mirrormark/`. If `sudo` fails, `install`
-stops: it makes no database files and no `config.yaml`, but if the second
-file fails, the first stays in place. Run `install` again when `sudo` works;
-it writes both files again. When the files are already up to date,
-`install` skips this step.
+stops: it makes no database files and no `config.yaml`. Run `install` again
+when `sudo` works. When the file is already up to date, `install` skips
+this step.
 
 ### Ids, labels and the key
 
@@ -96,28 +90,26 @@ The first `install` or `unpack` creates `~/.local/share/mirrormark/extension.pem
 The extension id comes from this key, so keep it: a new key is a new
 extension.
 
-The host manifest has one fixed path for the whole computer and names one
-extension id. Two installs with different keys, such as two users on one
-computer, replace each other's manifest. `install` warns when it replaces
-a manifest that names another extension. The extension no longer uses
-the host manifest, so this cuts neither install off.
-
 ### Upgrade, uninstall, unpack
 
 Upgrading: replace the binary and run `mirrormark install --profile ...`
 again for the profiles you bound, then restart Chrome if it asks. After
 upgrading from a build before `mirrormark serve`, the first `install` asks
 for a restart, and the second binds each profile again, so that it gets
-its token. If the new
-build has the same extension version, `install` changes neither system file
-and Chrome keeps its copy of the extension, even if the extension's files
-changed (see [Development](#development)). `install` restarts the
+its token. A native messaging host manifest that such a build left
+(`/etc/opt/chrome/native-messaging-hosts/com.github.chriscz.mirrormark.json`,
+or `~/.mozilla/native-messaging-hosts/` for Firefox) does nothing now, and
+`uninstall` removes it. If the new
+build has the same extension version, `install` leaves the system file
+alone and Chrome keeps its copy of the extension, even if the extension's
+files changed (see [Development](#development)). `install` restarts the
 service on every run, so after upgrading the binary it runs the new one.
 
-`mirrormark uninstall` removes the two system files (with `sudo rm` if
-needed), the CRX and the unpacked extension. It leaves the host manifest
-alone if another install (a different key) has since replaced it. While
-Brave still uses them, the shared files and the key stay (see [Install
+`mirrormark uninstall` removes Chrome's system file (with `sudo rm` if
+needed), the CRX and the unpacked extension, and an old host manifest if it
+names this install's extension; one that names another install's (a
+different key) stays. While Brave still uses them, the CRX and the key stay
+(see [Install
 (Brave on Linux)](#install-brave-on-linux)). Chrome removes the extension
 from every profile when it next starts. Your bookmarks stay in Chrome, and
 your config, databases, backups, key and log stay where they are; it says
@@ -138,7 +130,7 @@ folder of your own, such as `~/mirrormark-extension`: `install` deletes and
 rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 
 `mirrormark serve` runs the server the extensions connect to, on
-127.0.0.1 only, and logs to the same log as the host. One runs per user;
+127.0.0.1 only, and logs to `~/.local/state/mirrormark/log`. One runs per user;
 a second one stops at once. `install` runs it as the systemd user service
 `mirrormark.service` (`systemctl --user status mirrormark`). Once the
 service runs, stop any `mirrormark serve` you started by hand: while that
@@ -157,8 +149,8 @@ Linux)](#install-google-chrome-on-linux)), with `--browser brave`:
    numbers and their state, then run it with `--profile ID` or
    `--profile #` for each profile to bind; `--profile` and
    `--user-data-dir` work as for Chrome. With `sudo` it
-   writes `/opt/brave.com/brave/extensions/<extension id>.json` and the same
-   host manifest Chrome uses, so Chrome and Brave share one extension id.
+   writes `/opt/brave.com/brave/extensions/<extension id>.json`, naming the
+   same CRX as Chrome's, so Chrome and Brave share one extension id.
 2. Restart Brave (`pgrep -x brave` shows none left), then run
    `mirrormark install --browser brave --profile ...` again to bind the
    profiles. As for Chrome, it opens a tab once only in profiles where
@@ -175,7 +167,7 @@ and bind the profile again to the same database; that is harmless.
 After upgrading mirrormark, run `mirrormark install --browser brave` as well
 as `mirrormark install` if you use both, each with its `--profile` options.
 `mirrormark uninstall --browser brave` removes Brave's file. It keeps the CRX
-and the host manifest while Chrome still has mirrormark installed, and
+while Chrome still has mirrormark installed, and
 `--purge` keeps the key while Chrome has it installed or a Chrome profile's
 database is left; the same goes for Chrome while Brave has it.
 
@@ -243,8 +235,8 @@ restart, and the second binds each profile again, so that it gets its
 token.
 
 `mirrormark uninstall --browser firefox` removes the XPI from each profile
-whose database file says `browser: firefox`, and the host manifest if it
-names mirrormark. In each such profile's `user.js` it sets
+whose database file says `browser: firefox`, and an old host manifest if
+it names mirrormark. In each such profile's `user.js` it sets
 `xpinstall.signatures.required` back to `true` and
 `extensions.autoDisableScopes` back to `15`. It changes every line that
 sets them to mirrormark's values, including lines you wrote yourself; that
@@ -274,11 +266,9 @@ with `--browser librewolf`, and the same three prefs in each profile's
    `mirrormark install --browser librewolf --profile ...` again to bind
    them. Profile ids start with `librewolf-`, labels with `librewolf/`.
 
-The host manifest goes in `~/.mozilla/native-messaging-hosts/`, which
-LibreWolf reads after `~/.librewolf/native-messaging-hosts/`; a mirrormark
-manifest of your own there takes precedence. `mirrormark uninstall --browser
-librewolf` works as for Firefox, and keeps the host manifest while a
-Developer Edition profile still has mirrormark, and the other way round.
+`mirrormark uninstall --browser librewolf` works as for Firefox, and keeps
+the service while a Developer Edition profile still has mirrormark, and the
+other way round.
 
 Only LibreWolf's official Linux tarball has been tried. LibreWolf from its
 Debian/Ubuntu repository, Flatpak, AppImage or the AUR is untested. If you
@@ -297,9 +287,8 @@ lose its binding at each restart; the popup then says it is not bound.
 | `~/.local/share/mirrormark/mirrormark.crx`, `extension/` | The packed and unpacked extension, written by `install`. |
 | `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Developer Edition or LibreWolf profile, written by `install --browser firefox` or `librewolf`. |
 | `<profile>/user.js` | The three prefs `install --browser firefox` or `librewolf` sets in each profile (see [Before you start](#install-firefox-developer-edition-on-linux)); `uninstall` sets two of them back. |
-| `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the add-on in Developer Edition and LibreWolf start the `mirrormark` binary. |
 | `~/.config/systemd/user/mirrormark.service` | The systemd user service that runs `mirrormark serve`, written by `install`; `uninstall` removes it with the last browser. |
-| `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
+| `~/.local/state/mirrormark/log` | The server's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when the server starts. |
 
 The token travels in the bind page's URL, which is a command-line argument of the browser process. On Linux, other local users can read it with `ps` or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
 

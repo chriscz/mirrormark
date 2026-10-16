@@ -5,13 +5,15 @@ import (
 	"time"
 )
 
-var Split = split
+var (
+	Split          = split
+	Encode, Decode = encode, decode
+)
 
 const (
 	BatchOps   = batchOps
 	BatchBytes = batchBytes
 	MaxOut     = maxOut
-	MaxIn      = maxIn
 )
 
 // SetHelloWait sets how long a connection may take to prove itself until
