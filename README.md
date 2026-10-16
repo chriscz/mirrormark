@@ -26,6 +26,9 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
    another Chrome data directory. Each `install` below takes the same
    `--profile` options; without them it only lists. A bound profile syncs
    nothing until `config.yaml` names it.
+   `install` also sets up `mirrormark serve` as a systemd user service
+   (`~/.config/systemd/user/mirrormark.service`) and starts it. Without
+   systemd, it prints the command to keep running.
 2. Restart Chrome when it asks: close every window, and check that no
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
@@ -101,7 +104,8 @@ Upgrading: replace the binary and run `mirrormark install --profile ...`
 again for the profiles you bound, then restart Chrome if it asks. If the new
 build has the same extension version, `install` changes neither system file
 and Chrome keeps its copy of the extension, even if the extension's files
-changed (see [Development](#development)).
+changed (see [Development](#development)). `install` restarts the
+service on every run, so after upgrading the binary it runs the new one.
 
 `mirrormark uninstall` removes the two system files (with `sudo rm` if
 needed), the CRX and the unpacked extension. It leaves the host manifest
@@ -110,7 +114,8 @@ Brave still uses them, the shared files and the key stay (see [Install
 (Brave on Linux)](#install-brave-on-linux)). Chrome removes the extension
 from every profile when it next starts. Your bookmarks stay in Chrome, and
 your config, databases, backups, key and log stay where they are; it says
-so. `mirrormark uninstall --purge` also
+so. It stops and removes the service once no other browser uses
+mirrormark, and otherwise says which browser still does. `mirrormark uninstall --purge` also
 deletes Chrome's databases, their backups and the key. It deletes the
 config and log too, unless another browser's database is left: its
 profiles still sync through them, and its `uninstall` needs those
@@ -125,8 +130,9 @@ rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 
 `mirrormark serve` runs the server the extensions connect to, on
 127.0.0.1 only, and logs to the same log as the host. One runs per user;
-a second one stops at once. This release's extension still reaches
-mirrormark through the native messaging host.
+a second one stops at once. `install` runs it as the systemd user service
+`mirrormark.service` (`systemctl --user status mirrormark`). This release's
+extension still reaches mirrormark through the native messaging host.
 
 ## Install (Brave on Linux)
 
@@ -195,6 +201,9 @@ The binary needs a stable place, as for Chrome.
    `--user-data-dir DIR` reads the profiles in `DIR` instead. It refuses,
    before writing anything, if a named profile has never run or was last
    run by a Firefox other than Developer Edition.
+   `install` also sets up `mirrormark serve` as a systemd user service
+   (`~/.config/systemd/user/mirrormark.service`) and starts it. Without
+   systemd, it prints the command to keep running.
 2. Restart Firefox in those profiles if it is running (close every window).
 3. Run `mirrormark install --browser firefox --profile ...` again. It first
    checks each named profile's files. In each profile where Firefox has
@@ -225,7 +234,8 @@ names mirrormark. In each such profile's `user.js` it sets
 sets them to mirrormark's values, including lines you wrote yourself; that
 only turns the checks back on. If no database names a Firefox profile, it
 changes no `user.js` and says so. It leaves `extensions.startupScanScopes`
-at 1, so Firefox notices the XPI is gone. Your bookmarks stay in Firefox,
+at 1, so Firefox notices the XPI is gone. It removes the service as for
+Chrome, once no other browser uses mirrormark. Your bookmarks stay in Firefox,
 and your config, databases, backups and log stay where they are.
 `--purge` deletes the Firefox profiles' databases and their backups, and
 the config and log too unless another browser's database is left.
@@ -272,11 +282,14 @@ lose its binding at each restart; the popup then says it is not bound.
 | `<profile>/extensions/mirrormark@chriscz.github.io.xpi` | The add-on, in each Developer Edition or LibreWolf profile, written by `install --browser firefox` or `librewolf`. |
 | `<profile>/user.js` | The three prefs `install --browser firefox` or `librewolf` sets in each profile (see [Before you start](#install-firefox-developer-edition-on-linux)); `uninstall` sets two of them back. |
 | `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the add-on in Developer Edition and LibreWolf start the `mirrormark` binary. |
+| `~/.config/systemd/user/mirrormark.service` | The systemd user service that runs `mirrormark serve`, written by `install`; `uninstall` removes it with the last browser. |
 | `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
 The token travels in the bind page's URL, which is a command-line argument of the browser process. On Linux, other local users can read it with `ps` or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.
+If you set them in your shell, set them for systemd too, in a file in
+`~/.config/environment.d/`, so the service finds the same files.
 Database and backup files are readable only by you (mode 0600); they hold
 your bookmarks in plain text.
 

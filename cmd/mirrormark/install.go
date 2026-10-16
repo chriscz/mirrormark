@@ -165,6 +165,9 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err := ensureConfig(p); err != nil {
 		return fail(err)
 	}
+	if err := startServer(p, self, stdout); err != nil {
+		return fail(err)
+	}
 	if !ready {
 		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
 		return 0
@@ -394,11 +397,17 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	if err != nil {
 		return fail(err)
 	}
-	if !chrome.FilesCurrent(files) {
+	current := chrome.FilesCurrent(files)
+	if !current {
 		fmt.Fprintln(stdout, geckoSafety(b))
 		if err := chrome.WriteFiles(files); err != nil {
 			return fail(err)
 		}
+	}
+	if err := startServer(p, self, stdout); err != nil {
+		return fail(err)
+	}
+	if !current {
 		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run mirrormark install --browser %s again to bind them.\n", b.Name, b.Config)
 		return 0
 	}
@@ -700,6 +709,9 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		if err := uninstallFirefox(p, fb, stdout, stderr); err != nil {
 			return fail(err)
 		}
+		if err := stopServer(p, serviceUsers(p, fb.Config, stderr), stdout); err != nil {
+			return fail(err)
+		}
 		return finishUninstall(p, fb.Config, fb.Name, *purge, false, stdout, stderr)
 	}
 	cb, _ := chrome.Lookup(*browser) // checked above
@@ -711,7 +723,7 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-		users = chromiumUsers(cb, id, stderr)
+		users = chromiumUsers(cb.Config, id, stderr)
 		paths := []string{filepath.Join(sysroot, cb.ExternalFile(id))}
 		if _, err := os.Stat(paths[0]); !errors.Is(err, fs.ErrNotExist) {
 			installed = true
@@ -723,6 +735,9 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 			paths = append(paths, host)
 		}
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {
+			return fail(err)
+		}
+		if err := stopServer(p, serviceUsers(p, cb.Config, stderr), stdout); err != nil {
 			return fail(err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
@@ -844,24 +859,11 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout, stderr io.Writer) e
 		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a %s profile", err, b.Name)
 	}
 	var files []chrome.File
-	var gone []string  // XPIs, and the host manifest if it is this one's
-	var users []string // other Gecko browsers whose profiles still hold the add-on
+	var gone []string // XPIs, and the host manifest if it is this one's
+	// Other Gecko browsers whose profiles still hold the add-on.
+	users := geckoUsers(dbs, b.Config, stderr)
 	for _, d := range dbs {
 		if d.Profile.Browser != b.Config {
-			o, ok := firefox.Lookup(d.Profile.Browser)
-			if !ok || slices.Contains(users, o.Name) {
-				continue
-			}
-			// A profile whose add-on it cannot check counts as holding
-			// it, so the host manifest goes only when it is known unused.
-			_, err := os.Stat(firefox.XPIPath(d.Profile.Path))
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether %s still uses mirrormark, so keeping the host manifest it shares: %v\n", o.Name, err)
-			}
-			users = append(users, o.Name)
 			continue
 		}
 		gone = append(gone, firefox.XPIPath(d.Profile.Path))
@@ -911,14 +913,37 @@ func uninstallFirefox(p db.Paths, b firefox.Browser, stdout, stderr io.Writer) e
 	return nil
 }
 
-// chromiumUsers names the Chromium browsers other than b whose external
-// extension file for id is in place: they still use the CRX and the host
-// manifest b shares with them. A browser whose file it cannot check counts
-// as one, so a shared file goes only when it is known to be unused.
-func chromiumUsers(b chrome.Browser, id string, stderr io.Writer) []string {
+// geckoUsers names the Gecko browsers other than except whose profiles,
+// as named by dbs, still hold the add-on. A profile it cannot check counts,
+// so a shared file goes only when it is known to be unused.
+func geckoUsers(dbs map[string]*db.DB, except string, stderr io.Writer) []string {
+	var users []string
+	for _, d := range dbs {
+		o, ok := firefox.Lookup(d.Profile.Browser)
+		if !ok || o.Config == except || slices.Contains(users, o.Name) {
+			continue
+		}
+		_, err := os.Stat(firefox.XPIPath(d.Profile.Path))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether %s still uses mirrormark, so keeping the files it shares: %v\n", o.Name, err)
+		}
+		users = append(users, o.Name)
+	}
+	return users
+}
+
+// chromiumUsers names the Chromium browsers other than except whose
+// external extension file for id is in place: they still use the CRX, the
+// host manifest and the server except shares with them. A browser whose
+// file it cannot check counts as one, so a shared file goes only when it
+// is known to be unused.
+func chromiumUsers(except, id string, stderr io.Writer) []string {
 	var out []string
 	for _, o := range chrome.Browsers {
-		if o.Config == b.Config {
+		if o.Config == except {
 			continue
 		}
 		_, err := os.Stat(filepath.Join(sysroot, o.ExternalFile(id)))

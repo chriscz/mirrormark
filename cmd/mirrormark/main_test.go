@@ -2,12 +2,20 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/chriscz/mirrormark/internal/db"
 )
+
+func TestMain(m *testing.M) {
+	// The tests' default: no systemd, as in a container. Tests of the
+	// service install their own recorder.
+	runSystemctl = func(args ...string) error { return errors.New("systemctl is not available in tests") }
+	os.Exit(m.Run())
+}
 
 func TestRunWithoutArgsPrintsUsage(t *testing.T) {
 	var out, errb bytes.Buffer

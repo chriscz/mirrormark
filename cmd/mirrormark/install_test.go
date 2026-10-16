@@ -567,15 +567,17 @@ func TestCommandsRefuseToRunAsRoot(t *testing.T) {
 	old := geteuid
 	t.Cleanup(func() { geteuid = old })
 	geteuid = func() int { return 0 }
-	for _, args := range [][]string{{"install", "--user-data-dir", chromeData(t)}, {"uninstall"}, {"unpack"}, {"unpack", t.TempDir()}} {
+	systemctl := fakeSystemctl(t, "")
+	for _, args := range [][]string{{"install", "--user-data-dir", chromeData(t)}, {"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, {"uninstall"}, {"unpack"}, {"unpack", t.TempDir()}} {
 		var out, errb bytes.Buffer
 		if code := run(args, strings.NewReader(""), &out, &errb); code != 1 || !strings.Contains(errb.String(), "not as root") {
 			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
 		}
 	}
-	if _, err := os.Stat(p.Data); err == nil || len(*calls) != 0 {
-		t.Fatalf("changed something as root: %v, sudo %v", err, *calls)
+	if _, err := os.Stat(p.Data); err == nil || len(*calls) != 0 || len(*systemctl) != 0 {
+		t.Fatalf("changed something as root: %v, sudo %v, systemctl %q", err, *calls, *systemctl)
 	}
+	mustBeGone(t, "as root", unitPath(p))
 }
 
 // Two installs with different keys share the host manifest's one name, so
@@ -620,6 +622,7 @@ func TestInstallWithoutProfileListsAndWritesNothing(t *testing.T) {
 	p := testHome(t)
 	_, sudoCalls := fakeSystem(t)
 	log := fakeChromeOnPath(t, p)
+	systemctl := fakeSystemctl(t, "")
 	udd := braveData(t)
 	var out, errb bytes.Buffer
 	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
@@ -645,6 +648,10 @@ func TestInstallWithoutProfileListsAndWritesNothing(t *testing.T) {
 	if _, err := os.Stat(log); err == nil {
 		t.Fatal("started Brave")
 	}
+	if len(*systemctl) != 0 {
+		t.Fatalf("systemctl %q", *systemctl)
+	}
+	mustBeGone(t, "listing", unitPath(p))
 }
 
 // snapshot lists every file under dirs with its size and time, so a test
@@ -687,7 +694,8 @@ func TestInstallListsStatesAndDatabasesAfterAnInstall(t *testing.T) {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	removedAndTurnedOff(t, udd, id)
-	before, calls, started := snapshot(t, root, p.Data, p.State, udd), len(*sudoCalls), snapshot(t, log)
+	systemctl := fakeSystemctl(t, "")
+	before, calls, started := snapshot(t, root, p.Data, p.State, filepath.Dir(p.Config), udd), len(*sudoCalls), snapshot(t, log)
 	out.Reset()
 	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
@@ -703,8 +711,8 @@ func TestInstallListsStatesAndDatabasesAfterAnInstall(t *testing.T) {
 	if out.String() != want || errb.Len() != 0 {
 		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
 	}
-	if after := snapshot(t, root, p.Data, p.State, udd); !maps.Equal(before, after) || len(*sudoCalls) != calls || !maps.Equal(started, snapshot(t, log)) {
-		t.Fatalf("the listing changed something:\nbefore %v\nafter %v\nsudo %v", before, after, *sudoCalls)
+	if after := snapshot(t, root, p.Data, p.State, filepath.Dir(p.Config), udd); !maps.Equal(before, after) || len(*sudoCalls) != calls || !maps.Equal(started, snapshot(t, log)) || len(*systemctl) != 0 {
+		t.Fatalf("the listing changed something:\nbefore %v\nafter %v\nsudo %v\nsystemctl %q", before, after, *sudoCalls, *systemctl)
 	}
 }
 
@@ -718,6 +726,7 @@ func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
 	release := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(release, "defaults", "pref"), 0o755))
 	must(t, os.WriteFile(filepath.Join(release, "defaults", "pref", "channel-prefs.js"), []byte(`pref("app.update.channel", "release");`), 0o644))
+	systemctl := fakeSystemctl(t, "")
 	delta := filepath.Join(root, "xdelta.delta")
 	must(t, os.MkdirAll(delta, 0o700))
 	must(t, os.WriteFile(filepath.Join(delta, "prefs.js"), nil, 0o600))
@@ -745,7 +754,10 @@ func TestInstallListsGeckoProfilesAndWritesNothing(t *testing.T) {
 		mustBeGone(t, "listing", filepath.Join(root, "x"+n+"."+n, "user.js"), filepath.Join(root, "x"+n+"."+n, "extensions"))
 	}
 	host, _ := firefox.HostManifestPath()
-	mustBeGone(t, "listing", host, p.Data, calls)
+	mustBeGone(t, "listing", host, p.Data, calls, unitPath(p))
+	if len(*systemctl) != 0 {
+		t.Fatalf("systemctl %q", *systemctl)
+	}
 }
 
 func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
@@ -1410,14 +1422,14 @@ func TestUninstallingOneChromiumBrowserKeepsTheSharedFiles(t *testing.T) {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
 			mustBeGone(t, "first uninstall", filepath.Join(root, c.gone.ExternalFile(id)))
-			mustExist(t, "first uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"))
-			if !strings.Contains(out.String(), "which "+c.stays.Name+" still uses") {
+			mustExist(t, "first uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"), unitPath(p))
+			if !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.stays.Name+" still uses.") {
 				t.Fatalf("output:\n%s", out.String())
 			}
 			if code := run([]string{"uninstall", "--browser", c.stays.Config}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"))
+			mustBeGone(t, "second uninstall", filepath.Join(root, c.stays.ExternalFile(id)), host, crx, filepath.Join(p.Data, "extension"), unitPath(p))
 		})
 	}
 }
@@ -1628,7 +1640,7 @@ func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
 		{"firefox", "LibreWolf", "librewolf"},
 	} {
 		t.Run(c.first+" first", func(t *testing.T) {
-			_, ffRoot, lwRoot := installGecko(t)
+			p, ffRoot, lwRoot := installGecko(t)
 			roots := map[string]string{"firefox": ffRoot, "librewolf": lwRoot}
 			host, _ := firefox.HostManifestPath()
 			var out, errb bytes.Buffer
@@ -1636,18 +1648,18 @@ func TestUninstallingOneGeckoBrowserKeepsTheSharedHostManifest(t *testing.T) {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
 			mustBeGone(t, c.first+" uninstall", firefox.XPIPath(filepath.Join(roots[c.first], "xalpha.alpha")))
-			mustExist(t, c.first+" uninstall", host, firefox.XPIPath(filepath.Join(roots[c.last], "xalpha.alpha")))
+			mustExist(t, c.first+" uninstall", host, firefox.XPIPath(filepath.Join(roots[c.last], "xalpha.alpha")), unitPath(p))
 			if user, _ := os.ReadFile(filepath.Join(roots[c.last], "xalpha.alpha", "user.js")); !bytes.Contains(user, []byte(firefox.Prefs[0])) {
 				t.Fatalf("%s's user.js was reset: %q", c.last, user)
 			}
-			if !strings.Contains(out.String(), c.firstName+"'s profiles still use") {
+			if !strings.Contains(out.String(), c.firstName+"'s profiles still use") || !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.firstName+" still uses.") {
 				t.Fatalf("output:\n%s", out.String())
 			}
 			out.Reset()
 			if code := run([]string{"uninstall", "--browser", c.last}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}
-			mustBeGone(t, c.last+" uninstall", host)
+			mustBeGone(t, c.last+" uninstall", host, unitPath(p))
 			if strings.Contains(out.String(), "still use") {
 				t.Fatalf("output:\n%s", out.String())
 			}
@@ -1673,5 +1685,67 @@ func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
 	mustExist(t, "uninstall", host)
 	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "Firefox Developer Edition") {
 		t.Fatalf("stderr %q", errb.String())
+	}
+}
+
+// The one server serves both families: uninstalling Chrome keeps it while
+// a Developer Edition profile still holds the add-on, and the other way
+// round.
+func TestUninstallKeepsTheServiceWhileTheOtherFamilyUsesIt(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	firefoxData(t, p, "aurora")
+	calls := fakeSystemctl(t, "")
+	installChromium(t, "chrome")
+	var out, errb bytes.Buffer
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustExist(t, "install", unitPath(p))
+	if want := []string{"daemon-reload", "enable mirrormark.service", "restart mirrormark.service"}; !slices.Equal((*calls)[len(*calls)-3:], want) {
+		t.Fatalf("calls %q", *calls)
+	}
+	*calls = nil
+	out.Reset()
+	if code := run([]string{"uninstall", "--browser", "chrome"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustExist(t, "chrome uninstall", unitPath(p))
+	if len(*calls) != 0 || !strings.Contains(out.String(), "Kept the mirrormark service, which Firefox Developer Edition still uses.") {
+		t.Fatalf("calls %q, output:\n%s", *calls, out.String())
+	}
+	out.Reset()
+	if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustBeGone(t, "firefox uninstall", unitPath(p))
+	if want := []string{"disable --now mirrormark.service", "daemon-reload"}; !slices.Equal(*calls, want) || !strings.Contains(out.String(), "Stopped and removed the mirrormark service.") {
+		t.Fatalf("calls %q, output:\n%s", *calls, out.String())
+	}
+}
+
+// Without systemd, install still writes the unit and says how to run the
+// server by hand; uninstall removes the unit and says to stop that server.
+func TestServiceWithoutSystemd(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "Keep this running instead") || !strings.Contains(out.String(), " serve\n") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	out.Reset()
+	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustBeGone(t, "uninstall", unitPath(p))
+	if !strings.Contains(out.String(), "Removed "+unitPath(p)+". If you run mirrormark serve yourself, stop it.") {
+		t.Fatalf("output:\n%s", out.String())
 	}
 }
