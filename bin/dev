@@ -30,8 +30,10 @@ container() {
     docker image inspect "$IMAGE" >/dev/null 2>&1 || image_build
     local tty=()
     [ -t 0 ] && tty=(-t)
-    # HOME=/tmp: your UID has no home directory in the image.
-    docker run --rm -i "${tty[@]}" -u "$(id -u):$(id -g)" -e HOME=/tmp \
+    # HOME=/tmp: your UID has no home directory in the image. --init: as
+    # PID 1, make would ignore the SIGTERM a stopped bin/dev passes on and
+    # keep the container up; an init process ends it with its children.
+    docker run --rm -i --init "${tty[@]}" -u "$(id -u):$(id -g)" -e HOME=/tmp \
         -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/mod -e GOFLAGS=-modcacherw \
         -v "$ROOT":/src "$IMAGE" "$@"
 }
