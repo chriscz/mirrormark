@@ -151,17 +151,38 @@ Each entry says where, what, its effect, how it was found and the fix.
   straight after, with B connecting about 1.2 s after launch.
 - **Found:** a full `make check-e2e` while building `mirrormark serve`
   (native messaging, which this change did not alter), 2026-10-15.
-- **Fix:** a dial that fails by timing out (not a refusal, not a known
-  error) now sets the same 2 s quick retry as a close does, under the same
-  once-a-minute cap, with the 30 s alarm kept as the fallback; before, a
-  first dial that missed `DIAL_MS` waited for the alarm, past the bind's
-  30 s wait. The cause of the flake is still unconfirmed: a failing e2e
-  test keeps the server's log and each browser's output in
-  `build/e2e-logs/<test>/`, and Chromium logs to stderr; read those at the
-  next failure. No test forces the timeout: a dial that times out needs
-  every port in `ports.json` to stall past 5 s each and then a real server
-  to appear, which makes a slow, timing-bound e2e test; the existing suite
-  covers the connect paths around it.
+- **Fix:** none yet. A likely cause is Gecko dropping an extension's first
+  connection about 10 s after start, as the localhost transport spike saw,
+  and the reconnect alarm coming after the wait ends. The quick retries
+  added 2026-10-16, after a close and after a dial that timed out, may
+  cover this; that is unconfirmed. Look at the host log of a failing run
+  before widening the wait.
+
+### A bind sometimes does not report in within 30 s
+
+- **Where:** the bind in `e2e/env.go`, `Env.bind`; seen in
+  `TestEditsPropagate/chrome-chrome` and
+  `TestClosedBrowserCatchesUpOnStart/chrome-chrome`.
+- **What:** `install` printed `not bound: Default: mirrormark did not report
+  in within 30s of opening the page`.
+- **Effect:** a spurious red `check-e2e`. Each time, the test passed when run
+  again.
+- **Found:** a full `make check-e2e` while adding the systemd user service,
+  2026-10-16, then once in 97 runs of the hang investigation, 2026-10-16:
+  20 runs with no load passed, and the failure came in a run with 6 busy
+  loops on 4 CPUs. It has been seen only under CPU load.
+- **Fix:** partly, in e5dc29b; the cause is still unconfirmed. A likely
+  cause: under load the extension's first dial misses its 5 s `DIAL_MS`,
+  and the extension then waited for its 30 s reconnect alarm, which
+  outlasts the bind wait. Since e5dc29b, a dial that timed out (not a
+  refusal, not a known error) sets the same 2 s quick retry as a close,
+  under the same once-a-minute cap, with the alarm kept as the fallback.
+  One port that stalls is enough to time a dial out: the other ports fail
+  at once, and the timeout still counts. `TestPopupConnects` drives that
+  path with its silent program on the first port, but no test checks that
+  the retry then connects. A failing e2e test keeps the server's log and
+  each browser's output in `build/e2e-logs/<test>/`, and Chromium logs to
+  stderr; read those at the next failure before widening any wait.
 
 ### Some waits in the e2e harness and `install` have no bound
 
