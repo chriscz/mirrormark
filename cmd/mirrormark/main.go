@@ -46,8 +46,9 @@ Sharing folders:
   A profile's id is in the DATABASE column of mirrormark install --browser B,
   or is the <id> in the line bound: <profile> -> <id> that install prints. A
   path starts with toolbar, other or mobile, or menu in Firefox Developer
-  Edition and LibreWolf, then the folder names as the bookmark manager shows
-  them; write \/ for a slash in a name. One profile's folders cannot be
+  Edition and LibreWolf, or the title the browser shows for that folder,
+  such as Bookmarks bar, then the folder names as the bookmark manager
+  shows them; write \/ for a slash in a name. One profile's folders cannot be
   inside each other. mirrormark picks up a change within seconds, with no
   restart, and the log records each one.
 

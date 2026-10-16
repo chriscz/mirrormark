@@ -147,6 +147,7 @@ func TestHelpNamesTheResolvedFiles(t *testing.T) {
 		"DATABASE column of mirrormark install --browser B",
 		"<id> in the line bound: <profile> -> <id>",
 		"starts with toolbar, other or mobile, or menu in Firefox Developer Edition and LibreWolf",
+		"or the title the browser shows for that folder, such as Bookmarks bar,",
 		"as the bookmark manager shows them",
 		`write \/ for a slash`,
 		"One profile's folders cannot be inside each other",
