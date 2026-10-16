@@ -149,6 +149,20 @@ Each entry says where, what, its effect, how it was found and the fix.
   and the reconnect alarm coming after the wait ends. Look at the host log
   of a failing run before widening the wait.
 
+### `TestEditsPropagate/chrome-chrome` once had a bind not report in
+
+- **Where:** `e2e/sync_test.go`, `TestEditsPropagate`, the Chrome pair;
+  the bind in `e2e/env.go`.
+- **What:** `install` for chrome-b printed `not bound: Default: mirrormark
+  did not report in within 30s of opening the page`.
+- **Effect:** a spurious red `check-e2e`. It passed in 3 runs alone straight
+  after, and in the next full run.
+- **Found:** a full `make check-e2e` while adding the systemd user service,
+  2026-10-16. The service does not run in e2e (the image has no user
+  manager), and binding still goes through native messaging.
+- **Fix:** none yet. Look at the host log and Chrome's tab of a failing run
+  before widening the wait.
+
 ## Manual checks still to do
 
 - Run `mirrormark install` from the README on a real Linux desktop with
