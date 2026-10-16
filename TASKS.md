@@ -174,7 +174,13 @@ Each entry says where, what, its effect, how it was found and the fix.
   waits for its 30 s reconnect alarm, which outlasts the bind wait. A
   failing e2e test now keeps the server's log and each browser's output in
   `build/e2e-logs/<test>/`, and Chromium logs to stderr; read those at the
-  next failure before widening any wait.
+  next failure before widening any wait. The quick retry and the popup's
+  connect, added 2026-10-16, do not cover this path: the quick retry
+  follows only the close of a connection that worked, the bind opens the
+  bind page, not the popup, and the connect after a new binding is the
+  first dial itself. A first dial that misses `DIAL_MS` still waits for
+  the alarm. If the logs confirm the cause, one fix is to retry a dial
+  that timed out once after 2 s, as after a close.
 
 ### Some waits in the e2e harness and `install` have no bound
 

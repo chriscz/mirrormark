@@ -382,6 +382,16 @@ shows:
   longer finds it, so nothing below the binding means the last round synced
   cleanly.
 
+When the profile is not connected, opening the popup makes the extension
+try to connect at once, and the popup shows a spinner with `Connecting to
+mirrormark…` until the attempt ends. Only one attempt runs at a time. After
+an error that a retry cannot fix, such as `bad-token` or `db-missing`, the
+popup does not try again; the extension retries after a minute. If the
+server closes the connection, as when it restarts, the popup says
+`mirrormark restarted or stopped; reconnecting…`, and the extension tries
+again after 2 seconds, or after 30 if it already did so in the last
+minute.
+
 Some errors concern the connection itself. Until a server has proven it
 is yours, the popup shows only fixed texts, never words the server sent,
 and names the port. When one port fails and another answers with a known
@@ -408,7 +418,8 @@ The extension could not reach `mirrormark serve` on any of its ports. Start
 it with `systemctl --user start mirrormark`, or run `mirrormark serve`. If
 it does not stay up, `systemctl --user status mirrormark` and the log,
 `~/.local/state/mirrormark/log`, say why. The extension tries again every
-30 seconds, and syncs once the server is back.
+30 seconds, and each time you open the popup, and syncs once the server is
+back.
 
 ### Installing and binding
 
