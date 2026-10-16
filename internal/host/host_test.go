@@ -248,14 +248,15 @@ func TestTwoHostsSyncAUnion(t *testing.T) {
 	want = []string{"/_deleted/", "/_deleted/GitHub https://github.com/"}
 	eventually(t, "delete to reach a", func() bool { return slices.Equal(a.lines("Work"), want) })
 
-	// Quiet: no more writes.
-	time.Sleep(200 * time.Millisecond)
-	before, _ := os.Stat(p.ProfileFile("a"))
-	time.Sleep(300 * time.Millisecond)
-	after, _ := os.Stat(p.ProfileFile("a"))
-	if !before.ModTime().Equal(after.ModTime()) {
-		t.Fatal("a's database file is still being written")
-	}
+	// Quiet: no more writes. Wait for the file to stay unchanged for a
+	// while, however long the last rounds take under load.
+	last, since := time.Time{}, time.Now()
+	eventually(t, "a's database file to stop being written", func() bool {
+		if fi, err := os.Stat(p.ProfileFile("a")); err == nil && !fi.ModTime().Equal(last) {
+			last, since = fi.ModTime(), time.Now()
+		}
+		return time.Since(since) >= 300*time.Millisecond
+	})
 	if !db.Connected(p, "a", time.Time{}) {
 		t.Fatal("a's hello did not touch its lock file")
 	}
@@ -473,8 +474,11 @@ func TestProblemStaysUntilFixed(t *testing.T) {
 	ab.Add("1", "Work", "")
 	a := start(t, p, "a", ab, extOpts{})
 	eventually(t, "union-skipped", func() bool { return a.hasError("union-skipped") })
-	a.sendTree() // another round, still skipped
+	// Count rounds only once the first has reported, and before the tree
+	// that starts the next, so the next round's status cannot be missed.
+	eventually(t, "the first round", func() bool { _, r := a.count(); return r > 0 })
 	_, rounds := a.count()
+	a.sendTree() // another round, still skipped
 	eventually(t, "the next round", func() bool { _, r := a.count(); return r > rounds })
 	if a.healthy() {
 		t.Fatal("a round that still skips the union reported no problem")

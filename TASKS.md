@@ -5,18 +5,6 @@ Each entry says where, what, its effect, how it was found and the fix.
 
 ## Open
 
-### `TestTwoHostsSyncAUnion` can fail under heavy load
-
-- **Where:** `internal/host/host_test.go`, `TestTwoHostsSyncAUnion`.
-- **What:** the test sleeps a fixed 200 ms before checking that profile a's
-  database file has stopped changing.
-- **Effect:** under heavy load it fails with "a's database file is still
-  being written". Seen once; it didn't recur in 40 runs of the test alone.
-- **Found:** a full `make` while the machine was heavily loaded,
-  2026-10-15.
-- **Fix:** wait for a's file to stay unchanged for a bounded time instead of
-  a fixed sleep.
-
 ### Wrong-binding detection relies on browser ids not matching
 
 - **Where:** `internal/merge/merge.go`, `wrongTree()`.
@@ -144,22 +132,6 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **Found:** review of the Firefox e2e tests, 2026-10-15.
 - **Fix:** before uninstalling, read `extensions.json` and require an
   active mirrormark entry.
-
-### `TestProblemStaysUntilFixed` failed once in a full `make`
-
-- **Where:** `internal/host`, `TestProblemStaysUntilFixed`.
-- **What:** the test failed once during a full `make`, in code the change
-  being tested did not touch.
-- **Effect:** a spurious red `make`. It passed 10 times alone and in 3 more
-  full runs.
-- **Found:** a full `make` while building the profile listing, 2026-10-15.
-  Seen again in a full `make` while building `mirrormark serve`,
-  2026-10-15; it passed 20 times alone straight after.
-- **Cause (likely):** the test calls `a.sendTree()` and only then reads
-  `rounds` from `a.count()`. If the round that tree starts sends its status
-  before the read, `rounds` already counts it, and nothing else starts a
-  round, so "the next round" never comes.
-- **Fix:** read `rounds` before `a.sendTree()`.
 
 ### `TestClosedBrowserCatchesUpOnStart/firefox-firefox` failed once
 
