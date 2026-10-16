@@ -148,13 +148,13 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 			return fail(fmt.Errorf("could not copy the files %s needs into place (with sudo): %w", cb.Name, err))
 		}
 	}
-	ids := map[string]string{}
+	dbIDs := map[string]string{}
 	for _, c := range chosen {
 		id, err := ensureDB(p, cb.Config, filepath.Join(*udd, c.Dir), c)
 		if err != nil {
 			return fail(err)
 		}
-		ids[c.Dir] = id
+		dbIDs[c.Dir] = id
 	}
 	if err := ensureConfig(p); err != nil {
 		return fail(err)
@@ -162,12 +162,14 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	if err := startServer(p, self, stdout); err != nil {
 		return fail(err)
 	}
+	// The same profiles, named by ID however the user named them.
+	all := again(cb.InstallCommand(), uddFlag, ids(chosen)...)
 	if !ready {
-		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, cb.InstallCommand())
+		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, all)
 		return 0
 	}
 	if !serverRunning(p) {
-		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", again(cb.InstallCommand(), uddFlag, chosen[0].ID()))
+		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", all)
 		return 1
 	}
 	want, err := extension.Version()
@@ -190,7 +192,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 			code = 1
 			continue
 		}
-		id := ids[c.Dir]
+		id := dbIDs[c.Dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
 		token, err := db.Bind(p, id, "chrome-extension://"+ext.ID)
 		if err != nil {
@@ -374,9 +376,9 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	// The databases come before any write into a profile: uninstall finds
 	// the profiles whose checks to turn back on through them, so a write
 	// that fails part way must not leave a profile without one.
-	ids := map[string]string{}
+	dbIDs := map[string]string{}
 	for _, tg := range targets {
-		if ids[tg.dir], err = ensureDB(p, b.Config, tg.dir, tg.c); err != nil {
+		if dbIDs[tg.dir], err = ensureDB(p, b.Config, tg.dir, tg.c); err != nil {
 			return fail(err)
 		}
 	}
@@ -405,12 +407,13 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	if err := startServer(p, self, stdout); err != nil {
 		return fail(err)
 	}
+	all := again("mirrormark install --browser "+b.Config, udd, ids(chosen)...)
 	if !current {
-		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run mirrormark install --browser %s again to bind them.\n", b.Name, b.Config)
+		fmt.Fprintf(stdout, "Restart %s in these profiles if it is running (close every window), then run %s again to bind them.\n", b.Name, all)
 		return 0
 	}
 	if !serverRunning(p) {
-		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", again("mirrormark install --browser "+b.Config, udd, targets[0].c.ID()))
+		fmt.Fprintf(stdout, "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run %s again.\n", all)
 		return 1
 	}
 	want, err := extension.Version()
@@ -431,7 +434,7 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 			code = 1
 			continue
 		}
-		id := ids[tg.dir]
+		id := dbIDs[tg.dir]
 		reported := func(since time.Time) bool { return db.Connected(p, id, since) }
 		token, err := db.Bind(p, id, "moz-extension://"+uuid)
 		if err != nil {
@@ -450,23 +453,36 @@ func installFirefox(p db.Paths, b firefox.Browser, root, udd string, picks []str
 	return code
 }
 
-// again is the command that runs install for one profile again, as
-// messages tell the user to type it.
-func again(base, udd, id string) string {
+// again is the command that runs install for the profiles with these IDs
+// again, with the data directory as the user gave it, as messages tell the
+// user to type it.
+func again(base, udd string, ids ...string) string {
 	s := base
 	if udd != "" {
 		s += " --user-data-dir " + quoteArg(udd)
 	}
-	return s + " --profile " + quoteArg(id)
+	for _, id := range ids {
+		s += " --profile " + quoteArg(id)
+	}
+	return s
 }
 
-// quoteArg puts double quotes around an argument a shell would split or
-// expand.
+// ids is the ID of each profile.
+func ids(profiles []chrome.Profile) []string {
+	var out []string
+	for _, c := range profiles {
+		out = append(out, c.ID())
+	}
+	return out
+}
+
+// quoteArg puts single quotes around an argument a shell would split or
+// expand; inside them a shell expands nothing.
 func quoteArg(s string) string {
 	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") == "" {
 		return s
 	}
-	return strconv.Quote(s)
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // chromiumAdvice says why a Chromium profile is not ready and what to do.
@@ -475,11 +491,11 @@ func chromiumAdvice(b chrome.Browser, s chrome.ProfileState, want, again string)
 	case chrome.NeverRun:
 		return fmt.Sprintf("%s has never opened this profile; open it in %s once, then run %s", b.Name, b.Name, again)
 	case chrome.Removed:
-		return fmt.Sprintf("you removed mirrormark from this profile, and %s will not install it there again. Run mirrormark unpack, turn on Developer mode in %s, choose Load unpacked and pick the folder it prints, then run %s", b.Name, b.ExtensionsPage, again)
+		return fmt.Sprintf("you removed mirrormark from this profile, and %s will not install it there again. Run mirrormark unpack ~/mirrormark-extension, turn on Developer mode in %s, choose Load unpacked and pick that folder, then run %s", b.Name, b.ExtensionsPage, again)
 	case chrome.TurnedOff:
 		return fmt.Sprintf("mirrormark is turned off in this profile. Turn it on in %s, wait half a minute, then run %s", b.ExtensionsPage, again)
 	case chrome.OldBuild:
-		return fmt.Sprintf("this profile runs mirrormark %s, not %s. Quit %s completely (close every window) and start it again, then run %s", s.Version, want, b.Name, again)
+		return fmt.Sprintf("this profile runs mirrormark %s, not %s. Quit %s completely (close every window) and start it again, wait half a minute, then run %s", s.Version, want, b.Name, again)
 	}
 	return fmt.Sprintf("%s has not installed mirrormark in this profile yet. Quit %s completely (close every window), start it again and open this profile, wait half a minute, then run %s", b.Name, b.Name, again)
 }

@@ -498,8 +498,8 @@ func TestInstallOpensNothingWhereMirrormarkIsNotReady(t *testing.T) {
 	}
 	for _, line := range []string{
 		"bound: Default -> brave-",
-		"not ready: Profile 1: Brave has not installed mirrormark in this profile yet. Quit Brave completely (close every window), start it again and open this profile, wait half a minute, then run mirrormark install --browser brave --user-data-dir " + udd + ` --profile "Profile 1".`,
-		"not ready: Profile 2: you removed mirrormark from this profile, and Brave will not install it there again. Run mirrormark unpack, turn on Developer mode in brave://extensions,",
+		"not ready: Profile 1: Brave has not installed mirrormark in this profile yet. Quit Brave completely (close every window), start it again and open this profile, wait half a minute, then run mirrormark install --browser brave --user-data-dir " + udd + ` --profile 'Profile 1'.`,
+		"not ready: Profile 2: you removed mirrormark from this profile, and Brave will not install it there again. Run mirrormark unpack ~/mirrormark-extension, turn on Developer mode in brave://extensions, choose Load unpacked and pick that folder, then run mirrormark install --browser brave --user-data-dir " + udd + " --profile 'Profile 2'.",
 		"not ready: Profile 3: mirrormark is turned off in this profile. Turn it on in brave://extensions, wait half a minute,",
 	} {
 		if !strings.Contains(out.String(), line) {
@@ -521,14 +521,14 @@ func TestInstallBindsNothingWithoutAServer(t *testing.T) {
 	noServerWait(t)
 	udd := chromeData(t)
 	var out, errb bytes.Buffer
-	run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb)
+	run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb)
 	chromiumReady(t, filepath.Join(udd, "Default"), installedID(t, p))
 	stopFakeServer(p)
 	out.Reset()
-	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run([]string{"install", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --user-data-dir " + udd + " --profile Default again.\n"; !strings.HasSuffix(out.String(), want) {
+	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --user-data-dir " + udd + " --profile Default --profile 'Profile 1' again.\n"; !strings.HasSuffix(out.String(), want) {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	if calls, _ := os.ReadFile(log); len(calls) != 0 {
@@ -586,14 +586,14 @@ func TestFirefoxInstallBindsNothingWithoutAServer(t *testing.T) {
 	root, calls := firefoxData(t, p, "aurora")
 	noServerWait(t)
 	var out, errb bytes.Buffer
-	run([]string{"install", "--browser", "firefox", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb)
+	run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb)
 	geckoReady(t, filepath.Join(root, "xbeta.beta"), "5c1b2f2e-7d0a-4b8e-9b51-0a6c1d2e3f4b")
 	stopFakeServer(p)
 	out.Reset()
-	if code := run([]string{"install", "--browser", "firefox", "--profile", "xbeta.beta"}, strings.NewReader(""), &out, &errb); code != 1 {
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --browser firefox --profile xbeta.beta again.\n"; !strings.HasSuffix(out.String(), want) {
+	if want := "mirrormark is not running, so no profile can report in. Start it with systemctl --user start mirrormark, or run mirrormark serve, then run mirrormark install --browser firefox --profile xalpha.alpha --profile xbeta.beta again.\n"; !strings.HasSuffix(out.String(), want) {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	if c, _ := os.ReadFile(calls); len(c) != 0 {
@@ -772,7 +772,7 @@ func TestInstallListsStatesAndDatabasesAfterAnInstall(t *testing.T) {
 		"  2  Profile 2  Old       removed     -\n" +
 		"  3  Profile 3  Off       turned off  -\n" +
 		"Nothing was changed. Name the profiles to install into or bind with --profile ID or --profile #, for example:\n" +
-		"  mirrormark install --browser brave --user-data-dir " + udd + ` --profile "Profile 2"` + "\n"
+		"  mirrormark install --browser brave --user-data-dir " + udd + ` --profile 'Profile 2'` + "\n"
 	if out.String() != want || errb.Len() != 0 {
 		t.Fatalf("output:\n%s\nwant:\n%s\nstderr: %s", out.String(), want, errb.String())
 	}
@@ -1014,7 +1014,7 @@ func TestInstallIntoFirefoxThenBind(t *testing.T) {
 	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "Restart Firefox") || !strings.Contains(out.String(), "unsigned") {
+	if want := "Restart Firefox Developer Edition in these profiles if it is running (close every window), then run mirrormark install --browser firefox --profile xalpha.alpha --profile xbeta.beta again to bind them.\n"; !strings.HasSuffix(out.String(), want) || !strings.Contains(out.String(), "unsigned") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	for _, n := range []string{"alpha", "beta"} {
@@ -1493,7 +1493,7 @@ func TestInstallIntoBraveThenBind(t *testing.T) {
 	if code := run([]string{"install", "--browser", "brave", "--user-data-dir", udd, "--profile", "Default", "--profile", "1"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	if !strings.Contains(out.String(), "Restart Brave") || !strings.Contains(out.String(), "mirrormark install --browser brave again") {
+	if want := "Restart Brave (close every window), then run mirrormark install --browser brave --user-data-dir " + udd + " --profile Default --profile 'Profile 1' again to bind the profiles.\n"; !strings.HasSuffix(out.String(), want) {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	id := installedID(t, p)
@@ -1967,5 +1967,33 @@ func TestServiceWithoutSystemd(t *testing.T) {
 	mustBeGone(t, "uninstall", unitPath(p))
 	if !strings.Contains(out.String(), "Removed "+unitPath(p)+". If you run mirrormark serve yourself, stop it.") {
 		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+// The advice for an old build waits for the browser to record the new
+// one, as the other advice does.
+func TestChromiumAdviceForAnOldBuild(t *testing.T) {
+	got := chromiumAdvice(chrome.Brave, chrome.ProfileState{State: chrome.OldBuild, Version: "0.1"}, "0.2", "CMD")
+	if want := "this profile runs mirrormark 0.1, not 0.2. Quit Brave completely (close every window) and start it again, wait half a minute, then run CMD"; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+// Commands that messages print quote with single quotes, inside which a
+// shell expands nothing.
+func TestQuoteArg(t *testing.T) {
+	for in, want := range map[string]string{
+		"Default":    "Default",
+		"/a/b-c_d.e": "/a/b-c_d.e",
+		"Profile 1":  "'Profile 1'",
+		"$HOME":      "'$HOME'",
+		"`id`":       "'`id`'",
+		"it's":       `'it'\''s'`,
+		"":           "''",
+		`a"b\c`:      `'a"b\c'`,
+	} {
+		if got := quoteArg(in); got != want {
+			t.Errorf("quoteArg(%q) = %s, want %s", in, got, want)
+		}
 	}
 }
