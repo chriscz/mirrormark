@@ -68,8 +68,9 @@ type Problem struct {
 	Message string `json:"message"`
 }
 
-// Both browsers limit messages to the extension to 1 MB. Messages from it may be
-// larger; 64 MB bounds what a broken peer can make us allocate.
+// Messages to the extension stay under 1 MB, which keeps each apply batch
+// small; the socket itself has no limit. Messages from it may be larger: a tree grows with the bookmarks. 64 MB
+// bounds what a broken peer can make us allocate.
 const (
 	maxOut = 1 << 20
 	maxIn  = 64 << 20
@@ -83,14 +84,14 @@ type Conn interface {
 	Write(Msg) error
 }
 
-// encode is m as JSON, refused when the browsers could not take it.
+// encode is m as JSON, refused when it is over maxOut.
 func encode(m Msg) ([]byte, error) {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return nil, err
 	}
 	if len(b) > maxOut {
-		return nil, fmt.Errorf("message of %d bytes is over the browsers' 1 MB limit", len(b))
+		return nil, fmt.Errorf("message of %d bytes is over the 1 MB limit", len(b))
 	}
 	return b, nil
 }

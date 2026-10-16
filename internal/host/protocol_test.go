@@ -35,7 +35,7 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 }
 
-// Both browsers refuse a message to the extension over 1 MB.
+// A message to the extension may not be over 1 MB.
 func TestEncodeRefusesOversize(t *testing.T) {
 	m := host.Msg{V: 1, Type: "error", Message: strings.Repeat("x", host.MaxOut)}
 	if b, err := host.Encode(m); err == nil {

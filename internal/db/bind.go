@@ -6,8 +6,9 @@ import (
 	"regexp"
 )
 
-// validToken is what a token looks like: 32 bytes in lowercase hex.
-var validToken = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// ValidToken matches a token as install writes it, and a nonce as either
+// side of the challenge writes it: 32 random bytes in lowercase hex.
+var ValidToken = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Bind records origin as profile id's extension origin and returns its
 // token, creating one if it has none or a malformed one (which the bind
@@ -24,10 +25,10 @@ func Bind(p Paths, id, origin string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if d.Profile.Origin == origin && validToken.MatchString(d.Profile.Token) {
+	if d.Profile.Origin == origin && ValidToken.MatchString(d.Profile.Token) {
 		return d.Profile.Token, nil
 	}
-	if !validToken.MatchString(d.Profile.Token) {
+	if !ValidToken.MatchString(d.Profile.Token) {
 		b := make([]byte, 32)
 		rand.Read(b) // never fails
 		d.Profile.Token = hex.EncodeToString(b)

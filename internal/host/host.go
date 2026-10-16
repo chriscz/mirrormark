@@ -14,7 +14,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"time"
 
@@ -35,7 +34,7 @@ type Options struct {
 
 // At most this many ops go in one apply message, and its ops take at most
 // batchBytes when encoded, which leaves room for the rest of the message
-// under Chrome's 1 MB limit.
+// under maxOut.
 const (
 	batchOps   = 500
 	batchBytes = maxOut - 1024
@@ -296,10 +295,6 @@ func (s *state) accept(id, browser string) error {
 // pending is a hello waiting for the extension's proof.
 type pending struct{ db, browser, token, nonce string }
 
-// hex32 is 32 random bytes in lowercase hex, as both sides write a nonce
-// and install writes a token.
-var hex32 = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // challenge answers a hello. The connection came from the database's
 // origin, but any program can send any Origin, and in Chromium every
 // profile has the same one. So each side proves it holds
@@ -314,10 +309,10 @@ func (s *state) challenge(m Msg) error {
 		s.o.Log.Debug("cannot read the database file", "db", m.DB, "err", err)
 		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s; run mirrormark install", m.DB))
 	}
-	if d.Profile.Token != "" && !hex32.MatchString(d.Profile.Token) {
+	if d.Profile.Token != "" && !db.ValidToken.MatchString(d.Profile.Token) {
 		s.o.Log.Debug("the token in the database file is malformed; install writes 64 lowercase hex digits", "db", m.DB)
 	}
-	if !hex32.MatchString(d.Profile.Token) || d.Profile.Origin != s.o.Origin || !hex32.MatchString(m.Nonce) {
+	if !db.ValidToken.MatchString(d.Profile.Token) || d.Profile.Origin != s.o.Origin || !db.ValidToken.MatchString(m.Nonce) {
 		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))
 	}
 	b := make([]byte, 32)
