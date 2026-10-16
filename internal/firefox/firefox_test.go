@@ -390,7 +390,18 @@ func TestCheckTellsLibreWolfFromFirefox(t *testing.T) {
 	if _, err := Firefox.Check(release); err == nil || !strings.Contains(err.Error(), "not Firefox Developer Edition") || !strings.Contains(err.Error(), "Mozilla signed") {
 		t.Fatalf("release Firefox as Developer Edition: %v", err)
 	}
-	// Only Mozilla's Firefox is said to install only add-ons Mozilla signed.
+	// Only Firefox on the channels that require signing is said to install
+	// only add-ons Mozilla signed; Nightly takes unsigned ones when told to.
+	for _, channel := range []string{"beta", "esr"} {
+		_, p := geckoInstall(t, "Firefox", channel)
+		if _, err := Firefox.Check(p); err == nil || !strings.Contains(err.Error(), "Mozilla signed") {
+			t.Fatalf("%s Firefox as Developer Edition: %v", channel, err)
+		}
+	}
+	_, nightly := geckoInstall(t, "Firefox", "nightly")
+	if _, err := Firefox.Check(nightly); err == nil || !strings.Contains(err.Error(), "on the nightly channel") || strings.Contains(err.Error(), "Mozilla signed") {
+		t.Fatalf("Nightly as Developer Edition: %v", err)
+	}
 	_, fork := geckoInstall(t, "Waterfox", "release")
 	if _, err := Firefox.Check(fork); err == nil || !strings.Contains(err.Error(), "last run by Waterfox") || strings.Contains(err.Error(), "Mozilla signed") {
 		t.Fatalf("another Gecko browser as Developer Edition: %v", err)

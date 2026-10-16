@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -193,8 +194,9 @@ func (b Browser) Check(profileDir string) (bin string, err error) {
 // channelRefusal says why b refuses a profile last run from dir, by a
 // browser on another update channel: which browser that is, if
 // application.ini names one install knows, so the user can ask for it.
-// Only Mozilla's Firefox is said to need add-ons Mozilla signed; other
-// Gecko browsers decide that for themselves.
+// Only Mozilla's Firefox on release, beta or ESR is said to need add-ons
+// Mozilla signed: Nightly takes unsigned ones when a profile says so, and
+// other Gecko browsers decide that for themselves.
 func (b Browser) channelRefusal(dir, channel string) error {
 	name, _ := appName(dir) // a profile it cannot name is still refused
 	for _, o := range Browsers {
@@ -202,7 +204,7 @@ func (b Browser) channelRefusal(dir, channel string) error {
 			return fmt.Errorf("it was last run by %s from %s, not %s: this profile belongs to %s; use --browser %s", name, dir, b.Name, o.Name, o.Config)
 		}
 	}
-	if name == "Firefox" {
+	if name == "Firefox" && slices.Contains([]string{"release", "beta", "esr"}, channel) {
 		return fmt.Errorf("it was last run by Firefox on the %s channel from %s, not %s; Firefox on that channel installs only add-ons Mozilla signed. mirrormark works in %s", channel, dir, b.Name, supported())
 	}
 	return fmt.Errorf("it was last run by %s on the %s channel from %s, not %s. mirrormark works in %s", cmp.Or(name, "a browser"), channel, dir, b.Name, supported())
