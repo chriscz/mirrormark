@@ -274,6 +274,8 @@ lose its binding at each restart; the popup then says it is not bound.
 | `~/.mozilla/native-messaging-hosts/com.github.chriscz.mirrormark.json` | Lets the add-on in Developer Edition and LibreWolf start the `mirrormark` binary. |
 | `~/.local/state/mirrormark/log` | The host's log. Over 1 MiB, it moves to `log.1`, replacing the one before, when a host starts. |
 
+The token travels in the bind page's URL, which is a command-line argument of the browser process. On Linux, other local users can read it with `ps` or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
+
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.
 Database and backup files are readable only by you (mode 0600); they hold
 your bookmarks in plain text.
