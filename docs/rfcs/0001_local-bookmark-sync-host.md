@@ -2,7 +2,7 @@
 
 - Status: draft
 - Author(s): Chris Coetzee, Claude
-- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15; Brave and LibreWolf designed 2026-10-15; explicit profiles and one-shot binding 2026-10-15; a local server instead of native messaging 2026-10-15; a challenge instead of sending the token 2026-10-15)
+- Date: 2026-10-14 (Firefox Developer Edition added 2026-10-15; Brave and LibreWolf designed 2026-10-15; explicit profiles and one-shot binding 2026-10-15; a local server instead of native messaging 2026-10-15; a challenge instead of sending the token 2026-10-15; firejail 2026-10-16)
 - Links: none yet. Repository: `github.com/chriscz/mirrormark` (MPL-2.0).
 
 ## Problem
@@ -412,7 +412,7 @@ Chosen by us within those decisions: exit 0 for the list, numbers from 0, a 30-s
 
 ### 11. A local server instead of native messaging
 
-Native messaging makes the browser start the host, so a browser in a sandbox (firejail, Flatpak, Snap) starts it inside that sandbox, where it needs holes to reach mirrormark's files. The user decided to drop it: the extension now connects over a WebSocket to one long-running `mirrormark serve` on `127.0.0.1`. The localhost transport spike (`0001_local-bookmark-sync-host.d/localhost-transport-spike.md`) ran this in Chrome 155, Brave 1.97.57, Developer Edition 159 and LibreWolf 158 in Docker; each point below comes from it unless it says otherwise. Firejail itself is a later step (Later); this section only keeps the host out of the browser's sandbox.
+Native messaging makes the browser start the host, so a browser in a sandbox (firejail, Flatpak, Snap) starts it inside that sandbox, where it needs holes to reach mirrormark's files. The user decided to drop it: the extension now connects over a WebSocket to one long-running `mirrormark serve` on `127.0.0.1`. The localhost transport spike (`0001_local-bookmark-sync-host.d/localhost-transport-spike.md`) ran this in Chrome 155, Brave 1.97.57, Developer Edition 159 and LibreWolf 158 in Docker; each point below comes from it unless it says otherwise. Firejail itself is Section 12; this section only keeps the host out of the browser's sandbox.
 
 **`mirrormark serve`.** One server per user. It first takes `serve.lock` in the data directory without waiting, so a second `serve` exits with "mirrormark is already running". It then listens on `127.0.0.1` on the first of the ports `61959`, `63018` and `63454` it can bind, and exits with an error naming the three if it can bind none. The ports lie above Linux's ephemeral range (32768–60999), so an outgoing connection never holds one by chance. They are written once, in `extension/ports.json`: the binary reads that file from its embedded copy, and the extension reads its own copy at start, so the two cannot disagree. The server logs to `~/.local/state/mirrormark/log`, as the host did, and tags each line with the connection's number (`conn=`).
 
@@ -514,7 +514,7 @@ Until the restart, the old extension cannot reach a host, since the new binary h
 - `127.0.0.1` only. A connection is accepted only with the bound profile's exact extension origin and proof of its token, which `install` generates, stores in that profile's database file, and hands to the extension once, through the bind page;
 - a mutual challenge, decided after the first draft (Open question 5): the token never crosses the socket, and the server proves it holds the token before the extension proves it does or trusts the server with anything;
 - everything Section 10 and earlier built for safety stays: explicit `--profile`, the bind page opened once and only where the extension is ready, per-browser purge, the Developer Edition and LibreWolf gate, and databases before profile writes;
-- firejail is a later, separate step;
+- firejail is a later, separate step (Section 12);
 - the threat model, decided after the final review: a single-user desktop, where programs running as the user are trusted; the `Origin` check, the token and the challenge stop web pages, stale bindings and servers that are not the user's mirrormark; other local users are out of scope;
 - the CLI says what it does and where things are, decided after the final review: `mirrormark help`, and the usage printed on an error, explain how to share folders (a `config.yaml` example, where the profile ids come from, the path rule, and that changes are picked up within seconds without a restart) and list each file where it is for this user, from the same XDG lookup the commands use; after binding every profile named, `install` prints a `config.yaml` to paste with the ids it just bound and says where mirrormark logs; and `install` says that it set up `mirrormark serve` as a systemd user service, where the unit is, that it runs as the user and starts at login, whether it started the server or restarted a running one (whose profiles then reconnect within a minute), and the commands to see its status, read its log and stop it;
 - each change to `config.yaml` that the server loads shows in the log once, with the number of unions, so the user can see when an edit took effect;
@@ -549,6 +549,36 @@ Chosen by us within those decisions:
 - Chrome and Brave with their own sandbox: the spike and the dev image run them with `--no-sandbox`.
 - Release Firefox, and Firefox's Local Network Access prompt. The `Origin` check refuses such pages whatever the prompt does.
 - Why Gecko drops its first socket about 10 s after the browser starts. The reconnect alarm covers it, at the cost of up to 30 s at start. No e2e test failed because of it, and none had to wait longer.
+
+### 12. Firejail
+
+A user's Brave, started through `firecfg`'s `/usr/local/bin/brave-browser` (a symlink to `/usr/bin/firejail`), never installed mirrormark: firejail's Brave profile hides `~/.local/share/mirrormark`, where the external JSON points at the CRX. Adding `whitelist ${HOME}/.local/share/mirrormark` to `~/.config/firejail/brave.local` fixed it. The user asked that `install` detect firejail and suggest the rule. The firejail spike (`0001_local-bookmark-sync-host.d/firejail-spike.md`) ran firejail 0.9.72 from Ubuntu 24.04 with all four browsers in Docker:
+
+- **Brave** needs `whitelist ${HOME}/.local/share/mirrormark` in `brave.local`, which every Brave command's profile reads. Its external JSON in `/opt/brave.com/brave/extensions` is visible.
+- **Chrome** needs that line and `whitelist /usr/share/google-chrome/extensions` in `google-chrome.local`: its profile shows only listed parts of `/usr/share`, which leave out the external extensions directory.
+- **Developer Edition and LibreWolf** need nothing: the XPI lives in the profile, which their firejail profiles show.
+- With the rule, the jailed extension binds and reaches `ws://127.0.0.1`.
+- Firejail reads `.local` files only from `~/.config/firejail`, not `$XDG_CONFIG_HOME/firejail`.
+
+**Detection.** `install --browser chrome|brave` already finds the browser's command on `PATH`. It counts the browser as jailed when that command, with symlinks followed, is `firejail`, or is a short script (`#!`, at most 4 KiB) that names `firejail`. For a jailed browser it reads `~/.config/firejail/<file>.local`, `brave.local` or `google-chrome.local`, and finds the lines the browser needs that the file lacks. A line counts as present written with `${HOME}` or with the home directory spelled out. When mirrormark's data directory is not under the home directory, `install` suggests no line for it: the spike found `/srv`, `/opt` and `/tmp` paths visible in the jail, and `/mnt` and `/media` blacklisted, where a `whitelist` line does not help.
+
+**What `install` says.** When lines are missing, `install` says, for example:
+
+```
+Brave runs under firejail, which hides mirrormark's extension from it. Add the line below to ~/.config/firejail/brave.local, then quit Brave completely (close every window) and start it again.
+  whitelist ${HOME}/.local/share/mirrormark
+```
+
+It says this in three places: after the profile listing, when some profile is `not installed yet`; before "Restart Brave", when `install` has just written the external file; and in the `not ready` line of a profile that is `not installed yet`, ending with the command to run again. `mirrormark help` notes that a browser under firejail needs a rule, which `install` prints.
+
+**User decisions.**
+
+- `install` detects firejail and prints the lines and the file to add them to; it never edits firejail's files itself;
+- it says nothing when the file already has the lines.
+
+Chosen by us within those decisions: the 4 KiB limit for a wrapper script; no advice for Developer Edition and LibreWolf, or for a data directory outside the home directory; `brave.local` rather than `brave-browser.local`.
+
+**Not verified.** Other firejail versions and profiles, with real browsers a data directory outside the home directory, and a desktop session (Wayland, the desktop's D-Bus).
 
 ## Alternatives considered
 
@@ -650,6 +680,10 @@ Chrome on Linux, end to end. Each phase is its own stack of commits, and nothing
    - **Tests:** as in Section 11, Tests.
    - **Exit:** all pass, the README's steps are run once on a desktop with Chrome and with Developer Edition, upgrading from the native-messaging build, and a server restart and a browser restart each reconnect. The e2e part is done, in all four browsers; the desktop run is still to do and is listed in `TASKS.md`.
 
+9. **Firejail** (Section 12). One commit: detection, the lines and the three messages, with the README's Firejail subsection and the `help` note.
+   - **Tests:** unit tests with fake `PATH` layouts (a symlink to a fake `firejail`, a wrapper script, a plain binary, a large script naming firejail), a `.local` file that already has the lines in either spelling, a data directory under `$XDG_DATA_HOME` inside and outside the home directory, and Chrome's second line. No e2e test: firejail in Docker needs `SYS_ADMIN`, unconfined seccomp and AppArmor, and a passwd entry for the user, which the dev container does not have; the spike's `run.sh` reproduces it.
+   - **Exit:** all pass, and the user's desktop Brave under firejail installs and binds after following the message.
+
 **Rollback.** Remove a member from `config.yaml`, which stops its syncing without touching its bookmarks, or run `mirrormark uninstall`.
 
 ## Later
@@ -660,7 +694,7 @@ Each is its own RFC or stack once the Chrome version works.
 - **Chromium, Brave Beta and Nightly.** Their profile directories and external extension directories; Chromium also honours `--load-extension` [R12].
 - **`mirrormark export`** of a database or backup to a bookmarks HTML file both families import.
 - **`mirrormark preview <union>`**, printing what a union would become before a member is added.
-- **Firejail, Flatpak and Snap browsers.** The server runs outside the sandbox, so each needs only loopback access from inside it; none was tried.
+- **Flatpak and Snap browsers.** The server runs outside the sandbox, so each needs only loopback access from inside it; neither was tried. Firejail is Section 12.
 - **A port setting**, for a computer where all three ports are taken.
 - **Windows and macOS**, which refuse local CRX files [R11].
 - **Release packaging**: `make release` and a README tested in a fresh container.
@@ -736,3 +770,4 @@ External claims were checked on 2026-10-14 unless marked unverified.
 - 2026-10-16 — after the final review, by the user's decisions: the threat model is a single-user desktop, with same-user programs trusted and other local users out of scope; before its proof a connection's failures are logged at Debug and summed up once a minute, never in its words, and an idle keep-alive connection is closed; `help` explains sharing folders and lists the files; `install` ends with a `config.yaml` to paste and says what it did with the service; the log records each `config.yaml` the server loads. The upgrade paragraph now says that an extension without a token dials nothing.
 - 2026-10-16 — by the user's decisions after restarting the service: a close the server caused reads "mirrormark restarted or stopped; reconnecting…", never a close code, and the extension retries once after 2 s with the alarm as the fallback; opening the popup connects at once when not connected, except after an error a retry cannot fix, with one attempt at a time and a spinner while it tries.
 - 2026-10-16 — as built after the re-review: a dial that timed out gets the same quick retry as a close; a refused upgrade's once-a-minute Info line carries its `Host` and `Origin`; a profile bound without a token is marked `refused`, so the popup shows no spinner for it; `install` does not restart the service over a server started by hand, and says to stop that server.
+- 2026-10-16 — Section 12 and Phase 9 after the firejail spike, at the user's request: `install` detects a Chrome or Brave started through firejail and prints the `whitelist` lines its `.local` file lacks, and the file; it never edits firejail's files, and says nothing when the lines are there. Developer Edition and LibreWolf need no rule.
