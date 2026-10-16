@@ -40,13 +40,27 @@ type Env struct {
 	Paths          db.Paths
 	env            []string
 	ExtID          string
-	kinds          map[string]string // browser name to "chrome" or "firefox"
+	kinds          map[string]string // browser name to its kind, a key of bins
 	A, B           *Browser
 	DBA, DBB       string
 	LabelA, LabelB string
 	server         *exec.Cmd // the running mirrormark serve, or nil
 	listens        int       // how many times a server of this test has listened
 }
+
+// bins start each kind of browser in the dev image.
+var bins = map[string]string{
+	"chrome":    "google-chrome",
+	"brave":     "brave-browser",
+	"firefox":   "/opt/firefox-devedition/firefox",
+	"librewolf": "/opt/librewolf/librewolf",
+}
+
+// names are how install's restart line names each kind.
+var names = map[string]string{"chrome": "Chrome", "brave": "Brave", "firefox": "Firefox", "librewolf": "LibreWolf"}
+
+// gecko reports whether kind is a Firefox-family browser.
+func gecko(kind string) bool { return kind == "firefox" || kind == "librewolf" }
 
 var extIDRe = regexp.MustCompile(`Extension ID: ([a-p]{32})`)
 
@@ -63,7 +77,7 @@ func (e *Env) kind(name string) string {
 // records in prefs.js once the add-on is installed.
 func (e *Env) open(t *testing.T, b *Browser) {
 	t.Helper()
-	if b.Kind == "firefox" {
+	if gecko(b.Kind) {
 		var uuid string
 		eventually(t, 15*time.Second, b.Name+"'s add-on UUID in prefs.js", func() bool {
 			uuid, _ = firefox.UUID(b.UDD)
@@ -79,7 +93,7 @@ func (e *Env) open(t *testing.T, b *Browser) {
 func setup(t *testing.T) *Env { return setupPair(t, "chrome", "chrome") }
 
 // setupPair installs and binds as a user would, with profile a in browser
-// kind ka and b in kb, "chrome" or "firefox": each browser runs once (so
+// kind ka and b in kb (keys of bins): each browser runs once (so
 // its profile exists), install writes the files and asks for a restart,
 // the browsers restart, and install runs again for each profile to bind.
 // Two Firefox profiles share one profiles directory, as a user's would,
@@ -144,39 +158,39 @@ func (e *Env) stopServer(t *testing.T) {
 	e.server = nil
 }
 
-// firstInstall prepares both profiles and runs install's first pass,
-// which writes the files and asks for a restart: once for every Chrome
-// data directory, since it writes Chrome's system files, and once per
-// Firefox profile, since each holds its own add-on and prefs.
+// firstInstall prepares both profiles and runs install's first pass, which
+// writes the files and asks for a restart: once per Chromium kind, since
+// its files reach every data directory, and once per Gecko profile, since
+// each holds its own add-on and prefs.
 func (e *Env) firstInstall(t *testing.T) {
 	t.Helper()
 	e.prepare(t, "a")
 	e.prepare(t, "b")
-	if e.kind("a") == "chrome" || e.kind("b") == "chrome" {
-		// Registered before install runs, so an install that fails part-way
-		// leaves nothing behind either, and run before t.TempDir's cleanup:
-		// later tests must not see this test's extension in the shared
-		// system directories.
-		t.Cleanup(func() { e.mm(t, "uninstall") })
-	}
-	chromeDone := false
+	done := map[string]bool{}
 	for _, name := range []string{"a", "b"} {
-		restart := "Restart Firefox"
-		if e.kind(name) == "chrome" {
-			if chromeDone {
-				continue // one install writes the system files for every data directory
+		k := e.kind(name)
+		if !gecko(k) {
+			if done[k] {
+				continue
 			}
-			chromeDone = true
-			restart = "Restart Chrome"
+			done[k] = true
+			// Registered before install runs, so an install that fails
+			// part-way leaves nothing behind either, and run before
+			// t.TempDir's cleanup: later tests must not see this test's
+			// extension in the shared system directories.
+			t.Cleanup(func() { e.mm(t, "uninstall", "--browser", k) })
 		}
 		out := e.mm(t, e.installArgs(name)...)
-		if !strings.Contains(out, restart) {
+		if !strings.Contains(out, "Restart "+names[k]) {
 			t.Fatalf("first install did not ask for a restart:\n%s", out)
 		}
-		if e.kind(name) == "chrome" {
+		if !gecko(k) {
 			m := extIDRe.FindStringSubmatch(out)
 			if m == nil {
 				t.Fatalf("first install did not print the extension id:\n%s", out)
+			}
+			if e.ExtID != "" && m[1] != e.ExtID {
+				t.Fatalf("%s got extension id %s, the other browser %s", k, m[1], e.ExtID)
 			}
 			e.ExtID = m[1]
 		}
@@ -188,12 +202,12 @@ func (e *Env) firstInstall(t *testing.T) {
 // profile in profiles.ini with its compatibility.ini.
 func (e *Env) prepare(t *testing.T, name string) {
 	t.Helper()
-	if e.kind(name) == "firefox" {
+	if gecko(e.kind(name)) {
 		dir := e.udd(name)
-		cmd := exec.Command(firefoxBin, "--headless", "-CreateProfile", name+" "+dir)
+		cmd := exec.Command(bins[e.kind(name)], "--headless", "-CreateProfile", name+" "+dir)
 		cmd.Env = e.env
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("create Firefox profile %s: %v\n%s", name, err, out)
+			t.Fatalf("create %s profile %s: %v\n%s", e.kind(name), name, err, out)
 		}
 		// The remote agent sets "recommended" prefs for automation when a
 		// session starts; they could hide whether install's prefs work.
@@ -205,25 +219,26 @@ func (e *Env) prepare(t *testing.T, name string) {
 }
 
 func (e *Env) udd(name string) string {
-	if e.kind(name) == "firefox" {
-		return filepath.Join(e.Home, "firefox", name)
+	k := e.kind(name)
+	if gecko(k) {
+		return filepath.Join(e.Home, k, name)
 	}
-	return filepath.Join(e.Home, "chrome-"+name)
+	return filepath.Join(e.Home, k+"-"+name)
 }
 
 func (e *Env) launch(name string) *Browser {
-	if e.kind(name) == "firefox" {
-		return launchFirefox(e.t, name, e.udd(name), map[string]int{"a": 9301, "b": 9302}[name], e.env)
+	if k := e.kind(name); gecko(k) {
+		return launchFirefox(e.t, name, k, e.udd(name), map[string]int{"a": 9301, "b": 9302}[name], e.env)
 	}
-	return launch(e.t, name, e.udd(name), e.env)
+	return launch(e.t, name, e.kind(name), e.udd(name), e.env)
 }
 
 // installArgs are the arguments of an install into name's profile.
 func (e *Env) installArgs(name string) []string {
-	if e.kind(name) == "firefox" {
-		return []string{"install", "--browser", "firefox", "--profile", name}
+	if k := e.kind(name); gecko(k) {
+		return []string{"install", "--browser", k, "--profile", name}
 	}
-	return []string{"install", "--user-data-dir", e.udd(name), "--profile", "Default"}
+	return []string{"install", "--browser", e.kind(name), "--user-data-dir", e.udd(name), "--profile", "Default"}
 }
 
 // mm runs the mirrormark binary as the test's user.
@@ -248,7 +263,7 @@ func (e *Env) bind(name string) string {
 	e.ready(name)
 	out := e.mm(e.t, e.installArgs(name)...)
 	profile := "Default"
-	if e.kind(name) == "firefox" {
+	if gecko(e.kind(name)) {
 		profile = name
 	}
 	m := regexp.MustCompile(`bound: ` + regexp.QuoteMeta(profile) + ` -> ([a-z0-9-]+)`).FindStringSubmatch(out)
@@ -269,7 +284,7 @@ func (e *Env) ready(name string) {
 		e.t.Fatal(err)
 	}
 	eventually(e.t, 40*time.Second, name+"'s files to show mirrormark ready", func() bool {
-		if e.kind(name) == "firefox" {
+		if gecko(e.kind(name)) {
 			s, _, err := firefox.ReadState(e.udd(name), want)
 			return err == nil && s.State == chrome.Ready
 		}

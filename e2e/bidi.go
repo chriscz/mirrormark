@@ -21,9 +21,6 @@ import (
 	"time"
 )
 
-// firefoxBin is Firefox Developer Edition in the dev image.
-const firefoxBin = "/opt/firefox-devedition/firefox"
-
 // bidi speaks WebDriver BiDi to Firefox over its WebSocket on
 // 127.0.0.1:<port>/session: masked text frames to Firefox, unmasked and
 // possibly fragmented frames back. One command at a time; events are
@@ -222,13 +219,13 @@ func (d *firefoxDriver) close() { bidiCall[none, json.RawMessage](d.c, "browser.
 // on port, under the test's Xvfb and D-Bus, not headless: a headless
 // Firefox does not take a second invocation's URL, which install's binding
 // of a running profile needs.
-func launchFirefox(t *testing.T, name, dir string, port int, env []string) *Browser {
+func launchFirefox(t *testing.T, name, kind, dir string, port int, env []string) *Browser {
 	t.Helper()
 	logf, err := os.OpenFile(dir+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(firefoxBin, "--profile", dir, "--remote-debugging-port", strconv.Itoa(port), "about:blank")
+	cmd := exec.Command(bins[kind], "--profile", dir, "--remote-debugging-port", strconv.Itoa(port), "about:blank")
 	// The remote agent navigates only to http(s), file, blob and
 	// about:blank unless system access is allowed; the tests' page is a
 	// moz-extension one.
@@ -236,7 +233,7 @@ func launchFirefox(t *testing.T, name, dir string, port int, env []string) *Brow
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	b := &Browser{Name: name, Kind: "firefox", UDD: dir, cmd: cmd, done: make(chan struct{})}
+	b := &Browser{Name: name, Kind: kind, UDD: dir, cmd: cmd, done: make(chan struct{})}
 	go func() {
 		cmd.Wait()
 		logf.Close()

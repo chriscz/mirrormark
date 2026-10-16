@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/chriscz/mirrormark/extension"
+	"github.com/chriscz/mirrormark/internal/chrome"
 	"github.com/chriscz/mirrormark/internal/db"
+	"github.com/chriscz/mirrormark/internal/firefox"
 	"github.com/chriscz/mirrormark/internal/host"
 	"github.com/chriscz/mirrormark/internal/ws"
 )
@@ -456,4 +458,77 @@ func hostLog(t *testing.T, e *Env) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestBraveInstallAndBind: Brave installs the extension under Chrome's id
+// and binds as Chrome does, and uninstalling Brave leaves Chrome syncing.
+func TestBraveInstallAndBind(t *testing.T) {
+	e := setupPair(t, "chrome", "brave")
+	if !strings.HasPrefix(e.DBB, "brave-") {
+		t.Fatalf("Brave bound to %s", e.DBB)
+	}
+	self := eval[struct {
+		ID          string `json:"id"`
+		InstallType string `json:"installType"`
+		Enabled     bool   `json:"enabled"`
+	}](t, e.B, `chrome.management.getSelf()`)
+	if self.ID != e.ExtID || self.InstallType != "sideload" || !self.Enabled {
+		t.Errorf("Brave: extension %+v, want id %s, sideload, enabled", self, e.ExtID)
+	}
+	d, err := db.LoadDB(e.Paths.ProfileFile(e.DBB))
+	if err != nil || d.Profile.Browser != "brave" || d.Profile.Path != filepath.Join(e.B.UDD, "Default") ||
+		d.Profile.Origin != "chrome-extension://"+e.ExtID {
+		t.Errorf("%s database %+v, %v", e.DBB, d, err)
+	}
+	roundDone(t, e.A, "Chrome's round after binding")
+	roundDone(t, e.B, "Brave's round after binding")
+
+	e.B.Close()
+	out := e.mm(t, "uninstall", "--browser", "brave")
+	if _, err := os.Stat(chrome.Brave.ExternalFile(e.ExtID)); !os.IsNotExist(err) {
+		t.Errorf("Brave's external file is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.Paths.Data, "mirrormark.crx")); err != nil {
+		t.Fatalf("the CRX went with Brave: %v", err)
+	}
+	if !strings.Contains(out, "Kept the mirrormark service, which Chrome still uses.") {
+		t.Errorf("uninstall did not keep the service for Chrome:\n%s", out)
+	}
+	eval[bool](t, e.A, `chrome.storage.local.remove("status").then(() => true)`)
+	e.A.Add(t, "other", "Example", "https://example.com/")
+	roundDone(t, e.A, "Chrome's round after Brave's uninstall")
+}
+
+// TestLibreWolfInstallAndBind: LibreWolf takes Developer Edition's route,
+// and uninstalling it resets its prefs and leaves Developer Edition
+// syncing.
+func TestLibreWolfInstallAndBind(t *testing.T) {
+	e := setupPair(t, "librewolf", "firefox")
+	if e.DBA != "librewolf-a" || e.DBB != "firefox-b" {
+		t.Fatalf("bound to %s and %s", e.DBA, e.DBB)
+	}
+	if got := eval[string](t, e.A, `chrome.runtime.id`); got != extension.GeckoID {
+		t.Errorf("LibreWolf: extension id %q", got)
+	}
+	d, err := db.LoadDB(e.Paths.ProfileFile(e.DBA))
+	if err != nil || d.Profile.Browser != "librewolf" || d.Profile.Path != e.A.UDD || !strings.HasPrefix(d.Profile.Origin, "moz-extension://") {
+		t.Errorf("%s database %+v, %v", e.DBA, d, err)
+	}
+	roundDone(t, e.A, "LibreWolf's round after binding")
+	roundDone(t, e.B, "Developer Edition's round after binding")
+
+	e.A.Close()
+	out := e.mm(t, "uninstall", "--browser", "librewolf")
+	if _, err := os.Stat(firefox.XPIPath(e.udd("a"))); !os.IsNotExist(err) {
+		t.Errorf("the XPI is still in LibreWolf's profile: %v", err)
+	}
+	if user, _ := os.ReadFile(filepath.Join(e.udd("a"), "user.js")); !bytes.Contains(user, []byte(`user_pref("xpinstall.signatures.required", true);`)) {
+		t.Errorf("LibreWolf's user.js not put back:\n%s", user)
+	}
+	if !strings.Contains(out, "Kept the mirrormark service, which Firefox Developer Edition still uses.") {
+		t.Errorf("uninstall did not keep the service for Developer Edition:\n%s", out)
+	}
+	eval[bool](t, e.B, `chrome.storage.local.remove("status").then(() => true)`)
+	e.B.Add(t, "other", "Example", "https://example.com/")
+	roundDone(t, e.B, "Developer Edition's round after LibreWolf's uninstall")
 }

@@ -478,8 +478,8 @@ into two browser instances with `mirrormark install` and binds them, with
 its own `mirrormark serve` running in place of the systemd service, which
 the dev image cannot run. They
 run one at a time, because they share the Chromium browsers' system directories, which
-only the dev image lets your user write. Besides installing and binding,
-they share a folder between the two instances and check that each kind of
+only the dev image lets your user write. Besides installing and binding
+in each of the four browsers, they share a folder between the two instances and check that each kind of
 edit, a delete, restore and purge, a conflict, the first sync of two filled
 folders and a closed browser's catch-up reach both, with no warning in the
 host's log. One test stops the server, puts a program that cannot prove

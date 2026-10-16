@@ -27,7 +27,7 @@ type driver interface {
 
 type Browser struct {
 	Name string
-	Kind string // "chrome" or "firefox"
+	Kind string // a key of bins
 	UDD  string // Chrome's data directory, or Firefox's profile directory
 	cmd  *exec.Cmd
 	drv  driver
@@ -101,7 +101,7 @@ func (d *chromeDriver) openPage(url string) error {
 
 func (d *chromeDriver) close() { call[none, none](d.c, "", "Browser.close", none{}) }
 
-func launch(t *testing.T, name, udd string, env []string) *Browser {
+func launch(t *testing.T, name, kind, udd string, env []string) *Browser {
 	t.Helper()
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -115,8 +115,8 @@ func launch(t *testing.T, name, udd string, env []string) *Browser {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// --no-sandbox: Chrome's sandbox needs namespaces Docker does not grant.
-	cmd := exec.Command("google-chrome", "--user-data-dir="+udd, "--no-sandbox", "--no-first-run",
+	// --no-sandbox: Chromium's sandbox needs namespaces Docker does not grant.
+	cmd := exec.Command(bins[kind], "--user-data-dir="+udd, "--no-sandbox", "--no-first-run",
 		"--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic",
 		"--remote-debugging-pipe", "about:blank")
 	cmd.Env, cmd.Stdout, cmd.Stderr = env, logf, logf
@@ -127,7 +127,7 @@ func launch(t *testing.T, name, udd string, env []string) *Browser {
 	inR.Close()
 	outW.Close()
 	c := newCDP(inW, outR)
-	b := &Browser{Name: name, Kind: "chrome", UDD: udd, cmd: cmd, drv: &chromeDriver{c: c}, done: make(chan struct{})}
+	b := &Browser{Name: name, Kind: kind, UDD: udd, cmd: cmd, drv: &chromeDriver{c: c}, done: make(chan struct{})}
 	go func() {
 		cmd.Wait()
 		logf.Close()
