@@ -13,7 +13,8 @@
 // bookmark event of a burst it sends "changed", so the host waits for that
 // tree. It runs each apply batch's ops in order, stops at the first failure
 // and answers the rest "not run". The popup shows the binding, why the host
-// stopped if it did, and the problems the last round found.
+// stopped if it did, and the problems the last round found; when it opens,
+// it asks the background to connect at once if it is not connected.
 //
 // manifest.json holds the version; Version reads it from there.
 package extension

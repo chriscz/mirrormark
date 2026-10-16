@@ -78,6 +78,13 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   await chrome.alarms.clear(RECONNECT);
   connect();
 });
+// The popup asks for a connection when it opens, so that the user need
+// not wait for the alarm. It is answered once the attempt has ended.
+chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  if (m?.type !== "connect" || sender.id !== chrome.runtime.id) return;
+  connectNow().finally(() => reply(true));
+  return true;
+});
 chrome.alarms.get(TICK).then((a) => a ?? chrome.alarms.create(TICK, { periodInMinutes: 1 }));
 // Firefox lacks onChildrenReordered and the import events; adding a
 // listener to a missing one would stop this script here.
@@ -134,6 +141,20 @@ function connect() {
   return connecting;
 }
 
+// connectNow connects without waiting for a pending reconnect alarm,
+// unless the server refused this profile, which it would do again. An
+// attempt already in flight is the one the caller waits for.
+async function connectNow() {
+  if (connecting && (await connecting)) return;
+  if (sock || rebinding) return;
+  const { status } = await chrome.storage.local.get("status");
+  if (status?.refused) return;
+  await chrome.alarms.clear(RECONNECT);
+  await connect();
+}
+
+// open dials unless it need not or must not yet, and reports whether it
+// dialed.
 async function open() {
   if (sock || rebinding) return;
   // After a failed connection the alarm sets the pace, not bookmark events
@@ -150,14 +171,14 @@ async function open() {
   const { sock: s, failure, hostError: refused } = await dial(db, token);
   if (bound !== binding || sock || rebinding) {
     s?.close(); // rebound meanwhile
-    return;
+    return true;
   }
   if (!s) {
-    await setStatus({ error: failure ?? NOT_RUNNING, problems: [] });
+    await setStatus({ error: failure ?? NOT_RUNNING, problems: [], refused: !!refused });
     // A server that refused this profile will refuse it again; don't ask
     // every 30 s.
     chrome.alarms.create(RECONNECT, { when: Date.now() + (refused ? MAX_BACKOFF : MIN_BACKOFF) });
-    return;
+    return true;
   }
   refs.clear();
   const opened = Date.now();
@@ -208,6 +229,7 @@ async function open() {
   };
   // The hello and the proof went out in dial, so no tree can precede them.
   await sendTree();
+  return true;
 }
 
 // dial returns { sock } for the first port whose server proves it holds
@@ -328,7 +350,8 @@ async function sendTree() {
 async function onMessage(p, m) {
   if (m.type === "error") {
     // Why the host stopped; shown even if the socket has closed since.
-    await setStatus({ error: `${m.code}: ${m.message}`, problems: [] });
+    // It would stop again, so opening the popup does not hurry the retry.
+    await setStatus({ error: `${m.code}: ${m.message}`, problems: [], refused: true });
     return;
   }
   if (p !== sock) return; // from a connection since closed
@@ -351,7 +374,7 @@ async function onMessage(p, m) {
   } else if (m.type === "status") {
     // The end of a round: the host runs, and these are all that is wrong.
     backoff = MIN_BACKOFF;
-    await setStatus({ error: null, problems: m.problems ?? [] });
+    await setStatus({ error: null, problems: m.problems ?? [], refused: false });
   }
 }
 

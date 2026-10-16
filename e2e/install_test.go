@@ -110,10 +110,21 @@ func TestInstallAndBind(t *testing.T) {
 	})
 }
 
-// impostor holds the first port with a program that accepts any upgrade
-// and answers every hello with answer, as another user's program could.
-// It returns the types of the messages it received.
-func impostor(t *testing.T, answer *atomic.Pointer[host.Msg]) func() []string {
+// impostor is a program on the first port that accepts any upgrade and
+// answers every hello with answer, as another user's program could, or
+// never answers while answer is nil.
+type impostor struct {
+	srv   *http.Server
+	mu    sync.Mutex
+	types []string // of the messages it received
+	// For each database named in a hello: the hellos, the connections
+	// open now, and the most open at once.
+	hellos, live, peak map[string]int
+}
+
+// newImpostor starts an impostor on the first port; it stops when the test
+// ends, or on Close.
+func newImpostor(t *testing.T, answer *atomic.Pointer[host.Msg]) *impostor {
 	ports, err := extension.Ports()
 	if err != nil {
 		t.Fatal(err)
@@ -122,13 +133,20 @@ func impostor(t *testing.T, answer *atomic.Pointer[host.Msg]) func() []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	var got []string
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	im := &impostor{hellos: map[string]int{}, live: map[string]int{}, peak: map[string]int{}}
+	im.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := ws.Upgrade(w, r, 1<<20)
 		if err != nil {
 			return
 		}
+		var named string // the database in this connection's hello
+		defer func() {
+			im.mu.Lock()
+			if named != "" {
+				im.live[named]--
+			}
+			im.mu.Unlock()
+		}()
 		defer c.Close(1000, "")
 		for {
 			b, err := c.Read()
@@ -137,28 +155,74 @@ func impostor(t *testing.T, answer *atomic.Pointer[host.Msg]) func() []string {
 			}
 			var m host.Msg
 			json.Unmarshal(b, &m)
-			mu.Lock()
-			got = append(got, m.Type)
-			mu.Unlock()
-			if m.Type == "hello" {
-				b, _ := json.Marshal(answer.Load())
+			im.mu.Lock()
+			im.types = append(im.types, m.Type)
+			if m.Type == "hello" && named == "" {
+				named = m.DB
+				im.hellos[named]++
+				im.live[named]++
+				im.peak[named] = max(im.peak[named], im.live[named])
+			}
+			im.mu.Unlock()
+			if a := answer.Load(); m.Type == "hello" && a != nil {
+				b, _ := json.Marshal(a)
 				c.Write(b)
 			}
 		}
 	})}
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close() })
-	return func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(got)
-	}
+	go im.srv.Serve(ln)
+	t.Cleanup(im.Close)
+	return im
 }
+
+// Types are the types of the messages the impostor received.
+func (im *impostor) Types() []string {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	return slices.Clone(im.types)
+}
+
+// Conns are, for database db, how many hellos the impostor received, how
+// many of their connections are open now, and how many were at most.
+func (im *impostor) Conns(db string) (hellos, live, peak int) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	return im.hellos[db], im.live[db], im.peak[db]
+}
+
+// Close stops the impostor and frees the port; the connections it has
+// taken over go when their handlers return.
+func (im *impostor) Close() { im.srv.Close() }
 
 // popupError is the error b's popup shows, or "" if none.
 func popupError(t *testing.T, b *Browser) string {
 	t.Helper()
 	return eval[string](t, b, `chrome.storage.local.get("status").then((r) => r.status?.error ?? "")`)
+}
+
+// popupView is what the popup page b last opened shows: whether its
+// spinner and the text beside it are showing, and its error lines.
+type popupView struct {
+	Busy  bool   `json:"busy"`
+	Text  string `json:"text"`
+	Error string `json:"error"`
+}
+
+func popupShows(t *testing.T, b *Browser) popupView {
+	t.Helper()
+	return eval[popupView](t, b, `({
+  busy: !document.getElementById("busy").hidden,
+  text: document.getElementById("busy").textContent,
+  error: document.getElementById("error").textContent,
+})`)
+}
+
+// reconnectIn is how long until b's reconnect alarm fires, or a negative
+// duration if none is set.
+func reconnectIn(t *testing.T, b *Browser) time.Duration {
+	t.Helper()
+	ms := eval[float64](t, b, `chrome.alarms.get("reconnect").then((a) => (a ? a.scheduledTime - Date.now() : -1))`)
+	return time.Duration(ms) * time.Millisecond
 }
 
 // TestReconnectsAfterServerRestart: with the server gone, the popup says
@@ -179,7 +243,7 @@ func testReconnectsAfterServerRestart(t *testing.T, kind string) {
 	roundDone(t, e.A, "a's first round")
 
 	// A restart, as `systemctl --user restart` does: the extension tries
-	// again within seconds, not at its 30 s alarm.
+	// again within seconds, not at its 30 s alarm, and the popup clears.
 	before := time.Now()
 	e.stopServer(t)
 	e.serve(t)
@@ -188,6 +252,10 @@ func testReconnectsAfterServerRestart(t *testing.T, kind string) {
 	})
 	t.Logf("a reconnected %v after the restart began", time.Since(before).Round(time.Millisecond))
 	roundDone(t, e.A, "a round after a restart")
+	eventually(t, 5*time.Second, "the open popup to clear", func() bool {
+		v := popupShows(t, e.A)
+		return !v.Busy && v.Error == ""
+	})
 
 	e.stopServer(t)
 	// The close says so in plain words, never with a close code, and the
@@ -203,7 +271,7 @@ func testReconnectsAfterServerRestart(t *testing.T, kind string) {
 	})
 	var answer atomic.Pointer[host.Msg]
 	answer.Store(&host.Msg{V: host.Version, Type: "error", Code: "evil", Message: "PEER TEXT"})
-	got := impostor(t, &answer)
+	im := newImpostor(t, &answer)
 	ports, err := extension.Ports()
 	if err != nil {
 		t.Fatal(err)
@@ -241,9 +309,73 @@ func testReconnectsAfterServerRestart(t *testing.T, kind string) {
 	eval[bool](t, e.A, fmt.Sprintf(`chrome.storage.local.set({ token: %q }).then(() => true)`, token))
 	roundDone(t, e.A, "a round with the token back")
 
-	if types := got(); !slices.Contains(types, "hello") || slices.Contains(types, "proof") || slices.Contains(types, "tree") {
+	if types := im.Types(); !slices.Contains(types, "hello") || slices.Contains(types, "proof") || slices.Contains(types, "tree") {
 		t.Fatalf("the program on the first port received %q; want hellos only", types)
 	}
+}
+
+// TestPopupConnects: opening the popup tries to connect at once, rather
+// than at the extension's next retry, and shows a spinner while it tries.
+// Opening it again during an attempt starts no second one.
+func TestPopupConnects(t *testing.T) {
+	for _, k := range []string{"chrome", "firefox"} {
+		t.Run(k, func(t *testing.T) { testPopupConnects(t, k) })
+	}
+}
+
+func testPopupConnects(t *testing.T, kind string) {
+	e := setupPair(t, kind, kind)
+	roundDone(t, e.A, "a's first round")
+	e.stopServer(t)
+	eventually(t, 70*time.Second, "the popup to say mirrormark is not running", func() bool {
+		return strings.HasPrefix(popupError(t, e.A), "mirrormark is not running")
+	})
+
+	// A program on the first port that never answers holds each attempt
+	// for the extension's 5 s limit, long enough to see the spinner.
+	var answer atomic.Pointer[host.Msg]
+	im := newImpostor(t, &answer)
+	e.open(t, e.A)
+	eventually(t, 3*time.Second, "the popup's spinner", func() bool {
+		v := popupShows(t, e.A)
+		return v.Busy && v.Text == "Connecting to mirrormark…" && v.Error == ""
+	})
+	eventually(t, 3*time.Second, "the popup's attempt to reach the program", func() bool {
+		_, live, _ := im.Conns(e.DBA)
+		return live == 1
+	})
+	for range 3 {
+		e.open(t, e.A)
+	}
+	if _, live, _ := im.Conns(e.DBA); live != 1 || !popupShows(t, e.A).Busy {
+		t.Fatalf("the first attempt ended before the popup had opened again; %d connections open", live)
+	}
+	eventually(t, 10*time.Second, "the popup to say mirrormark is not running", func() bool {
+		v := popupShows(t, e.A)
+		return !v.Busy && strings.HasPrefix(v.Error, "mirrormark is not running")
+	})
+	if hellos, _, peak := im.Conns(e.DBA); hellos != 1 || peak != 1 {
+		t.Fatalf("four opens of the popup made %d attempts, %d at once; want 1", hellos, peak)
+	}
+	im.Close()
+
+	// With the server back, opening the popup connects well before the
+	// alarm would.
+	wait := reconnectIn(t, e.A)
+	if wait < 10*time.Second {
+		t.Fatalf("the reconnect alarm is %v away; want it far enough off to tell it from the popup", wait)
+	}
+	e.serve(t)
+	before := time.Now()
+	e.open(t, e.A)
+	eventually(t, 5*time.Second, "a's connection after the popup opened", func() bool {
+		return db.Connected(e.Paths, e.DBA, before)
+	})
+	t.Logf("a connected %v after the popup opened, %v before its alarm", time.Since(before).Round(time.Millisecond), wait.Round(time.Second))
+	eventually(t, 5*time.Second, "the popup to clear", func() bool {
+		v := popupShows(t, e.A)
+		return !v.Busy && v.Error == ""
+	})
 }
 
 // TestBindStartsChrome follows a user who runs install's second pass

@@ -4,7 +4,17 @@
 <style>
   body { font: 13px system-ui, sans-serif; min-width: 18em; margin: 1em; }
   .error { color: #b00020; white-space: pre-line; }
+  .spinner {
+    display: inline-block; width: 0.9em; height: 0.9em; vertical-align: -0.1em; margin-right: 0.4em;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 </style>
 <p id="db"></p>
-<p id="error" class="error"></p>
+<div role="status">
+  <p id="busy" hidden><span class="spinner" aria-hidden="true"></span>Connecting to mirrormark…</p>
+  <p id="error" class="error"></p>
+</div>
 <script src="popup.js"></script>
