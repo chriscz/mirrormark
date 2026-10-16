@@ -292,7 +292,8 @@ lose its binding at each restart; the popup then says it is not bound.
 
 The token travels in the bind page's URL, which is a command-line argument of the browser process. On Linux, other local users can read it with `ps` or `/proc/<pid>/cmdline` unless `/proc` is mounted with `hidepid=2`.
 
-`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set.
+`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` move these when set;
+`mirrormark help` lists them where they are for you.
 If you set them in your shell, set them for systemd too, in a file in
 `~/.config/environment.d/`, so the service finds the same files.
 Database and backup files are readable only by you (mode 0600); they hold

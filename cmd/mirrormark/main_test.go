@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,5 +109,66 @@ func TestServeRunsOncePerUser(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"serve"}, strings.NewReader(""), &out, &errb); code != 1 || !strings.Contains(errb.String(), "already running") {
 		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// help, and the usage printed on an error, say how to share folders and
+// name each file where it is for this user, as the XDG variables place it.
+func TestHelpNamesTheResolvedFiles(t *testing.T) {
+	root := t.TempDir()
+	cfg, data, state := filepath.Join(root, "cfg"), filepath.Join(root, "data"), filepath.Join(root, "state")
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_STATE_HOME", state)
+	var out, errb bytes.Buffer
+	if code := run([]string{"help"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	help := out.String()
+	for _, want := range []string{
+		"\nSharing folders:\n",
+		"\n    format: 1\n    unions:\n      work:\n        chrome-personal: toolbar/Work\n        firefox-work: toolbar/Work\n",
+		"\nFiles:\n",
+		"  config.yaml      " + filepath.Join(cfg, "mirrormark", "config.yaml") + "\n",
+		"  databases        " + filepath.Join(data, "mirrormark", "profiles") + "/<id>.yaml\n",
+		"  backups          " + filepath.Join(data, "mirrormark", "backups") + "/<id>/\n",
+		"  key, extension   " + filepath.Join(data, "mirrormark") + "/ (extension.pem, mirrormark.crx, extension/)\n",
+		"  log              " + filepath.Join(state, "mirrormark", "log") + "\n",
+		"  serve.lock       " + filepath.Join(data, "mirrormark", "serve.lock") + "\n",
+		"  service          " + filepath.Join(cfg, "systemd", "user", "mirrormark.service") + "\n",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help has no %q:\n%s", want, help)
+		}
+	}
+	// The prose, however it is wrapped.
+	flat := strings.Join(strings.Fields(help), " ")
+	for _, want := range []string{
+		"DATABASE column of mirrormark install --browser B",
+		"<id> in the line bound: <profile> -> <id>",
+		"starts with toolbar, other or mobile, or menu in Firefox Developer Edition and LibreWolf",
+		"as the bookmark manager shows them",
+		`write \/ for a slash`,
+		"One profile's folders cannot be inside each other",
+		"within seconds, with no restart, and the log records each one",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("help has no %q:\n%s", want, help)
+		}
+	}
+	// The example is a config mirrormark takes.
+	example := help[strings.Index(help, "    format: 1"):]
+	example = example[:strings.Index(example, "\n\n")+1]
+	c := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(c, []byte(example), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.LoadConfig(c); err != nil || len(got.Unions["work"]) != 2 {
+		t.Fatalf("the example %q: %+v, %v", example, got, err)
+	}
+	errb.Reset()
+	run(nil, strings.NewReader(""), &out, &errb)
+	if errb.String() != help {
+		t.Fatalf("the usage on an error differs from help:\n%s", errb.String())
 	}
 }

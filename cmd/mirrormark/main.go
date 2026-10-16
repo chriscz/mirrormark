@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/chriscz/mirrormark/extension"
@@ -35,9 +37,53 @@ Commands:
               [DIR]
   serve       Run the server the extensions connect to
   help        Show this help
+
+Sharing folders:
+  List the folders to share in config.yaml. Each union names, for each
+  profile id, the folder that profile shares, for example:
+
+%s
+  A profile's id is in the DATABASE column of mirrormark install --browser B,
+  or is the <id> in the line bound: <profile> -> <id> that install prints. A
+  path starts with toolbar, other or mobile, or menu in Firefox Developer
+  Edition and LibreWolf, then the folder names as the bookmark manager shows
+  them; write \/ for a slash in a name. One profile's folders cannot be
+  inside each other. mirrormark picks up a change within seconds, with no
+  restart, and the log records each one.
+
+Files:
+  config.yaml      %s
+  databases        %s/<id>.yaml
+  backups          %s/<id>/
+  key, extension   %s/ (extension.pem, mirrormark.crx, extension/)
+  log              %s
+  serve.lock       %s
+  service          %s
 `
 
-func usage(w io.Writer) { fmt.Fprint(w, usageText) }
+// usage prints the help, with each file where it is for this user.
+func usage(w io.Writer) {
+	p, err := db.DefaultPaths()
+	if err != nil { // no home directory: name the defaults
+		p = db.Paths{Config: "~/.config/mirrormark", Data: "~/.local/share/mirrormark", State: "~/.local/state/mirrormark"}
+	}
+	fmt.Fprintf(w, usageText, unionExample("    ", "chrome-personal", "firefox-work"), p.ConfigFile(), p.ProfilesDir(),
+		filepath.Join(p.Data, "backups"), p.Data, p.LogFile(), p.ServeLock(), unitPath(p))
+}
+
+// unionExample is a config.yaml that shares toolbar/Work of the profiles
+// with these ids, each line indented by indent. With one id, a comment
+// stands for the second.
+func unionExample(indent string, ids ...string) string {
+	lines := []string{"format: 1", "unions:", "  work:"}
+	for _, id := range ids {
+		lines = append(lines, "    "+id+": toolbar/Work")
+	}
+	if len(ids) == 1 {
+		lines = append(lines, "    # another profile's id: toolbar/Work")
+	}
+	return indent + strings.Join(lines, "\n"+indent) + "\n"
+}
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
