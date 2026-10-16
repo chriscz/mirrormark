@@ -119,6 +119,13 @@ func newEnv(t *testing.T) *Env {
 		Data:   filepath.Join(home, ".local", "share", "mirrormark"),
 		State:  filepath.Join(home, ".local", "state", "mirrormark"),
 	}}
+	// Registered first, so it runs after the browsers and the server have
+	// stopped and written their last lines, and before the home goes.
+	t.Cleanup(func() {
+		if t.Failed() {
+			e.keepLogs(t)
+		}
+	})
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "XDG_") {
 			e.env = append(e.env, kv)
@@ -127,6 +134,46 @@ func newEnv(t *testing.T) *Env {
 	e.env = append(e.env, "HOME="+home)
 	e.serve(t)
 	return e
+}
+
+var browserLogRe = regexp.MustCompile(`^((firefox|librewolf)/)?[^/]+\.log$`)
+
+// keepLogs copies the server's log and each browser's output into
+// build/e2e-logs/<test>/, which outlives the test's home, so a failure
+// that does not come back when the test runs again can still be looked
+// into.
+func (e *Env) keepLogs(t *testing.T) {
+	dst := filepath.Join(filepath.Dir(bin), "e2e-logs", strings.ReplaceAll(t.Name(), "/", "_"))
+	if err := os.RemoveAll(dst); err != nil {
+		t.Logf("cannot keep the logs: %v", err)
+		return
+	}
+	var kept []string
+	filepath.WalkDir(e.Home, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		// A browser's output is <data directory>.log, beside the data
+		// directory; the .log files inside it are the browser's databases.
+		rel, _ := filepath.Rel(e.Home, path)
+		if !browserLogRe.MatchString(rel) && filepath.Dir(path) != e.Paths.State {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			err = os.MkdirAll(filepath.Dir(filepath.Join(dst, rel)), 0o755)
+		}
+		if err == nil {
+			err = os.WriteFile(filepath.Join(dst, rel), data, 0o644)
+		}
+		if err != nil {
+			t.Logf("cannot keep %s: %v", path, err)
+			return nil
+		}
+		kept = append(kept, rel)
+		return nil
+	})
+	t.Logf("kept the logs of this failure in %s: %s", dst, strings.Join(kept, ", "))
 }
 
 // serve starts the test's mirrormark server, as the user's systemd service

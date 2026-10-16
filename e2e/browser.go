@@ -116,9 +116,11 @@ func launch(t *testing.T, name, kind, udd string, env []string) *Browser {
 		t.Fatal(err)
 	}
 	// --no-sandbox: Chromium's sandbox needs namespaces Docker does not grant.
+	// --enable-logging=stderr puts the extension's console messages and
+	// failed connections in the log a failing test keeps.
 	cmd := exec.Command(bins[kind], "--user-data-dir="+udd, "--no-sandbox", "--no-first-run",
 		"--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic",
-		"--remote-debugging-pipe", "about:blank")
+		"--enable-logging=stderr", "--remote-debugging-pipe", "about:blank")
 	cmd.Env, cmd.Stdout, cmd.Stderr = env, logf, logf
 	cmd.ExtraFiles = []*os.File{inR, outW} // fds 3 and 4 in Chrome
 	if err := cmd.Start(); err != nil {
