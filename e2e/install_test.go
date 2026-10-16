@@ -169,11 +169,35 @@ func popupError(t *testing.T, b *Browser) string {
 // hello, and syncs again. A known error from the server outranks the
 // program's wrong proof, and a profile with no token is told to bind again.
 func TestReconnectsAfterServerRestart(t *testing.T) {
-	e := setup(t)
+	for _, k := range []string{"chrome", "firefox"} {
+		t.Run(k, func(t *testing.T) { testReconnectsAfterServerRestart(t, k) })
+	}
+}
+
+func testReconnectsAfterServerRestart(t *testing.T, kind string) {
+	e := setupPair(t, kind, kind)
 	roundDone(t, e.A, "a's first round")
+
+	// A restart, as `systemctl --user restart` does: the extension tries
+	// again within seconds, not at its 30 s alarm.
+	before := time.Now()
 	e.stopServer(t)
-	// The close sets the 30 s reconnect alarm; the attempt it starts finds
-	// no server.
+	e.serve(t)
+	eventually(t, 8*time.Second, "a's connection soon after a restart", func() bool {
+		return db.Connected(e.Paths, e.DBA, before)
+	})
+	t.Logf("a reconnected %v after the restart began", time.Since(before).Round(time.Millisecond))
+	roundDone(t, e.A, "a round after a restart")
+
+	e.stopServer(t)
+	// The close says so in plain words, never with a close code, and the
+	// attempts after it find no server.
+	eventually(t, 5*time.Second, "the popup to say mirrormark stopped", func() bool {
+		return popupError(t, e.A) != ""
+	})
+	if msg := popupError(t, e.A); msg != "mirrormark restarted or stopped; reconnecting…" && !strings.HasPrefix(msg, "mirrormark is not running") {
+		t.Fatalf("after the server stopped, the popup shows %q", msg)
+	}
 	eventually(t, 70*time.Second, "the popup to say mirrormark is not running", func() bool {
 		return strings.HasPrefix(popupError(t, e.A), "mirrormark is not running")
 	})
@@ -191,7 +215,7 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 		t.Fatalf("the popup shows the program's own words: %q", msg)
 	}
 	answer.Store(&host.Msg{V: host.Version, Type: "challenge", Nonce: strings.Repeat("0", 64), Proof: strings.Repeat("0", 64)})
-	before := time.Now()
+	before = time.Now()
 	e.serve(t) // the first port is taken, so it listens on the second
 	eventually(t, 70*time.Second, "a proven connection after the server came back", func() bool {
 		return db.Connected(e.Paths, e.DBA, before)

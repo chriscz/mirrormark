@@ -10,6 +10,11 @@ const REBIND_MS = 1000; // time for the old connection's host to let go of the d
 const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
 const DIAL_MS = 5000; // a port that does not finish the challenge in this time is skipped
+// After a connection that worked closes, as when the server restarts, try
+// again this soon, while the background is still running, rather than wait
+// for the alarm. At most once per MAX_BACKOFF, so a server that keeps
+// closing meets the back-off.
+const QUICK_MS = 2000;
 const RECONNECT = "reconnect"; // the one-shot alarm after a connection fails or closes
 // A browser that stops an idle background closes its socket without
 // running onclose; this alarm starts the background again, and it
@@ -17,6 +22,7 @@ const RECONNECT = "reconnect"; // the one-shot alarm after a connection fails or
 const TICK = "tick";
 const NOT_RUNNING =
   "mirrormark is not running. Start it with `systemctl --user start mirrormark`, or run `mirrormark serve`.";
+const CLOSED = "mirrormark restarted or stopped; reconnecting…";
 const NOT_BOUND =
   "not bound yet: run `mirrormark install --profile <this profile>` again, with `--browser brave`, `firefox` or `librewolf` in those browsers.";
 // What the errors a server can send before it has proven itself mean. Any
@@ -52,6 +58,7 @@ let unsent = false; // bookmark events since the last tree; the host knows
 let rebinding = null; // the timer that connects after a new binding
 let binding = 0; // counts new bindings, so a connect can tell it is stale
 let backoff = MIN_BACKOFF;
+let quickAt = 0; // when the last quick retry was set
 let queue = Promise.resolve();
 const refs = new Map(); // create ref -> new bookmark id, for later ops' parents
 
@@ -184,11 +191,20 @@ async function open() {
   s.onclose = (ev) => {
     if (sock !== s) return; // replaced by a newer connection
     sock = null;
+    console.info("mirrormark: the connection closed with code", ev.code);
     // The host's own error says more than the close.
-    if (!hostError) setStatus({ error: `the connection to mirrormark closed (code ${ev.code})` });
+    if (!hostError) setStatus({ error: CLOSED });
     if (Date.now() - opened > MAX_BACKOFF) backoff = MIN_BACKOFF;
+    // The alarm stays as the fallback, for a background stopped before
+    // the quick retry runs.
     chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
+    if (hostError || Date.now() - quickAt < MAX_BACKOFF) return;
+    quickAt = Date.now();
+    setTimeout(async () => {
+      await chrome.alarms.clear(RECONNECT);
+      connect();
+    }, QUICK_MS);
   };
   // The hello and the proof went out in dial, so no tree can precede them.
   await sendTree();
