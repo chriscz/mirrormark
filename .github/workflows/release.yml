@@ -1,0 +1,52 @@
+name: release
+
+# A pushed tag vX.Y.Z builds, attests and publishes release X.Y.Z. The
+# release is created as a draft, given every file, and published last, so
+# an immutable release is locked only once it is complete.
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag is the extension's version
+        run: |
+          manifest="$(jq -r .version extension/manifest.json)"
+          if [ "$GITHUB_REF_NAME" != "v$manifest" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is not v$manifest, the version in extension/manifest.json"
+            exit 1
+          fi
+      - id: go
+        run: echo "version=$(sed -n 's/^ARG GO_VERSION=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+      # No cache: a release builds from nothing but the source and Go.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - run: make
+      - run: make dist VERSION="${GITHUB_REF_NAME#v}"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: build/dist/*
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "mirrormark ${GITHUB_REF_NAME#v}" --generate-notes build/dist/*
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
