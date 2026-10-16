@@ -53,11 +53,18 @@ func unit(self string) []byte {
 
 // startServer writes the user unit and has systemd (re)start the server,
 // every time, so it runs the binary just installed; connected extensions
-// reconnect at their next alarm. Without systemd it says how to run the
-// server by hand.
+// reconnect at their next alarm. It says so, and how to look at the
+// service and stop it. Without systemd it says how to run the server by
+// hand.
 func startServer(p db.Paths, self string, stdout io.Writer) error {
 	if err := chrome.WriteFiles([]chrome.File{{Path: unitPath(p), Data: unit(self)}}); err != nil {
 		return err
+	}
+	running := false
+	if unlock, err := db.TryLock(p.ServeLock()); errors.Is(err, db.ErrLocked) {
+		running = true
+	} else if err == nil {
+		unlock()
 	}
 	for _, args := range [][]string{{"daemon-reload"}, {"enable", unitName}, {"restart", unitName}} {
 		if err := runSystemctl(args...); err != nil {
@@ -65,6 +72,12 @@ func startServer(p db.Paths, self string, stdout io.Writer) error {
 			return nil
 		}
 	}
+	started := "Started it now."
+	if running {
+		started = "It was running, so it was restarted now to run this binary; connected profiles reconnect within a minute."
+	}
+	fmt.Fprintf(stdout, "Set up mirrormark serve as a systemd user service, %s. It runs as you and starts when you log in. %s\n"+
+		"  status: systemctl --user status mirrormark\n  log:    %s\n  stop:   systemctl --user disable --now mirrormark\n", unitPath(p), started, p.LogFile())
 	return nil
 }
 

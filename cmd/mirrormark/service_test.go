@@ -73,6 +73,31 @@ func TestStartServer(t *testing.T) {
 	}
 }
 
+// install says what it set up, that it started the server or restarted
+// the one running, and how to look at it and stop it.
+func TestStartServerSaysWhatItDid(t *testing.T) {
+	p := testHome(t)
+	fakeSystemctl(t, "")
+	how := "  status: systemctl --user status mirrormark\n" +
+		"  log:    " + p.LogFile() + "\n" +
+		"  stop:   systemctl --user disable --now mirrormark\n"
+	var out bytes.Buffer
+	if err := startServer(p, "/bin/mirrormark", &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Set up mirrormark serve as a systemd user service, " + unitPath(p) + ". It runs as you and starts when you log in. Started it now.\n" + how; out.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", out.String(), want)
+	}
+	fakeServer(t, p)
+	out.Reset()
+	if err := startServer(p, "/bin/mirrormark", &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Set up mirrormark serve as a systemd user service, " + unitPath(p) + ". It runs as you and starts when you log in. It was running, so it was restarted now to run this binary; connected profiles reconnect within a minute.\n" + how; out.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
 func TestStartServerWithoutSystemd(t *testing.T) {
 	p := testHome(t)
 	fakeSystemctl(t, "daemon-reload")

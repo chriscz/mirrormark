@@ -28,8 +28,10 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
    `--profile` options; without them it only lists. A bound profile syncs
    nothing until `config.yaml` names it.
    `install` also sets up `mirrormark serve` as a systemd user service
-   (`~/.config/systemd/user/mirrormark.service`) and starts it. Without
-   systemd, it prints the command to keep running.
+   (`~/.config/systemd/user/mirrormark.service`), which runs as you and
+   starts when you log in, and starts or restarts it. It says which, and
+   prints the commands to check the service, read its log and stop it.
+   Without systemd, it prints the command to keep running.
 2. Restart Chrome when it asks: close every window, and check that no
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
