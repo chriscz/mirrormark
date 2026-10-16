@@ -37,7 +37,8 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
 2. Restart Chrome when it asks: close every window, and check that no
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep
    running in the background. Chrome reads the extension's file only when
-   it starts.
+   it starts. If Chrome runs under firejail, add the lines `install` prints
+   first (see [Firejail](#firejail)).
 3. Run `mirrormark install --profile ...` again. It first checks that
    `mirrormark serve` is running, waiting up to 5 seconds for the service
    to start; if it is not, it says how to start it, opens nothing and exits
@@ -145,6 +146,27 @@ retries it quietly and then leaves the service failed. The extension
 connects to it over a WebSocket on 127.0.0.1, on the first of the ports
 61959, 63018 and 63454 whose server proves it holds the profile's token.
 
+### Firejail
+
+A Chrome or Brave that firejail starts (for example through `firecfg`'s
+`/usr/local/bin/brave-browser`) cannot see mirrormark's CRX in
+`~/.local/share/mirrormark`, and firejail's Chrome profile also hides
+`/usr/share/google-chrome/extensions`, so the browser never installs
+mirrormark. `install` notices when the browser's command on `PATH` runs
+firejail and prints the lines to add to `~/.config/firejail/brave.local` or
+`~/.config/firejail/google-chrome.local`; it never edits them itself. For
+Brave that is:
+
+```
+whitelist ${HOME}/.local/share/mirrormark
+```
+
+Chrome needs that line and `whitelist /usr/share/google-chrome/extensions`.
+Firejail reads these files only from `~/.config/firejail`. Then quit the
+browser completely and start it again. Firefox Developer Edition and
+LibreWolf need nothing: their add-on lives in the profile. Only firejail
+0.9.72's profiles have been tried.
+
 ## Install (Brave on Linux)
 
 Brave installs as Chrome does (see [Install (Google Chrome on
@@ -176,6 +198,9 @@ as `mirrormark install` if you use both, each with its `--profile` options.
 while Chrome still has mirrormark installed, and
 `--purge` keeps the key while Chrome has it installed or a Chrome profile's
 database is left; the same goes for Chrome while Brave has it.
+
+Under firejail, Brave needs one line in its `.local` file first; see
+[Firejail](#firejail).
 
 Only Brave stable from Brave's own package is supported. Brave Beta and
 Nightly, and Brave from Flatpak or Snap, are untested and not supported.

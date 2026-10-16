@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -2033,5 +2034,89 @@ func TestQuoteArg(t *testing.T) {
 		if got := quoteArg(in); got != want {
 			t.Errorf("quoteArg(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// jailOnPath puts a command bin first on PATH that is a symlink to a file
+// named firejail, as firecfg makes, which runs the fake browser.
+func jailOnPath(t *testing.T, bin string) {
+	t.Helper()
+	fake, err := exec.LookPath(bin)
+	must(t, err)
+	script, err := os.ReadFile(fake)
+	must(t, err)
+	dir := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(dir, "bin"), 0o755))
+	must(t, os.WriteFile(filepath.Join(dir, "firejail"), script, 0o755))
+	must(t, os.Symlink(filepath.Join(dir, "firejail"), filepath.Join(dir, "bin", bin)))
+	t.Setenv("PATH", filepath.Join(dir, "bin")+":"+os.Getenv("PATH"))
+}
+
+// A Brave started through firejail cannot see the CRX in the data
+// directory, so install names the line its .local file lacks wherever it
+// would otherwise just say to restart Brave, and stops once the line is
+// there.
+func TestInstallTellsAJailedBraveItsFirejailLine(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	jailOnPath(t, "brave-browser")
+	udd := braveData(t)
+	install := func(code int, args ...string) string {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if got := run(append([]string{"install", "--browser", "brave", "--user-data-dir", udd}, args...), strings.NewReader(""), &out, &errb); got != code {
+			t.Fatalf("exit %d: %s%s", got, out.String(), errb.String())
+		}
+		return out.String()
+	}
+	note := "Brave runs under firejail, which hides mirrormark's extension from it. Add the line below to ~/.config/firejail/brave.local"
+	line := "\n  whitelist ${HOME}/.local/share/mirrormark\n"
+	if out := install(0, "--profile", "Default"); !strings.Contains(out, note+" before you restart it."+line+"Restart Brave") {
+		t.Fatalf("first pass:\n%s", out)
+	}
+	if out := install(0); !strings.HasSuffix(out, note+", then quit Brave completely (close every window) and start it again."+line) {
+		t.Fatalf("listing:\n%s", out)
+	}
+	again := "mirrormark install --browser brave --user-data-dir " + udd + " --profile Default"
+	if out := install(1, "--profile", "Default"); !strings.Contains(out, "not ready: Default: "+note+", quit Brave completely (close every window) and start it again, wait half a minute, then run "+again+"."+line) {
+		t.Fatalf("second pass:\n%s", out)
+	}
+
+	local := filepath.Join(os.Getenv("HOME"), ".config", "firejail", "brave.local")
+	must(t, os.MkdirAll(filepath.Dir(local), 0o755))
+	must(t, os.WriteFile(local, []byte("# mine\nwhitelist ${HOME}/.local/share/mirrormark\n"), 0o644))
+	if out := install(0); strings.Contains(out, "firejail") {
+		t.Fatalf("listing with the line in place:\n%s", out)
+	}
+	if out := install(1, "--profile", "Default"); strings.Contains(out, "firejail") || !strings.Contains(out, "not ready: Default: Brave has not installed mirrormark") {
+		t.Fatalf("second pass with the line in place:\n%s", out)
+	}
+	chromiumReady(t, filepath.Join(udd, "Default"), installedID(t, p))
+	if out := install(0, "--profile", "Default"); !strings.Contains(out, "bound: Default -> brave-personal\n") {
+		t.Fatalf("bind through the jailed command:\n%s", out)
+	}
+}
+
+// A jailed Chrome also needs its external extensions directory, and the
+// data directory's line follows $XDG_DATA_HOME.
+func TestInstallTellsAJailedChromeBothLines(t *testing.T) {
+	skipIfRoot(t)
+	testHome(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(os.Getenv("HOME"), "data"))
+	p, err := db.DefaultPaths()
+	must(t, err)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p)
+	jailOnPath(t, "google-chrome")
+	var out, errb bytes.Buffer
+	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	want := "Chrome runs under firejail, which hides mirrormark's extension from it. Add the lines below to ~/.config/firejail/google-chrome.local before you restart it.\n" +
+		"  whitelist ${HOME}/data/mirrormark\n  whitelist /usr/share/google-chrome/extensions\nRestart Chrome"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("output:\n%s", out.String())
 	}
 }

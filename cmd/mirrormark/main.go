@@ -52,6 +52,10 @@ Sharing folders:
   inside each other. mirrormark picks up a change within seconds, with no
   restart, and the log records each one.
 
+Firejail:
+  Chrome or Brave started through firejail cannot see mirrormark until its
+  firejail .local file allows it; install says what to add, and where.
+
 Files:
   config.yaml      %s
   databases        %s/<id>.yaml

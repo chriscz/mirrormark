@@ -263,9 +263,11 @@ Each entry says where, what, its effect, how it was found and the fix.
 - On the desktop Brave that showed "This page has been blocked by Brave",
   run the README's Brave steps again: `mirrormark install --browser brave`,
   check the listing, then `--profile` one profile and follow the messages.
-  Run it under firejail as well, to see whether firejail hides
-  `/opt/brave.com/brave/extensions/`. Firejail support itself comes later,
-  after the localhost transport. Phase 7 is done when this run is recorded.
+  Run it under firejail as well: `install` should print the `whitelist`
+  line for `~/.config/firejail/brave.local`, and Brave should install and
+  bind once it is added (the firejail spike found
+  `/opt/brave.com/brave/extensions/` visible in the jail). Phase 7 is done,
+  and Phase 9's desktop check, when this run is recorded.
 - On the desktop, upgrade from the native-messaging build in Chrome and
   Developer Edition, following the README. Check that the first `install`
   asks for a restart and starts the service (`systemctl --user status

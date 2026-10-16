@@ -76,17 +76,25 @@ type Browser struct {
 	Bin            string // the command that starts it
 	ExternalDir    string // where it reads external extension files at start
 	ExtensionsPage string // where the user turns extensions on and off
+	// Firejail names the .local file every firejail profile of its
+	// commands reads; JailHidesExternalDir says those profiles hide
+	// ExternalDir.
+	Firejail             string
+	JailHidesExternalDir bool
 }
 
 // Chrome is Google Chrome. On Linux it installs a CRX named by a file in
 // its external extensions directory, without a prompt, in every profile.
+// Firejail's profile for it shows only listed parts of /usr/share, which
+// leave out that directory.
 var Chrome = Browser{Config: "chrome", Name: "Chrome", DataDir: "google-chrome", Bin: "google-chrome",
-	ExternalDir: "/usr/share/google-chrome/extensions", ExtensionsPage: "chrome://extensions"}
+	ExternalDir: "/usr/share/google-chrome/extensions", ExtensionsPage: "chrome://extensions",
+	Firejail: "google-chrome", JailHidesExternalDir: true}
 
 // Brave is Brave stable from Brave's package. It reads external extension
 // files from its own install directory.
 var Brave = Browser{Config: "brave", Name: "Brave", DataDir: "BraveSoftware/Brave-Browser", Bin: "brave-browser",
-	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions"}
+	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions", Firejail: "brave"}
 
 // Browsers are the Chromium-based browsers install knows.
 var Browsers = []Browser{Chrome, Brave}
