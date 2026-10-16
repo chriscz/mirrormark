@@ -616,6 +616,54 @@ func TestServeClosesIdleKeepAliveConnections(t *testing.T) {
 	}
 }
 
+// Each change to config.yaml that the server loads shows in the log once,
+// with how many unions it has, however many profiles are connected.
+func TestServeLogsEachConfigLoadOnce(t *testing.T) {
+	p := paths(t)
+	bound(t, p, "a", testOrigin, tok1)
+	bound(t, p, "b", testOrigin, tok2)
+	writeConfig(t, p, "format: 1\nunions: {}\n")
+	log := &logBuf{}
+	addr := serveLog(t, p, time.Hour, log)
+	_, port, _ := net.SplitHostPort(addr)
+	var conns []*ws.Conn
+	for id, tok := range map[string]string{"a": tok1, "b": tok2} {
+		c, err := dialAs(t, addr, "", testOrigin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonceS := challenged(t, c, port, id, tok)
+		send(t, c, host.Msg{Type: "proof", Proof: mac(tok, "extension:"+nonceS)})
+		send(t, c, host.Msg{Type: "tree", Nodes: fakebrowser.New().Tree()})
+		if m := next(t, c); m.Type != "status" {
+			t.Fatalf("%s: got %+v", id, m)
+		}
+		conns = append(conns, c)
+	}
+	loaded := func() []string {
+		var out []string
+		for line := range strings.Lines(log.String()) {
+			if strings.Contains(line, `msg="loaded config.yaml"`) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+	if l := loaded(); len(l) != 1 || !strings.Contains(l[0], "level=INFO") || !strings.Contains(l[0], "file="+p.ConfigFile()) || !strings.Contains(l[0], "unions=0") {
+		t.Fatalf("after the first rounds: %q", l)
+	}
+	// A union of neither profile: each host runs a round and changes nothing.
+	writeConfig(t, p, "format: 1\nunions:\n  work:\n    x: toolbar/Work\n    y: toolbar/Work\n")
+	for _, c := range conns {
+		if m := next(t, c); m.Type != "status" {
+			t.Fatalf("got %+v", m)
+		}
+	}
+	if l := loaded(); len(l) != 2 || !strings.Contains(l[1], "unions=1") {
+		t.Fatalf("after the change: %q", l)
+	}
+}
+
 // A database file that exists but cannot be read is the server's problem:
 // the log has the details, and the unproven peer only db-missing.
 func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {

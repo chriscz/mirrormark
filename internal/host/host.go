@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/chriscz/mirrormark/internal/db"
@@ -30,6 +31,26 @@ type Options struct {
 	Ping    time.Duration // Serve: how often to ping each connection; default 20 s
 	Origin  string        // the connection's Origin, which the database must name; Serve sets it
 	Port    string        // the port the server listens on, named in the host's proof; Serve sets it
+
+	config *configLog // shared by Serve's hosts; Run makes one if nil
+}
+
+// configLog logs each version of config.yaml that a round loads, once
+// however many hosts load it, so the log shows when an edit took effect.
+type configLog struct {
+	mu   sync.Mutex
+	last stamp
+	seen bool
+}
+
+func (c *configLog) loaded(log *slog.Logger, path string, st stamp, unions int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seen && st == c.last {
+		return
+	}
+	c.last, c.seen = st, true
+	log.Info("loaded config.yaml", "file", path, "unions", unions)
 }
 
 // At most this many ops go in one apply message, and its ops take at most
@@ -95,6 +116,9 @@ func Run(ctx context.Context, c Conn, o Options) error {
 	}
 	if o.Poll == 0 {
 		o.Poll = time.Second
+	}
+	if o.config == nil {
+		o.config = &configLog{}
 	}
 	// Ends the reader when Run returns, not only when the caller's ctx
 	// does: a server outlives each of its hosts.
@@ -395,6 +419,7 @@ func (s *state) round() error {
 		s.warn("config-invalid", err.Error())
 		return nil
 	}
+	s.o.config.loaded(s.o.Log, s.o.Paths.ConfigFile(), s.files[s.o.Paths.ConfigFile()], len(cfg.Unions))
 	self, err := db.LoadDB(s.o.Paths.ProfileFile(s.self))
 	if err != nil {
 		s.warn("db-missing", err.Error())

@@ -44,10 +44,11 @@ func Listen(ports []int) (net.Listener, error) {
 }
 
 // Serve accepts extension connections on ln until ctx ends and runs a host
-// for each. Hosts share nothing in memory: the global lock keeps their
-// rounds apart, as it kept separate processes apart, since flock locks
-// belong to the open file and not to the process. If ln fails, Serve stops
-// its hosts and returns the error.
+// for each. Hosts share nothing in memory but which config.yaml was last
+// logged as loaded: the global lock keeps their rounds apart, as it kept
+// separate processes apart, since flock locks belong to the open file and
+// not to the process. If ln fails, Serve stops its hosts and returns the
+// error.
 func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	if o.Ping == 0 {
 		o.Ping = 20 * time.Second
@@ -58,6 +59,7 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	o.config = &configLog{}
 	sv := &server{ctx: ctx, o: o, addr: ln.Addr().String(), port: port}
 	sv.refused.msg, sv.unproven.msg = "refused a connection", "dropped a connection that did not prove itself"
 	// Only the handshake goes through HTTP, so its headers are small, and a

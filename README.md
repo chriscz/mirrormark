@@ -351,6 +351,8 @@ profile's folders may not be inside each other.
 
 Everything the server does, including skipped unions, conflicts and failed
 changes, goes to `~/.local/state/mirrormark/log`, every time it happens.
+Each change to `config.yaml` it loads shows there once, as a
+`loaded config.yaml` line with the number of unions.
 Connections it turns away, and those that never prove which profile they
 are, take at most a line a minute, with how many there were.
 
