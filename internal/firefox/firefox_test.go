@@ -482,7 +482,7 @@ func TestReadStateFromExtensionsJSON(t *testing.T) {
 	must(t, os.WriteFile(XPIPath(dir), []byte("xpi"), 0o644))
 	must(t, os.WriteFile(filepath.Join(dir, "extensions.json"), []byte(addon(`"active":true`)), 0o644))
 	must(t, os.WriteFile(filepath.Join(dir, "prefs.js"), []byte(uuidPref), 0o644))
-	if got, _, err := ReadState(dir, "0.2.0"); err != nil || got != (chrome.ProfileState{State: chrome.OldBuild, Version: "0.1.0"}) {
+	if got, _, err := ReadState(dir, "0.3.0"); err != nil || got != (chrome.ProfileState{State: chrome.OldBuild, Version: "0.1.0"}) {
 		t.Errorf("old build: %+v %v", got, err)
 	}
 }

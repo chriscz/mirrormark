@@ -474,7 +474,7 @@ func TestReadStateFromPreferences(t *testing.T) {
 		}
 		want := "0.1.0"
 		if c.name == "old build" {
-			want = "0.2.0"
+			want = "0.3.0"
 		}
 		got, err := ReadState(dir, id, want, c.placed)
 		if err != nil || got != c.want {
