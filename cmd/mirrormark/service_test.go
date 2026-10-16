@@ -40,6 +40,17 @@ WantedBy=default.target
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
+	for self, want := range map[string]string{
+		"/opt/a$b/mirrormark":        "ExecStart=/opt/a$$b/mirrormark serve\n",
+		`/opt/a\b/mirrormark`:        `ExecStart="/opt/a\\b/mirrormark" serve` + "\n",
+		`/opt/a"b/mirrormark`:        `ExecStart="/opt/a\"b/mirrormark" serve` + "\n",
+		"/opt/it's/mirrormark":       `ExecStart="/opt/it's/mirrormark" serve` + "\n",
+		`/opt/$x "y" \z%/mirrormark`: `ExecStart="/opt/$$x \"y\" \\z%%/mirrormark" serve` + "\n",
+	} {
+		if got := string(unit(self)); !strings.Contains(got, want) {
+			t.Errorf("unit(%q) has no %q:\n%s", self, want, got)
+		}
+	}
 }
 
 // Every run restarts the server, so it runs the binary just installed.

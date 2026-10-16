@@ -1517,7 +1517,7 @@ func TestUninstallKeepsTheSharedFilesWhenItCannotTell(t *testing.T) {
 	mustBeGone(t, "uninstall", filepath.Join(root, chrome.Brave.ExternalFile(id)))
 	mustExist(t, "uninstall", filepath.Join(root, chrome.HostManifestPath()), filepath.Join(p.Data, "mirrormark.crx"),
 		filepath.Join(p.Data, "extension"), filepath.Join(root, chrome.Chrome.ExternalFile(id)))
-	if !strings.Contains(errb.String(), "cannot tell whether Chrome still uses mirrormark") {
+	if strings.Count(errb.String(), "cannot tell whether Chrome still uses mirrormark") != 1 {
 		t.Fatalf("stderr:\n%s", errb.String())
 	}
 }
@@ -1683,21 +1683,21 @@ func TestGeckoUninstallKeepsTheHostManifestWhenItCannotCheck(t *testing.T) {
 	}
 	host, _ := firefox.HostManifestPath()
 	mustExist(t, "uninstall", host)
-	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "Firefox Developer Edition") {
+	if strings.Count(errb.String(), "cannot tell whether Firefox Developer Edition still uses mirrormark") != 1 {
 		t.Fatalf("stderr %q", errb.String())
 	}
 }
 
-// The one server serves both families: uninstalling Chrome keeps it while
-// a Developer Edition profile still holds the add-on, and the other way
-// round.
-func TestUninstallKeepsTheServiceWhileTheOtherFamilyUsesIt(t *testing.T) {
+// installChromeAndFirefox installs Chrome and a Developer Edition
+// profile, so the one server serves both families.
+func installChromeAndFirefox(t *testing.T) (p db.Paths, calls *[]string) {
+	t.Helper()
 	skipIfRoot(t)
-	p := testHome(t)
+	p = testHome(t)
 	fakeSystem(t)
 	fakeChromeOnPath(t, p)
 	firefoxData(t, p, "aurora")
-	calls := fakeSystemctl(t, "")
+	calls = fakeSystemctl(t, "")
 	installChromium(t, "chrome")
 	var out, errb bytes.Buffer
 	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
@@ -1708,20 +1708,109 @@ func TestUninstallKeepsTheServiceWhileTheOtherFamilyUsesIt(t *testing.T) {
 		t.Fatalf("calls %q", *calls)
 	}
 	*calls = nil
-	out.Reset()
-	if code := run([]string{"uninstall", "--browser", "chrome"}, strings.NewReader(""), &out, &errb); code != 0 {
+	return p, calls
+}
+
+// Uninstalling one family keeps the server while the other still has
+// mirrormark, whichever goes first.
+func TestUninstallKeepsTheServiceWhileTheOtherFamilyUsesIt(t *testing.T) {
+	for _, c := range []struct{ first, firstName, last, lastName string }{
+		{"chrome", "Chrome", "firefox", "Firefox Developer Edition"},
+		{"firefox", "Firefox Developer Edition", "chrome", "Chrome"},
+	} {
+		t.Run(c.first+" first", func(t *testing.T) {
+			p, calls := installChromeAndFirefox(t)
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", c.first}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustExist(t, c.first+" uninstall", unitPath(p))
+			if len(*calls) != 0 || !strings.Contains(out.String(), "Kept the mirrormark service, which "+c.lastName+" still uses.") {
+				t.Fatalf("calls %q, output:\n%s", *calls, out.String())
+			}
+			out.Reset()
+			if code := run([]string{"uninstall", "--browser", c.last}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			mustBeGone(t, c.last+" uninstall", unitPath(p))
+			if want := []string{"disable --now mirrormark.service", "daemon-reload"}; !slices.Equal(*calls, want) || !strings.Contains(out.String(), "Stopped and removed the mirrormark service.") {
+				t.Fatalf("calls %q, output:\n%s", *calls, out.String())
+			}
+		})
+	}
+}
+
+// Without the key, uninstall cannot find Chrome's external file by its id.
+// Chrome then still counts while it has a database or an external file
+// that names mirrormark's CRX, and an unreadable key counts as a user.
+func TestGeckoUninstallKeepsTheServiceWhenTheKeyIsGone(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		breakIt func(t *testing.T, p db.Paths)
+		kept    bool
+		stderr  string
+	}{
+		{"database left", func(t *testing.T, p db.Paths) {
+			must(t, os.Remove(filepath.Join(p.Data, "extension.pem")))
+		}, true, ""},
+		{"external file left", func(t *testing.T, p db.Paths) {
+			must(t, os.Remove(filepath.Join(p.Data, "extension.pem")))
+			for _, d := range []string{"chrome-personal", "chrome-work"} {
+				must(t, os.Remove(p.ProfileFile(d)))
+			}
+		}, true, ""},
+		{"key unreadable", func(t *testing.T, p db.Paths) {
+			must(t, os.WriteFile(filepath.Join(p.Data, "extension.pem"), []byte("not a key"), 0o600))
+		}, true, "cannot tell whether a Chromium browser still uses mirrormark"},
+		{"nothing left", func(t *testing.T, p db.Paths) {
+			id := installedID(t, p)
+			must(t, os.Remove(filepath.Join(p.Data, "extension.pem")))
+			for _, d := range []string{"chrome-personal", "chrome-work"} {
+				must(t, os.Remove(p.ProfileFile(d)))
+			}
+			must(t, runSudo(nil, nil, nil, "rm", "-f", "--", filepath.Join(sysroot, chrome.Chrome.ExternalFile(id))))
+		}, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, _ := installChromeAndFirefox(t)
+			c.breakIt(t, p)
+			var out, errb bytes.Buffer
+			if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			_, err := os.Stat(unitPath(p))
+			if kept := err == nil; kept != c.kept {
+				t.Fatalf("unit kept %v, want %v; output:\n%s%s", kept, c.kept, out.String(), errb.String())
+			}
+			if c.kept && c.stderr == "" && !strings.Contains(out.String(), "Kept the mirrormark service, which Chrome still uses.") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+			if !strings.Contains(errb.String(), c.stderr) {
+				t.Fatalf("stderr %q, want %q", errb.String(), c.stderr)
+			}
+		})
+	}
+}
+
+// A Chromium uninstall without the key cannot tell who still uses the
+// service, so it leaves it and says how to remove it by hand.
+func TestChromiumUninstallWithoutTheKeyNamesTheService(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	firefoxData(t, p, "aurora")
+	calls := fakeSystemctl(t, "")
+	var out, errb bytes.Buffer
+	if code := run(append([]string{"install", "--browser", "firefox"}, geckoBoth...), strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	mustExist(t, "chrome uninstall", unitPath(p))
-	if len(*calls) != 0 || !strings.Contains(out.String(), "Kept the mirrormark service, which Firefox Developer Edition still uses.") {
-		t.Fatalf("calls %q, output:\n%s", *calls, out.String())
-	}
+	*calls = nil
 	out.Reset()
-	if code := run([]string{"uninstall", "--browser", "firefox"}, strings.NewReader(""), &out, &errb); code != 0 {
+	if code := run([]string{"uninstall"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
-	mustBeGone(t, "firefox uninstall", unitPath(p))
-	if want := []string{"disable --now mirrormark.service", "daemon-reload"}; !slices.Equal(*calls, want) || !strings.Contains(out.String(), "Stopped and removed the mirrormark service.") {
+	mustExist(t, "uninstall", unitPath(p))
+	if len(*calls) != 0 || !strings.Contains(out.String(), "systemctl --user disable --now mirrormark.service") || !strings.Contains(out.String(), unitPath(p)) {
 		t.Fatalf("calls %q, output:\n%s", *calls, out.String())
 	}
 }

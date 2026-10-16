@@ -706,10 +706,11 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	if isGecko {
-		if err := uninstallFirefox(p, fb, stdout, stderr); err != nil {
+		others := otherUsers(p, fb.Config, stderr)
+		if err := uninstallFirefox(p, fb, others.gecko, stdout, stderr); err != nil {
 			return fail(err)
 		}
-		if err := stopServer(p, serviceUsers(p, fb.Config, stderr), stdout); err != nil {
+		if err := stopServer(p, others.all(), stdout); err != nil {
 			return fail(err)
 		}
 		return finishUninstall(p, fb.Config, fb.Name, *purge, false, stdout, stderr)
@@ -719,11 +720,13 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 	key, err := chrome.LoadKey(keyFile)
 	host := filepath.Join(sysroot, chrome.HostManifestPath())
 	var users []string // other Chromium browsers that still have the extension
+	var others browserUsers
 	installed := hasDatabase(p, cb.Config)
 	switch {
 	case err == nil:
 		id := chrome.ExtensionID(chrome.PublicKeyDER(key))
-		users = chromiumUsers(cb.Config, id, stderr)
+		others = otherUsers(p, cb.Config, stderr)
+		users = others.chromium
 		paths := []string{filepath.Join(sysroot, cb.ExternalFile(id))}
 		if _, err := os.Stat(paths[0]); !errors.Is(err, fs.ErrNotExist) {
 			installed = true
@@ -737,12 +740,15 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 		if err := removeSystemFiles(paths, stdout, stderr); err != nil {
 			return fail(err)
 		}
-		if err := stopServer(p, serviceUsers(p, cb.Config, stderr), stdout); err != nil {
+		if err := stopServer(p, others.all(), stdout); err != nil {
 			return fail(err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
 		fmt.Fprintf(stdout, "No key in %s, so the extension id is unknown. Remove %s and %s by hand if they are there.\n",
 			keyFile, filepath.Join(sysroot, cb.ExternalFile("<id>")), host)
+		if _, err := os.Stat(unitPath(p)); err == nil {
+			fmt.Fprintf(stdout, "Kept the mirrormark service %s. If no other browser uses mirrormark, stop and remove it with systemctl --user disable --now %s and rm %s.\n", unitPath(p), unitName, quoteArg(unitPath(p)))
+		}
 	default:
 		return fail(err)
 	}
@@ -849,19 +855,17 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 
 // uninstallFirefox removes the add-on from every profile a database file
 // names as b's, puts back the two prefs that weakened its add-on
-// checks, and removes the host manifest if it is this one's and no other
-// Gecko browser's profile still holds the add-on. It writes user.js first,
-// so if that fails the add-on is still there and running uninstall again
-// finishes the job.
-func uninstallFirefox(p db.Paths, b firefox.Browser, stdout, stderr io.Writer) error {
+// checks, and removes the host manifest if it is this one's and users, the
+// other Gecko browsers whose profiles still hold the add-on, is empty. It
+// writes user.js first, so if that fails the add-on is still there and
+// running uninstall again finishes the job.
+func uninstallFirefox(p db.Paths, b firefox.Browser, users []string, stdout, stderr io.Writer) error {
 	dbs, errs := db.LoadAll(p)
 	for _, err := range errs {
 		return fmt.Errorf("%w; fix it so uninstall can tell whether it is a %s profile", err, b.Name)
 	}
 	var files []chrome.File
 	var gone []string // XPIs, and the host manifest if it is this one's
-	// Other Gecko browsers whose profiles still hold the add-on.
-	users := geckoUsers(dbs, b.Config, stderr)
 	for _, d := range dbs {
 		if d.Profile.Browser != b.Config {
 			continue

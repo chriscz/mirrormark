@@ -87,6 +87,20 @@ func indented[T externalJSON | hostManifestJSON](v T) []byte {
 // ExternalFile is the file that tells b to install the extension id.
 func (b Browser) ExternalFile(id string) string { return filepath.Join(b.ExternalDir, id+".json") }
 
+// ExternalCRX is the CRX path the external extension file at path names,
+// or "" if it is not one of ours (another extension's, say).
+func ExternalCRX(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var e externalJSON
+	if json.Unmarshal(data, &e) != nil {
+		return "", nil
+	}
+	return e.CRX, nil
+}
+
 // HostManifestPath is the native host manifest every browser in Browsers
 // reads.
 func HostManifestPath() string { return filepath.Join(SystemHostDir, extension.HostName+".json") }

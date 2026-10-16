@@ -115,11 +115,11 @@ Brave still uses them, the shared files and the key stay (see [Install
 from every profile when it next starts. Your bookmarks stay in Chrome, and
 your config, databases, backups, key and log stay where they are; it says
 so. It stops and removes the service once no other browser uses
-mirrormark, and otherwise says which browser still does. `mirrormark uninstall --purge` also
-deletes Chrome's databases, their backups and the key. It deletes the
-config and log too, unless another browser's database is left: its
-profiles still sync through them, and its `uninstall` needs those
-databases to find its profiles.
+mirrormark, and otherwise says which browser still does.
+`mirrormark uninstall --purge` also deletes Chrome's databases, their
+backups and the key. It deletes the config and log too, unless another
+browser's database is left: its profiles still sync through them, and its
+`uninstall` needs those databases to find its profiles.
 
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
@@ -131,8 +131,11 @@ rewrites `~/.local/share/mirrormark/extension/`, and `uninstall` deletes it.
 `mirrormark serve` runs the server the extensions connect to, on
 127.0.0.1 only, and logs to the same log as the host. One runs per user;
 a second one stops at once. `install` runs it as the systemd user service
-`mirrormark.service` (`systemctl --user status mirrormark`). This release's
-extension still reaches mirrormark through the native messaging host.
+`mirrormark.service` (`systemctl --user status mirrormark`). Once the
+service runs, stop any `mirrormark serve` you started by hand: while that
+one holds `serve.lock`, the service's server exits at once, and systemd
+retries it quietly and then leaves the service failed. This release's extension still
+reaches mirrormark through the native messaging host.
 
 ## Install (Brave on Linux)
 

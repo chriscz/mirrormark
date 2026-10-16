@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/chriscz/mirrormark/internal/chrome"
@@ -94,18 +95,89 @@ func stopServer(p db.Paths, users []string, stdout io.Writer) error {
 	return nil
 }
 
-// serviceUsers names the browsers other than browser that still have
-// mirrormark in place, so still need the server: another Chromium browser
-// whose external file is there, or a Gecko browser with the XPI in a
-// profile a database names. One that cannot be checked counts.
-func serviceUsers(p db.Paths, browser string, stderr io.Writer) []string {
-	var out []string
-	if key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem")); err == nil {
-		out = chromiumUsers(browser, chrome.ExtensionID(chrome.PublicKeyDER(key)), stderr)
-	}
+// browserUsers names, by family, the browsers other than the one being
+// uninstalled that still have mirrormark in place.
+type browserUsers struct{ chromium, gecko []string }
+
+// all is every browser that still needs the server.
+func (u browserUsers) all() []string { return slices.Concat(u.chromium, u.gecko) }
+
+// otherUsers names the browsers other than browser that still have
+// mirrormark in place, so still need the shared files and the server:
+// another Chromium browser whose external file is there, or a Gecko
+// browser with the XPI in a profile a database names. One that cannot be
+// checked counts. Uninstall calls it once, so each warning prints once.
+func otherUsers(p db.Paths, browser string, stderr io.Writer) browserUsers {
+	var u browserUsers
 	dbs, errs := db.LoadAll(p)
-	if len(errs) > 0 {
-		return append(out, "a browser whose database cannot be read")
+	switch key, err := chrome.LoadKey(filepath.Join(p.Data, "extension.pem")); {
+	case err == nil:
+		u.chromium = chromiumUsers(browser, chrome.ExtensionID(chrome.PublicKeyDER(key)), stderr)
+	case errors.Is(err, fs.ErrNotExist):
+		u.chromium = keylessChromiumUsers(p, dbs, browser, stderr)
+	default:
+		fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether a Chromium browser still uses mirrormark, so keeping the files it shares: %v\n", err)
+		u.chromium = []string{"a Chromium browser it cannot check"}
 	}
-	return append(out, geckoUsers(dbs, browser, stderr)...)
+	u.gecko = geckoUsers(dbs, browser, stderr)
+	if len(errs) > 0 {
+		// Gecko uninstall stops at an unreadable database before it uses
+		// this list; for the server, that database's browser counts.
+		u.gecko = append(u.gecko, "a browser whose database cannot be read")
+	}
+	return u
+}
+
+// keylessChromiumUsers names the Chromium browsers other than except that
+// may still use mirrormark when the key, and so the extension id, is gone:
+// those with a database, or with an external file that names mirrormark's
+// CRX. One whose files it cannot read counts.
+func keylessChromiumUsers(p db.Paths, dbs map[string]*db.DB, except string, stderr io.Writer) []string {
+	crx := filepath.Join(p.Data, "mirrormark.crx")
+	var out []string
+	for _, o := range chrome.Browsers {
+		if o.Config == except {
+			continue
+		}
+		used := false
+		for _, d := range dbs {
+			used = used || d.Profile.Browser == o.Config
+		}
+		if used {
+			out = append(out, o.Name)
+			continue
+		}
+		used, err := namesCRX(filepath.Join(sysroot, o.ExternalDir), crx)
+		if err != nil {
+			fmt.Fprintf(stderr, "mirrormark: warning: cannot tell whether %s still uses mirrormark, so keeping the files it shares: %v\n", o.Name, err)
+		}
+		if used || err != nil {
+			out = append(out, o.Name)
+		}
+	}
+	return out
+}
+
+// namesCRX reports whether an external extension file in dir points at crx.
+func namesCRX(dir, crx string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		got, err := chrome.ExternalCRX(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return false, err
+		}
+		if got == crx {
+			return true, nil
+		}
+	}
+	return false, nil
 }
