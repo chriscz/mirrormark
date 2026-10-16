@@ -69,24 +69,32 @@ func ReadState(profileDir, id, version string, filePlaced bool) (ProfileState, e
 	if err != nil {
 		return ProfileState{}, err
 	}
+	// Only mirrormark's entry is decoded: another extension's, in a shape
+	// this does not expect, must not make the profile unreadable.
 	var prefs struct {
 		Extensions struct {
-			Settings map[string]struct {
-				Path string `json:"path"`
-				// A list of reasons since about Chrome 120, a bit mask
-				// before; either way, anything but none means off.
-				DisableReasons json.RawMessage `json:"disable_reasons"`
-				Manifest       struct {
-					Version string `json:"version"`
-				} `json:"manifest"`
-			} `json:"settings"`
-			ExternalUninstalls []string `json:"external_uninstalls"`
+			Settings           map[string]json.RawMessage `json:"settings"`
+			ExternalUninstalls []string                   `json:"external_uninstalls"`
 		} `json:"extensions"`
 	}
 	if err := json.Unmarshal(data, &prefs); err != nil {
 		return ProfileState{}, fmt.Errorf("%s: %w", path, err)
 	}
-	e, ok := prefs.Extensions.Settings[id]
+	var e struct {
+		Path string `json:"path"`
+		// A list of reasons since about Chrome 120, a bit mask before;
+		// either way, anything but none means off.
+		DisableReasons json.RawMessage `json:"disable_reasons"`
+		Manifest       struct {
+			Version string `json:"version"`
+		} `json:"manifest"`
+	}
+	raw, ok := prefs.Extensions.Settings[id]
+	if ok {
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return ProfileState{}, fmt.Errorf("%s: mirrormark's entry: %w", path, err)
+		}
+	}
 	switch r := bytes.TrimSpace(e.DisableReasons); {
 	// A Remove leaves an empty entry and the id in external_uninstalls; a
 	// copy loaded unpacked afterwards has a path again, and may not clear

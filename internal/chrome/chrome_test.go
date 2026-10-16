@@ -463,6 +463,9 @@ func TestReadStateFromPreferences(t *testing.T) {
 		{"removed", `{"extensions":{"settings":{"` + id + `":{}},"external_uninstalls":["` + id + `"]}}`, true, ProfileState{State: Removed}},
 		{"old build", entry(``), true, ProfileState{State: OldBuild, Version: "0.1.0"}},
 		// Load unpacked after a Remove: the record of the Remove may stay.
+		// Another extension's entry, in a shape mirrormark's never has,
+		// says nothing about mirrormark.
+		{"another extension's odd entry", `{"extensions":{"settings":{"other":{"path":5,"manifest":{"version":1}},"` + id + `":{"path":"` + id + `/0.1.0_0","manifest":{"version":"0.1.0"}}}}}`, true, ProfileState{State: Ready}},
 		{"loaded again", `{"extensions":{"settings":{"` + id + `":{"path":"/home/u/mirrormark-extension","location":4,"manifest":{"version":"0.1.0"}}},"external_uninstalls":["` + id + `"]}}`, true, ProfileState{State: Ready}},
 	} {
 		dir := t.TempDir()
