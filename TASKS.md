@@ -11,6 +11,8 @@ Each entry says where, what, its effect, how it was found and the fix.
 - **What:** a profile bound to the wrong database is detected when most of
   its node ids are missing from the base. Chrome's bookmark ids are small
   integers in every profile, so a wrong profile can share many ids by chance.
+  The token now ties a connection to its database, but it does not tell a
+  wrongly bound profile, so this entry stays.
 - **Effect:** a wrongly bound profile could slip past that clause; the empty
   folder and "too much would go" clauses still apply. `install` binds each
   profile itself, which makes a wrong binding unlikely.
@@ -22,7 +24,9 @@ Each entry says where, what, its effect, how it was found and the fix.
 
 - **Where:** `cmd/mirrormark/main.go` (rotation), `internal/host`.
 - **What:** the log rotates at 1 MiB only when a host starts. A failure that
-  lasts adds a few lines every 5 s for as long as the host runs.
+  lasts adds a few lines every 5 s for as long as the host runs. A session is
+  now the server's whole run, usually the user's login, which makes rotating
+  on write more worth doing.
 - **Effect:** a long-running host with a lasting failure keeps writing to
   one log file.
 - **Found:** the final fix wave, 2026-10-15.
@@ -98,7 +102,8 @@ Each entry says where, what, its effect, how it was found and the fix.
   hangs the test until the 60-minute `go test` timeout.
 - **Found:** review of the BiDi driver, 2026-10-15.
 - **Fix:** dial with a timeout and set a deadline on the connection for the
-  handshake.
+  handshake. `e2e/bidi.go` could use `ws.Dial` instead, which has deadlines
+  and handles control frames; that would also fix the next entry.
 
 ### The BiDi client ignores control frames and `id: null` errors
 
@@ -109,6 +114,8 @@ Each entry says where, what, its effect, how it was found and the fix.
   neither gives a wrong result.
 - **Found:** review of the BiDi driver, 2026-10-15.
 - **Fix:** answer pings, return on close, and return an `id: null` error.
+  Using `ws.Dial` in `e2e/bidi.go` would handle control frames (see the
+  previous entry).
 
 ### No round check after Firefox restarts
 
@@ -186,3 +193,11 @@ Each entry says where, what, its effect, how it was found and the fix.
   Run it under firejail as well, to see whether firejail hides
   `/opt/brave.com/brave/extensions/`. Firejail support itself comes later,
   after the localhost transport. Phase 7 is done when this run is recorded.
+- On the desktop, upgrade from the native-messaging build in Chrome and
+  Developer Edition, following the README. Check that the first `install`
+  asks for a restart and starts the service (`systemctl --user status
+  mirrormark`), the second binds, the popup clears, and a server restart
+  (`systemctl --user restart mirrormark`) and a browser restart each
+  reconnect. Then run the Brave and LibreWolf steps from
+  [`plan-brave-librewolf.md`](docs/rfcs/0001_local-bookmark-sync-host.d/plan-brave-librewolf.md)'s
+  "After the last task". Phase 8 is done when these runs are recorded.
