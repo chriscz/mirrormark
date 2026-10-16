@@ -1,16 +1,18 @@
 // Package chrome installs mirrormark into Chromium-based browsers on Linux,
-// Google Chrome first: it lists their profiles, keeps the key that fixes the extension's id, packs the
-// embedded extension as a signed CRX, writes the system files they read, and binds profiles.
+// Google Chrome and Brave: it lists their profiles, keeps the key that
+// fixes the extension's id, packs the embedded extension as a signed CRX,
+// writes the system file each browser reads, and binds profiles.
 //
 // Branded Chrome on Linux installs a CRX named by a JSON file in its
 // external extensions directory, without a prompt, in every profile, at its
 // next start. It ignores --load-extension, and no per-user location works,
-// so the two system files need root. The host manifest in the system
-// directory reaches every Chrome data directory.
+// so that one system file needs root. Brave does the same from its own
+// install directory.
 //
-// Neither the extension nor the host can tell which profile they run in, so
-// install binds each profile by opening bind.html#<database id>.<token> in it from
-// the command line, and waits for the extension to report in.
+// Neither the extension nor the server can tell which profile the
+// extension runs in, so install binds each profile by opening
+// bind.html#<database id>.<token> in it from the command line, and waits
+// for the extension to report in.
 package chrome
 
 import (
@@ -65,9 +67,8 @@ func digits(s string) int {
 }
 
 // Browser is one Chromium-based browser mirrormark installs into. They
-// share the key, the CRX, the extension id and the system host manifest;
-// each has its own data directory, command and external extensions
-// directory.
+// share the key, the CRX and the extension id; each has its own data
+// directory, command and external extensions directory.
 type Browser struct {
 	Config         string // the --browser value, and browser: in a database
 	Name           string // what messages call it

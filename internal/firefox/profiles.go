@@ -26,9 +26,8 @@ import (
 )
 
 // Browser is one Gecko browser mirrormark installs into. They share the
-// XPI, the user.js prefs and the per-user host manifest; each has its own
-// profiles root and binary, and its own way to tell its profiles from
-// other Gecko browsers'.
+// XPI and the user.js prefs; each has its own profiles root and binary,
+// and its own way to tell its profiles from other Gecko browsers'.
 type Browser struct {
 	Config   string // the --browser value, and browser: in a database
 	Name     string // what messages call it
@@ -83,8 +82,9 @@ func (b Browser) DefaultRoot() (string, error) {
 // Profiles lists root's profiles, sorted by ID, numbers as numbers: those
 // in profiles.ini, with Dir as the file gives it (relative to root, or
 // absolute), and every other directory in root that holds a prefs.js,
-// named by what follows its first ".". Firefox's new profile switcher lists its profiles only in an
-// SQLite file, which this does not read, but each one has a prefs.js.
+// named by what follows its first ".". Firefox's new profile switcher
+// lists its profiles only in an SQLite file, which this does not read, but
+// each one has a prefs.js.
 func (b Browser) Profiles(root string) ([]chrome.Profile, error) {
 	var out []chrome.Profile
 	seen := map[string]bool{}
