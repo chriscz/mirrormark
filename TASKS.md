@@ -156,19 +156,84 @@ Each entry says where, what, its effect, how it was found and the fix.
   and the reconnect alarm coming after the wait ends. Look at the host log
   of a failing run before widening the wait.
 
-### `TestEditsPropagate/chrome-chrome` once had a bind not report in
+### A bind sometimes does not report in within 30 s
 
-- **Where:** `e2e/sync_test.go`, `TestEditsPropagate`, the Chrome pair;
-  the bind in `e2e/env.go`.
-- **What:** `install` for chrome-b printed `not bound: Default: mirrormark
-  did not report in within 30s of opening the page`.
-- **Effect:** a spurious red `check-e2e`. It passed in 3 runs alone straight
-  after, and in the next full run.
+- **Where:** the bind in `e2e/env.go`, `Env.bind`; seen in
+  `TestEditsPropagate/chrome-chrome` and
+  `TestClosedBrowserCatchesUpOnStart/chrome-chrome`.
+- **What:** `install` printed `not bound: Default: mirrormark did not report
+  in within 30s of opening the page`.
+- **Effect:** a spurious red `check-e2e`. Each time, the test passed when run
+  again.
 - **Found:** a full `make check-e2e` while adding the systemd user service,
-  2026-10-16. The service does not run in e2e (the image has no user
-  manager), and binding still goes through native messaging.
-- **Fix:** none yet. Look at the host log and Chrome's tab of a failing run
-  before widening the wait.
+  2026-10-16, then once in 97 runs of the hang investigation, 2026-10-16:
+  20 runs with no load passed, and the failure came in a run with 6 busy
+  loops on 4 CPUs. It has been seen only under CPU load.
+- **Fix:** none yet. A likely cause, unconfirmed: under load the
+  extension's first dial misses its 5 s `DIAL_MS`, and the extension then
+  waits for its 30 s reconnect alarm, which outlasts the bind wait. A
+  failing e2e test now keeps the server's log and each browser's output in
+  `build/e2e-logs/<test>/`, and Chromium logs to stderr; read those at the
+  next failure before widening any wait.
+
+### Some waits in the e2e harness and `install` have no bound
+
+- **Where:** `e2e/env.go` (`Env.mm`'s `CombinedOutput`, `stopServer`'s
+  `Wait` after SIGTERM); `install`'s `db.Bind` (a blocking `Lock` of the
+  global lock) and `runSystemctl`'s `CombinedOutput`.
+- **What:** each waits as long as the other side takes.
+- **Effect:** none seen: the e2e "hang" of 2026-10-16 was a run stopped from
+  outside, and the container then outliving it (fixed with `--init` in
+  `bin/dev`). A stuck child would hang until `go test`'s 60-minute timeout.
+- **Found:** the hang investigation, 2026-10-16.
+- **Fix:** if wanted as defence in depth, give each a deadline.
+
+### Messages join three or more browser names with "and"
+
+- **Where:** `cmd/mirrormark/service.go`, `stopServer`; `cmd/mirrormark/install.go`,
+  `cmdUninstall` ("Kept the CRX, which … still uses").
+- **What:** `strings.Join(users, " and ")` gives "Chrome and Firefox
+  Developer Edition and LibreWolf".
+- **Effect:** cosmetic.
+- **Found:** the final review, 2026-10-16.
+- **Fix:** join with commas and a final "and".
+
+### The Chromium listing hides an error on the external file
+
+- **Where:** `cmd/mirrormark/install.go`, `listChromium`.
+- **What:** a `Stat` error other than not-exist on the browser's external
+  file reads as "not placed", with no warning.
+- **Effect:** profiles show `not installed` instead of `not installed yet`;
+  uninstall warns in the same case.
+- **Found:** the final review, 2026-10-16.
+- **Fix:** warn on stderr when the error is not `ErrNotExist`.
+
+### Install's safety text names two of the three prefs it sets
+
+- **Where:** `cmd/mirrormark/install.go`, `geckoSafety`.
+- **What:** the text printed before the first Gecko install names
+  `xpinstall.signatures.required` and `extensions.autoDisableScopes`, but
+  install also sets `extensions.startupScanScopes`, as the README says.
+- **Effect:** the message says less than the README.
+- **Found:** the final fix wave, 2026-10-16.
+- **Fix:** name the third pref, or say why it is not worth naming there.
+
+### Coverage gaps left by the switch to the local server
+
+- **Where:** `cmd/mirrormark/install_test.go`, `e2e/install_test.go`.
+- **What:**
+  - no unit test that `uninstall` removes an old host manifest while
+    another browser still uses mirrormark;
+  - the e2e uninstall tests check only the CRX and the service message,
+    not that Chrome's external file stays after a Brave uninstall, that the
+    Developer Edition XPI and `user.js` stay after a LibreWolf uninstall,
+    or that Brave's extension was in place before;
+  - no e2e check of the whole `user.js` after uninstall;
+  - `install` and `uninstall` without `--browser` are not run end to end on
+    the new transport.
+- **Effect:** a regression in these paths would show only on a desktop.
+- **Found:** the final review, 2026-10-16.
+- **Fix:** add the checks.
 
 ## Manual checks still to do
 
