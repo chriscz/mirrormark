@@ -1853,7 +1853,8 @@ func installChromeAndFirefox(t *testing.T) (p db.Paths, calls *[]string) {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	mustExist(t, "install", unitPath(p))
-	if want := []string{"daemon-reload", "enable mirrormark.service", "restart mirrormark.service"}; !slices.Equal((*calls)[len(*calls)-3:], want) {
+	// The server the first install started is the service, so it restarts.
+	if want := []string{"daemon-reload", "enable mirrormark.service", "is-active --quiet mirrormark.service", "restart mirrormark.service"}; !slices.Equal((*calls)[len(*calls)-4:], want) {
 		t.Fatalf("calls %q", *calls)
 	}
 	*calls = nil

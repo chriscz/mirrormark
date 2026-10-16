@@ -30,7 +30,9 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
    `install` also sets up `mirrormark serve` as a systemd user service
    (`~/.config/systemd/user/mirrormark.service`), which runs as you and
    starts when you log in, and starts or restarts it. It says which, and
-   prints the commands to check the service, read its log and stop it.
+   prints the commands to check the service, read its log and stop it. If
+   a `mirrormark serve` you started yourself is running, `install` leaves
+   it running and asks you to stop it and start the service.
    Without systemd, it prints the command to keep running.
 2. Restart Chrome when it asks: close every window, and check that no
    `chrome` process is left (`pgrep -x chrome`), because Chrome may keep

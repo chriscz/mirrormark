@@ -98,6 +98,31 @@ func TestStartServerSaysWhatItDid(t *testing.T) {
 	}
 }
 
+// A server the user started by hand holds the serve lock too. A restart
+// would start a unit that cannot take the lock, and the old binary would
+// keep running, so install leaves the service to start once that one stops.
+func TestStartServerWithAHandStartedServer(t *testing.T) {
+	p := testHome(t)
+	calls := fakeSystemctl(t, "is-active")
+	fakeServer(t, p)
+	var out bytes.Buffer
+	if err := startServer(p, "/bin/mirrormark", &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"daemon-reload", "enable mirrormark.service", "is-active --quiet mirrormark.service"}; !slices.Equal(*calls, want) {
+		t.Fatalf("calls %q", *calls)
+	}
+	want := "Set up mirrormark serve as a systemd user service, " + unitPath(p) + ". It runs as you and starts when you log in. " +
+		"A mirrormark serve you started yourself is running; stop it so the service can take over, then run:\n" +
+		"  systemctl --user start mirrormark\n" +
+		"  status: systemctl --user status mirrormark\n" +
+		"  log:    " + p.LogFile() + "\n" +
+		"  stop:   systemctl --user disable --now mirrormark\n"
+	if out.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
 func TestStartServerWithoutSystemd(t *testing.T) {
 	p := testHome(t)
 	fakeSystemctl(t, "daemon-reload")

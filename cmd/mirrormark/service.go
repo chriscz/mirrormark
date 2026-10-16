@@ -53,9 +53,10 @@ func unit(self string) []byte {
 
 // startServer writes the user unit and has systemd (re)start the server,
 // every time, so it runs the binary just installed; connected extensions
-// reconnect at their next alarm. It says so, and how to look at the
-// service and stop it. Without systemd it says how to run the server by
-// hand.
+// reconnect at their next alarm. A server started by hand is left running,
+// and the user is told to stop it. It says what it did, and how to look at
+// the service and stop it. Without systemd it says how to run the server
+// by hand.
 func startServer(p db.Paths, self string, stdout io.Writer) error {
 	if err := chrome.WriteFiles([]chrome.File{{Path: unitPath(p), Data: unit(self)}}); err != nil {
 		return err
@@ -66,15 +67,22 @@ func startServer(p db.Paths, self string, stdout io.Writer) error {
 	} else if err == nil {
 		unlock()
 	}
+	started := "Started it now."
+	if running {
+		started = "It was running, so it was restarted now to run this binary; connected profiles reconnect within a minute."
+	}
 	for _, args := range [][]string{{"daemon-reload"}, {"enable", unitName}, {"restart", unitName}} {
+		// A server that holds the lock while the unit is not active was
+		// started by hand. A restart would start a unit that cannot take
+		// the lock, and the old binary would keep running.
+		if args[0] == "restart" && running && runSystemctl("is-active", "--quiet", unitName) != nil {
+			started = "A mirrormark serve you started yourself is running; stop it so the service can take over, then run:\n  systemctl --user start mirrormark"
+			break
+		}
 		if err := runSystemctl(args...); err != nil {
 			fmt.Fprintf(stdout, "Could not run mirrormark as a systemd user service (%v).\nKeep this running instead, for example from your desktop's autostart:\n  %s serve\n", err, quoteArg(self))
 			return nil
 		}
-	}
-	started := "Started it now."
-	if running {
-		started = "It was running, so it was restarted now to run this binary; connected profiles reconnect within a minute."
 	}
 	fmt.Fprintf(stdout, "Set up mirrormark serve as a systemd user service, %s. It runs as you and starts when you log in. %s\n"+
 		"  status: systemctl --user status mirrormark\n  log:    %s\n  stop:   systemctl --user disable --now mirrormark\n", unitPath(p), started, p.LogFile())
