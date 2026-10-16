@@ -10,7 +10,8 @@ const REBIND_MS = 1000; // time for the old connection's host to let go of the d
 const MIN_BACKOFF = 30000;
 const MAX_BACKOFF = 60000;
 const DIAL_MS = 5000; // a port that does not finish the challenge in this time is skipped
-// After a connection that worked closes, as when the server restarts, try
+// After a connection that worked closes, as when the server restarts, or a
+// dial times out, as when the machine is too busy to answer in time, try
 // again this soon, while the background is still running, rather than wait
 // for the alarm. At most once per MAX_BACKOFF, so a server that keeps
 // closing meets the back-off.
@@ -168,7 +169,7 @@ async function open() {
     await setStatus({ error: NOT_BOUND, problems: [] });
     return;
   }
-  const { sock: s, failure, hostError: refused } = await dial(db, token);
+  const { sock: s, failure, hostError: refused, timedOut } = await dial(db, token);
   if (bound !== binding || sock || rebinding) {
     s?.close(); // rebound meanwhile
     return true;
@@ -178,6 +179,7 @@ async function open() {
     // A server that refused this profile will refuse it again; don't ask
     // every 30 s.
     chrome.alarms.create(RECONNECT, { when: Date.now() + (refused ? MAX_BACKOFF : MIN_BACKOFF) });
+    if (timedOut && !refused) quickRetry();
     return true;
   }
   refs.clear();
@@ -220,23 +222,30 @@ async function open() {
     // the quick retry runs.
     chrome.alarms.create(RECONNECT, { when: Date.now() + backoff });
     backoff = Math.min(backoff * 2, MAX_BACKOFF);
-    if (hostError || Date.now() - quickAt < MAX_BACKOFF) return;
-    quickAt = Date.now();
-    setTimeout(async () => {
-      await chrome.alarms.clear(RECONNECT);
-      connect();
-    }, QUICK_MS);
+    if (!hostError) quickRetry();
   };
   // The hello and the proof went out in dial, so no tree can precede them.
   await sendTree();
   return true;
 }
 
+// quickRetry connects again after QUICK_MS, unless it did so within
+// MAX_BACKOFF. The alarm stays as the fallback.
+function quickRetry() {
+  if (Date.now() - quickAt < MAX_BACKOFF) return;
+  quickAt = Date.now();
+  setTimeout(async () => {
+    await chrome.alarms.clear(RECONNECT);
+    connect(); // which does nothing while an attempt is in flight
+  }, QUICK_MS);
+}
+
 // dial returns { sock } for the first port whose server proves it holds
 // this profile's token, once the extension has sent its own proof. If none
 // does, it returns the answer to show instead: the first { failure,
 // hostError } for a known error, else the first { failure } for a wrong
-// proof or an unexpected answer, else {} if nothing answered. A known
+// proof or an unexpected answer, else { timedOut: true } if a port missed
+// DIAL_MS, else {} if nothing answered. A known
 // error goes first because a program on another port must not hide why
 // the real server refused this profile. A port where nothing listens fails
 // at once, and so does one whose server refuses the upgrade, such as
@@ -244,12 +253,14 @@ async function open() {
 async function dial(db, token) {
   const rank = (r) => (r.hostError ? 2 : r.failure ? 1 : 0);
   let best = {};
+  let timedOut = false;
   for (const p of await PORTS) {
     const r = await challenge(p, db, token);
     if (r.sock) return r;
     if (rank(r) > rank(best)) best = r;
+    timedOut ||= !!r.timedOut;
   }
-  return best;
+  return timedOut && !rank(best) ? { timedOut } : best;
 }
 
 // challenge runs the hello on port p. The server must prove it holds the
@@ -269,7 +280,7 @@ function challenge(p, db, token) {
       if (!r.sock) s.close();
       resolve(r);
     };
-    const t = setTimeout(() => done({}), DIAL_MS);
+    const t = setTimeout(() => done({ timedOut: true }), DIAL_MS);
     s.onerror = s.onclose = () => done({});
     s.onopen = () => post(s, { v: V, type: "hello", db, nonce: nonceE, browser: BROWSER.toLowerCase() + "/" + VERSION });
     s.onmessage = async (ev) => {
