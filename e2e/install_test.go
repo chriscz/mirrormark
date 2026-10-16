@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -108,9 +109,9 @@ func TestInstallAndBind(t *testing.T) {
 }
 
 // impostor holds the first port with a program that accepts any upgrade
-// and answers every hello with a challenge it cannot back, as another
-// user's program could. It returns the types of the messages it received.
-func impostor(t *testing.T) func() []string {
+// and answers every hello with answer, as another user's program could.
+// It returns the types of the messages it received.
+func impostor(t *testing.T, answer *atomic.Pointer[host.Msg]) func() []string {
 	ports, err := extension.Ports()
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +139,7 @@ func impostor(t *testing.T) func() []string {
 			got = append(got, m.Type)
 			mu.Unlock()
 			if m.Type == "hello" {
-				b, _ := json.Marshal(host.Msg{V: host.Version, Type: "challenge", Nonce: strings.Repeat("0", 64), Proof: strings.Repeat("0", 64)})
+				b, _ := json.Marshal(answer.Load())
 				c.Write(b)
 			}
 		}
@@ -152,10 +153,19 @@ func impostor(t *testing.T) func() []string {
 	}
 }
 
+// popupError is the error b's popup shows, or "" if none.
+func popupError(t *testing.T, b *Browser) string {
+	t.Helper()
+	return eval[string](t, b, `chrome.storage.local.get("status").then((r) => r.status?.error ?? "")`)
+}
+
 // TestReconnectsAfterServerRestart: with the server gone, the popup says
-// mirrormark is not running. Once it is back, on the second port because a
-// program that cannot prove itself holds the first, the extension skips
-// that program, tells it nothing more than its hello, and syncs again.
+// mirrormark is not running. A program on the first port that answers with
+// an error of its own gets a fixed text in the popup, not its words. Once
+// the server is back, on the second port because that program holds the
+// first, the extension skips the program, tells it nothing more than its
+// hello, and syncs again. A known error from the server outranks the
+// program's wrong proof, and a profile with no token is told to bind again.
 func TestReconnectsAfterServerRestart(t *testing.T) {
 	e := setup(t)
 	roundDone(t, e.A, "a's first round")
@@ -163,15 +173,48 @@ func TestReconnectsAfterServerRestart(t *testing.T) {
 	// The close sets the 30 s reconnect alarm; the attempt it starts finds
 	// no server.
 	eventually(t, 70*time.Second, "the popup to say mirrormark is not running", func() bool {
-		return eval[bool](t, e.A, `chrome.storage.local.get("status").then((r) => (r.status?.error ?? "").startsWith("mirrormark is not running"))`)
+		return strings.HasPrefix(popupError(t, e.A), "mirrormark is not running")
 	})
-	got := impostor(t)
+	var answer atomic.Pointer[host.Msg]
+	answer.Store(&host.Msg{V: host.Version, Type: "error", Code: "evil", Message: "PEER TEXT"})
+	got := impostor(t, &answer)
+	ports, err := extension.Ports()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 70*time.Second, "the popup to name the unexpected answer", func() bool {
+		return strings.HasPrefix(popupError(t, e.A), fmt.Sprintf("unexpected answer on port %d", ports[0]))
+	})
+	if msg := popupError(t, e.A); strings.Contains(msg, "PEER") || strings.Contains(msg, "evil") {
+		t.Fatalf("the popup shows the program's own words: %q", msg)
+	}
+	answer.Store(&host.Msg{V: host.Version, Type: "challenge", Nonce: strings.Repeat("0", 64), Proof: strings.Repeat("0", 64)})
 	before := time.Now()
 	e.serve(t) // the first port is taken, so it listens on the second
 	eventually(t, 70*time.Second, "a proven connection after the server came back", func() bool {
 		return db.Connected(e.Paths, e.DBA, before)
 	})
 	roundDone(t, e.A, "a round after the restart")
+
+	// A binding to a database the server lacks: the server's db-missing
+	// shows, not the first port's failed proof. A new binding reconnects
+	// after a second, whatever alarm is set.
+	eval[bool](t, e.A, `chrome.storage.local.set({ db: "gone-db" }).then(() => true)`)
+	eventually(t, 15*time.Second, "the popup to show db-missing", func() bool {
+		return strings.HasPrefix(popupError(t, e.A), fmt.Sprintf("db-missing: mirrormark has no database for this profile; run `mirrormark install` for this profile again (port %d)", ports[1]))
+	})
+	eval[bool](t, e.A, fmt.Sprintf(`chrome.storage.local.set({ db: %q }).then(() => true)`, e.DBA))
+	roundDone(t, e.A, "a round after binding back")
+
+	// A binding without a token, as from a build before the server.
+	token := eval[string](t, e.A, `chrome.storage.local.get("token").then((r) => r.token)`)
+	eval[bool](t, e.A, `chrome.storage.local.remove("token").then(() => true)`)
+	eventually(t, 15*time.Second, "the popup to say the profile is not bound yet", func() bool {
+		return strings.HasPrefix(popupError(t, e.A), "not bound yet: run `mirrormark install --profile")
+	})
+	eval[bool](t, e.A, fmt.Sprintf(`chrome.storage.local.set({ token: %q }).then(() => true)`, token))
+	roundDone(t, e.A, "a round with the token back")
+
 	if types := got(); !slices.Contains(types, "hello") || slices.Contains(types, "proof") || slices.Contains(types, "tree") {
 		t.Fatalf("the program on the first port received %q; want hellos only", types)
 	}

@@ -37,9 +37,10 @@ resolved. If you move or rename the binary, run `mirrormark install` again.
 3. Run `mirrormark install --profile ...` again. It first checks that
    `mirrormark serve` is running, waiting up to 5 seconds for the service
    to start; if it is not, it says how to start it, opens nothing and exits
-   with status 1. It then checks each named profile's files. In each profile where mirrormark is installed and turned
-   on, it opens a tab once, waits up to 30 seconds for mirrormark to report
-   in, and prints `bound: <profile> -> <id>`. For any other profile it prints
+   with status 1. It then checks each named profile's files. In each
+   profile where mirrormark is installed and turned on, it opens a tab once,
+   waits up to 30 seconds for mirrormark to report in, and prints
+   `bound: <profile> -> <id>`. For any other profile it prints
    `not ready: <profile>: ...`, which says what to do, or
    `not bound: <profile>: ...`. Chrome records the install in the profile up
    to half a minute after it starts, so a `not ready` just after a restart
@@ -125,7 +126,9 @@ mirrormark, and otherwise says which browser still does.
 `mirrormark uninstall --purge` also deletes Chrome's databases, their
 backups and the key. It deletes the config and log too, unless another
 browser's database is left: its profiles still sync through them, and its
-`uninstall` needs those databases to find its profiles.
+`uninstall` needs those databases to find its profiles. If a
+`mirrormark serve` you started yourself still runs, the last purge keeps
+its `serve.lock` and says to stop it.
 
 `mirrormark unpack [DIR]` writes the extension, with the same id as the
 installed one, to `DIR` or to `~/.local/share/mirrormark/extension/`, for
@@ -379,17 +382,25 @@ shows:
   longer finds it, so nothing below the binding means the last round synced
   cleanly.
 
-Two errors concern the connection itself:
+Some errors concern the connection itself. Until a server has proven it
+is yours, the popup shows only fixed texts, never words the server sent,
+and names the port. When one port fails and another answers with a known
+error, the popup shows the known error.
 
-- **`bad-token: …`.** The server does not know this profile's token: the
-  profile was bound by a build before `mirrormark serve`, or bound to a
-  database whose token has changed. Run `mirrormark install --profile
+- **`not bound yet: …`.** The profile was bound by a build before
+  `mirrormark serve` and has no token. Run `mirrormark install --profile
   <profile>` for that profile again (with `--browser` for a browser other
   than Chrome).
-- **`the program on port N could not prove it is your mirrormark`.**
-  Another program holds that port, perhaps another user's. The extension
-  tries the next port, where your server listens if the first was taken.
-  If sync does not resume, find the program with `ss -ltnp`.
+- **`bad-token: … (port N)`.** The server does not accept this profile's
+  token or origin, as when the database was bound again from another
+  profile. Run `install --profile` for that profile again, as above.
+- **`db-missing: … (port N)`.** The server has no database file for the
+  profile. Run `install --profile` for that profile again.
+- **`the program on port N could not prove it is your mirrormark`**, or
+  **`unexpected answer on port N`.** Another program holds that port,
+  perhaps another user's. The extension tries the next port, where your
+  server listens if the first was taken. If sync does not resume, find the
+  program with `ss -ltnp`.
 
 ### The popup says mirrormark is not running
 

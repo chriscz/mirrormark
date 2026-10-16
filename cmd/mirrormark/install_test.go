@@ -889,7 +889,8 @@ func TestUninstallRemovesSystemFilesAndKeepsData(t *testing.T) {
 		t.Fatalf("output does not say what it kept:\n%s", out.String())
 	}
 
-	// A server that has run leaves its lock file behind.
+	// A server that has run and stopped leaves its lock file behind.
+	stopFakeServer(p)
 	must(t, os.WriteFile(p.ServeLock(), nil, 0o600))
 	out.Reset()
 	if code := run([]string{"uninstall", "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
@@ -1327,10 +1328,33 @@ func TestFirefoxPurgeKeepsChromesFiles(t *testing.T) {
 	}
 
 	out.Reset()
+	stopFakeServer(p)
 	if code := run([]string{"uninstall", "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	mustBeGone(t, "last purge", p.ConfigFile(), p.Data, p.State)
+}
+
+// A server started by hand still holds its lock at the last purge: the
+// purge keeps the lock file, so a second server cannot start beside it,
+// and says to stop the server.
+func TestLastPurgeKeepsTheLockOfARunningServer(t *testing.T) {
+	skipIfRoot(t)
+	p := testHome(t)
+	fakeSystem(t)
+	fakeChromeOnPath(t, p) // and its server, which uninstall cannot stop
+	udd := chromeData(t)
+	var out, errb bytes.Buffer
+	run([]string{"install", "--user-data-dir", udd, "--profile", "Default"}, strings.NewReader(""), &out, &errb)
+	out.Reset()
+	if code := run([]string{"uninstall", "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+	}
+	mustBeGone(t, "purge", p.ConfigFile(), p.ProfileFile("chrome-personal"), p.State)
+	mustExist(t, "purge", p.ServeLock())
+	if want := "Kept " + p.Data + ": a mirrormark server still runs and holds serve.lock there. Stop it, then delete " + p.Data + ".\n"; !strings.HasSuffix(out.String(), want) {
+		t.Fatalf("output:\n%s", out.String())
+	}
 }
 
 // Purging Chrome keeps the Firefox databases, which Firefox's uninstall
@@ -1351,6 +1375,7 @@ func TestChromePurgeKeepsFirefoxDatabases(t *testing.T) {
 	}
 
 	out.Reset()
+	stopFakeServer(p)
 	if code := run([]string{"uninstall", "--browser", "firefox", "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
@@ -1550,6 +1575,7 @@ func TestPurgingOneChromiumBrowserKeepsTheKey(t *testing.T) {
 			}
 			mustBeGone(t, c.gone.Config+" purge", p.ProfileFile(c.goneIDs[0]), p.ProfileFile(c.goneIDs[1]))
 			mustExist(t, c.gone.Config+" purge", filepath.Join(p.Data, "extension.pem"), p.ProfileFile(c.staysID), p.ConfigFile())
+			stopFakeServer(p)
 			if code := run([]string{"uninstall", "--browser", c.stays.Config, "--purge"}, strings.NewReader(""), &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 			}

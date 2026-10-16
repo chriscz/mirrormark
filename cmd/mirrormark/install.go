@@ -784,8 +784,8 @@ func cmdUninstall(args []string, stdout, stderr io.Writer) int {
 // browser's databases, with their backups and lock files, and a Chromium
 // browser's key unless keyInUse (another Chromium browser still has the
 // extension) or another Chromium browser's database is left. The config,
-// the log, the server's lock and the rest of the data directory go only
-// with the last database: another browser's profiles still sync through them, and its
+// the log, the server's lock (unless a server still holds it) and the rest
+// of the data directory go only with the last database: another browser's profiles still sync through them, and its
 // uninstall needs its databases to find its profiles.
 func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
@@ -825,9 +825,21 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 	if chromium && !keyInUse {
 		files = append(files, filepath.Join(p.Data, "extension.pem"))
 	}
+	serving := false
 	if len(others) == 0 {
-		files = append(files, p.ConfigFile(), p.GlobalLock(), p.ServeLock())
+		files = append(files, p.ConfigFile(), p.GlobalLock())
 		dirs = append(dirs, p.ProfilesDir(), filepath.Join(p.Data, "backups"), p.State)
+		// A server started by hand may still hold the serve lock. Deleting
+		// its file would let a second server start beside it.
+		switch unlock, err := db.TryLock(p.ServeLock()); {
+		case err == nil:
+			defer unlock()
+			files = append(files, p.ServeLock())
+		case errors.Is(err, db.ErrLocked):
+			serving = true
+		default:
+			return fail(err)
+		}
 	}
 	if err := chrome.RemoveFiles(files); err != nil {
 		return fail(err)
@@ -841,6 +853,11 @@ func finishUninstall(p db.Paths, browser, name string, purge, keyInUse bool, std
 		slices.Sort(others)
 		fmt.Fprintf(stdout, "Deleted %s's databases and backups. Kept your config %s, the log in %s, and the rest of %s, which the other databases (%s) still use; uninstalling their browser with --purge deletes them.\n",
 			name, p.ConfigFile(), p.State, p.Data, strings.Join(others, ", "))
+		return 0
+	}
+	if serving {
+		fmt.Fprintf(stdout, "Deleted %s's databases and backups, your config %s and the log in %s. Kept %s: a mirrormark server still runs and holds serve.lock there. Stop it, then delete %s.\n",
+			name, p.ConfigFile(), p.State, p.Data, p.Data)
 		return 0
 	}
 	// Anything still in the data directory is not this browser's to delete.

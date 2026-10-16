@@ -17,6 +17,17 @@ const RECONNECT = "reconnect"; // the one-shot alarm after a connection fails or
 const TICK = "tick";
 const NOT_RUNNING =
   "mirrormark is not running. Start it with `systemctl --user start mirrormark`, or run `mirrormark serve`.";
+const NOT_BOUND =
+  "not bound yet: run `mirrormark install --profile <this profile>` again, with `--browser brave`, `firefox` or `librewolf` in those browsers.";
+// What the errors a server can send before it has proven itself mean. Any
+// program on the port could have sent one, so the popup shows these fixed
+// texts and never the message that came with it.
+const HELLO_ERRORS = {
+  "bad-token": "this profile's binding is out of date; run `mirrormark install` for this profile again",
+  "db-missing": "mirrormark has no database for this profile; run `mirrormark install` for this profile again",
+  "bad-db": "this profile's binding names no valid database; run `mirrormark install` for this profile again",
+  "unsupported-version": "mirrormark speaks another protocol version; restart the browser after upgrading mirrormark",
+};
 // The ports the server may listen on, in the order it tries them. The
 // binary reads the same file.
 const PORTS = fetch(chrome.runtime.getURL("ports.json")).then((r) => r.json());
@@ -124,7 +135,12 @@ async function open() {
   const bound = binding;
   const { db, token } = await chrome.storage.local.get(["db", "token"]);
   if (!db) return; // not bound: stay dormant
-  const { sock: s, failure, hostError: refused } = await dial(db, token ?? "");
+  if (!token) {
+    // Bound by a build that had no tokens: nothing could prove itself.
+    await setStatus({ error: NOT_BOUND, problems: [] });
+    return;
+  }
+  const { sock: s, failure, hostError: refused } = await dial(db, token);
   if (bound !== binding || sock || rebinding) {
     s?.close(); // rebound meanwhile
     return;
@@ -180,19 +196,22 @@ async function open() {
 
 // dial returns { sock } for the first port whose server proves it holds
 // this profile's token, once the extension has sent its own proof. If none
-// does, it returns the first answer to show instead: { failure, hostError }
-// for a server's error, { failure } for a wrong proof, or {} if nothing
-// answered. A port where nothing listens fails at once, and so does one
-// whose server refuses the upgrade, such as another user's mirrormark,
-// which does not know this profile's origin.
+// does, it returns the answer to show instead: the first { failure,
+// hostError } for a known error, else the first { failure } for a wrong
+// proof or an unexpected answer, else {} if nothing answered. A known
+// error goes first because a program on another port must not hide why
+// the real server refused this profile. A port where nothing listens fails
+// at once, and so does one whose server refuses the upgrade, such as
+// another user's mirrormark, which does not know this profile's origin.
 async function dial(db, token) {
-  let first = {};
+  const rank = (r) => (r.hostError ? 2 : r.failure ? 1 : 0);
+  let best = {};
   for (const p of await PORTS) {
     const r = await challenge(p, db, token);
     if (r.sock) return r;
-    if (first.failure === undefined) first = r;
+    if (rank(r) > rank(best)) best = r;
   }
-  return first;
+  return best;
 }
 
 // challenge runs the hello on port p. The server must prove it holds the
@@ -220,14 +239,19 @@ function challenge(p, db, token) {
       try {
         m = JSON.parse(ev.data);
       } catch {
-        m = {};
+        m = null;
       }
+      if (typeof m !== "object" || m === null) m = {};
       if (m.type === "ping") return;
-      if (m.type === "error") return done({ failure: `${m.code}: ${m.message}`, hostError: true });
+      const unexpected = { failure: `unexpected answer on port ${p}; the program there may not be mirrormark` };
+      if (m.type === "error") {
+        if (!Object.hasOwn(HELLO_ERRORS, m.code)) return done(unexpected);
+        return done({ failure: `${m.code}: ${HELLO_ERRORS[m.code]} (port ${p})`, hostError: true });
+      }
+      if (m.type !== "challenge") return done(unexpected);
       // A plain comparison is enough here: each attempt has a new nonce,
-      // so timing it teaches nothing about the next. Without a token
-      // nothing can match, and an empty HMAC key would throw.
-      if (m.type !== "challenge" || !token || m.proof !== (await mac(token, `server:${p}:${nonceE}`))) {
+      // so timing it teaches nothing about the next.
+      if (m.proof !== (await mac(token, `server:${p}:${nonceE}`))) {
         return done({ failure: `the program on port ${p} could not prove it is your mirrormark` });
       }
       const proof = await mac(token, `extension:${m.nonce}`);
