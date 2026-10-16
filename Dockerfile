@@ -72,8 +72,8 @@ RUN curl -fsSLo /tmp/lw.tar.xz "https://dl.librewolf.net/librewolf/${LIBREWOLF_V
 # `mirrormark install` writes into these root-owned directories. The tests
 # run as your UID without sudo, so in this image only, anyone may write
 # them; the sticky bit stops users removing each other's files.
-RUN mkdir -p /usr/share/google-chrome/extensions /opt/brave.com/brave/extensions /etc/opt/chrome/native-messaging-hosts \
- && chmod 1777 /usr/share/google-chrome/extensions /opt/brave.com/brave/extensions /etc/opt/chrome/native-messaging-hosts
+RUN mkdir -p /usr/share/google-chrome/extensions /opt/brave.com/brave/extensions \
+ && chmod 1777 /usr/share/google-chrome/extensions /opt/brave.com/brave/extensions
 
 # The source is bind-mounted at runtime; nothing is copied in.
 WORKDIR /src
