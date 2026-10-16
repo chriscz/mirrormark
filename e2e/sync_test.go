@@ -27,8 +27,10 @@ const syncTimeout = 10 * time.Second
 // target is how soon an edit in one running profile must show in the other.
 const latencyTarget = 3 * time.Second
 
-// pairs are the browsers of profiles a and b each sync test runs with.
-var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox", "chrome"}}
+// pairs are the browsers of profiles a and b each sync test runs with. One
+// cross-engine pair covers Brave and LibreWolf; the others add little
+// beyond what their families' pairs show, and each pair adds minutes.
+var pairs = [][2]string{{"chrome", "chrome"}, {"firefox", "firefox"}, {"firefox", "chrome"}, {"brave", "librewolf"}}
 
 // forPairs runs test once per pair, as a subtest named after it.
 func forPairs(t *testing.T, test func(t *testing.T, ka, kb string)) {

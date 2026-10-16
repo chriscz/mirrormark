@@ -486,10 +486,11 @@ host's log. One test stops the server, puts a program that cannot prove
 itself on the first port, starts the server again on the second, and
 checks that the extension skips that program and syncs again. Each edit
 must reach the other running browser within 3
-seconds; the tests log how long each took. The sync tests run three times:
-between two Chromes, between two Firefoxes, and between a Firefox and a
-Chrome, as subtests named `chrome-chrome`, `firefox-firefox` and
-`firefox-chrome` (for example `RUN=TestEditsPropagate/firefox-chrome`).
+seconds; the tests log how long each took. The sync tests run four times:
+between two Chromes, between two Firefoxes, between a Firefox and a Chrome,
+and between Brave and LibreWolf, as subtests named `chrome-chrome`,
+`firefox-firefox`, `firefox-chrome` and `brave-librewolf` (for example
+`RUN=TestEditsPropagate/brave-librewolf`).
 Run `bin/dev image build` first after the `Dockerfile` changes.
 
 The union fuzz tests in `internal/merge` and `internal/round` run 300 seeds;
