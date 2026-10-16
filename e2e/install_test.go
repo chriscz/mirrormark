@@ -350,14 +350,22 @@ func testPopupConnects(t *testing.T, kind string) {
 	if _, live, _ := im.Conns(e.DBA); live != 1 || !popupShows(t, e.A).Busy {
 		t.Fatalf("the first attempt ended before the popup had opened again; %d connections open", live)
 	}
+	// Count the attempts as soon as this one ends: a dial that timed out
+	// may set a quick retry, unless an earlier close in this worker's life
+	// used it up, and that retry is not the popup's.
+	var hellos, peak int
 	eventually(t, 10*time.Second, "the popup to say mirrormark is not running", func() bool {
+		hellos, _, peak = im.Conns(e.DBA)
 		v := popupShows(t, e.A)
 		return !v.Busy && strings.HasPrefix(v.Error, "mirrormark is not running")
 	})
-	if hellos, _, peak := im.Conns(e.DBA); hellos != 1 || peak != 1 {
+	if hellos != 1 || peak != 1 {
 		t.Fatalf("four opens of the popup made %d attempts, %d at once; want 1", hellos, peak)
 	}
 	im.Close()
+	// Let any quick retry run, against no server, so it neither connects
+	// for the popup below nor clears the alarm read here.
+	time.Sleep(3 * time.Second)
 
 	// With the server back, opening the popup connects well before the
 	// alarm would.
