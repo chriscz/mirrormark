@@ -41,14 +41,22 @@ const (
 	batchBytes = maxOut - 1024
 )
 
-// errStop ends Run after telling the extension why.
-var errStop = errors.New("host stopped")
+// stopped ends Run after telling the extension why. unproven says the
+// peer had not proven which database it is: the server logs such a stop
+// briefly, in its own words.
+type stopped struct {
+	code, msg string
+	unproven  bool
+}
+
+func (e stopped) Error() string { return "host stopped: " + e.msg }
 
 type state struct {
 	o        Options
 	msgs     <-chan Msg
 	conn     Conn
 	self     string
+	proven   bool // the peer's proof was right
 	pending  pending
 	unlock   func() // releases the profile lock; held while Run runs
 	live     *round.Live
@@ -172,16 +180,27 @@ func (s *state) send(m Msg) error {
 	m.V = Version
 	err := s.conn.Write(m)
 	if err != nil {
-		s.o.Log.Warn("send failed", "type", m.Type, "err", err)
+		s.o.Log.Log(context.Background(), s.level(), "send failed", "type", m.Type, "err", err)
 	}
 	return err
 }
 
+// level is the level of the host's own lines about its connection: Warn
+// once the peer has proven itself, Debug before, when it is not known to be
+// mirrormark and the lines may hold what it sent. The server sums up the
+// unproven failures at Info, at most once a minute.
+func (s *state) level() slog.Level {
+	if s.proven {
+		return slog.LevelWarn
+	}
+	return slog.LevelDebug
+}
+
 // fail logs a problem, tells the extension, and stops the host.
 func (s *state) fail(code, msg string) error {
-	s.o.Log.Warn(msg, "code", code)
+	s.o.Log.Log(context.Background(), s.level(), msg, "code", code)
 	s.send(Msg{Type: "error", Code: code, Message: msg})
-	return fmt.Errorf("%w: %s", errStop, msg)
+	return stopped{code: code, msg: msg, unproven: !s.proven}
 }
 
 // warn logs a problem the host goes on after; the round's status message
@@ -237,7 +256,7 @@ func (s *state) hello(m Msg) error {
 		return nil
 	}
 	if !db.ValidID.MatchString(m.DB) {
-		return s.fail("bad-db", fmt.Sprintf("%q is not a database id", m.DB))
+		return s.fail("bad-db", "the hello names no database id")
 	}
 	if _, err := os.Stat(s.o.Paths.ProfileFile(m.DB)); err != nil {
 		return s.fail("db-missing", fmt.Sprintf("no database file for %s; run mirrormark install", m.DB))
@@ -247,6 +266,12 @@ func (s *state) hello(m Msg) error {
 
 // accept runs the host for database id from now on.
 func (s *state) accept(id, browser string) error {
+	s.proven = true
+	// A connection that limits how long an unproven peer may take learns
+	// that this one is through.
+	if c, ok := s.conn.(interface{ proven() }); ok {
+		c.proven()
+	}
 	// Held until Run returns: a copied profile bound to the same file must
 	// not drive it twice.
 	lock := s.o.Paths.ProfileLock(id)
@@ -264,11 +289,6 @@ func (s *state) accept(id, browser string) error {
 		s.o.Log.Warn("cannot touch lock file", "err", err)
 	}
 	s.self = id
-	// A connection that limits how long an unproven peer may take learns
-	// that this one is through.
-	if c, ok := s.conn.(interface{ proven() }); ok {
-		c.proven()
-	}
 	s.o.Log.Info("connected", "db", id, "browser", browser)
 	return nil
 }
@@ -291,11 +311,11 @@ func (s *state) challenge(m Msg) error {
 	d, err := db.LoadDB(s.o.Paths.ProfileFile(m.DB))
 	if err != nil {
 		// The details are for the log: the peer has proven nothing yet.
-		s.o.Log.Warn("cannot read the database file", "db", m.DB, "err", err)
+		s.o.Log.Debug("cannot read the database file", "db", m.DB, "err", err)
 		return s.fail("db-missing", fmt.Sprintf("cannot read the database file for %s; run mirrormark install", m.DB))
 	}
 	if d.Profile.Token != "" && !hex32.MatchString(d.Profile.Token) {
-		s.o.Log.Warn("the token in the database file is malformed; install writes 64 lowercase hex digits", "db", m.DB)
+		s.o.Log.Debug("the token in the database file is malformed; install writes 64 lowercase hex digits", "db", m.DB)
 	}
 	if !hex32.MatchString(d.Profile.Token) || d.Profile.Origin != s.o.Origin || !hex32.MatchString(m.Nonce) {
 		return s.fail("bad-token", fmt.Sprintf("this profile's binding to %s is out of date; run mirrormark install for this profile again", m.DB))

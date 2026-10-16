@@ -349,12 +349,14 @@ profile's folders may not be inside each other.
 
 ## When something is wrong
 
-Everything the host does, including skipped unions, conflicts and failed
+Everything the server does, including skipped unions, conflicts and failed
 changes, goes to `~/.local/state/mirrormark/log`, every time it happens.
+Connections it turns away, and those that never prove which profile they
+are, take at most a line a minute, with how many there were.
 
 A change the browser refuses stops that profile from saving its round. The
-host retries every 5 seconds until the change goes through, and a changed
-file starts a round sooner. The same goes for a database file the host
+server retries every 5 seconds until the change goes through, and a changed
+file starts a round sooner. The same goes for a database file the server
 cannot write.
 
 ### What the popup shows

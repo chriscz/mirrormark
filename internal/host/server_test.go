@@ -522,6 +522,76 @@ func TestServeLogsRefusalsBriefly(t *testing.T) {
 	}
 }
 
+// A connection that passes the handshake checks but never proves itself is
+// logged like a refused one: at Debug, and at Info at most once a minute,
+// with a fixed reason. Nothing the peer sent, such as a header or a
+// database id, reaches a line above Debug.
+func TestServeLogsUnprovenConnectionsBriefly(t *testing.T) {
+	host.SetHelloWait(t, 100*time.Millisecond)
+	p := paths(t)
+	bound(t, p, "a", testOrigin, tok1)
+	log := &logBuf{}
+	addr := serveLog(t, p, time.Hour, log)
+	peer := strings.Repeat("peerwords", 100)
+	for _, m := range []host.Msg{
+		{Type: "hello", DB: peer, Nonce: nonceE},                // no such database
+		{Type: "hello", DB: "Not An Id " + peer, Nonce: nonceE}, // not an id
+		{Type: "hello", DB: "a", Nonce: peer},                   // not a nonce
+	} {
+		c, err := dialAs(t, addr, "", testOrigin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		send(t, c, m)
+		if got := next(t, c); got.Type != "error" {
+			t.Fatalf("got %+v, want an error", got)
+		}
+	}
+	silent, err := dialAs(t, addr, "", testOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	silent.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, err := silent.Read(); err != nil {
+			break
+		}
+	}
+	gone, err := dialAs(t, addr, "", testOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone.Close(1000, "")
+	// A malformed upgrade, with the peer's words in a header.
+	nc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	nc.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(nc, "GET / HTTP/1.1\r\nHost: "+addr+"\r\nOrigin: "+testOrigin+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: "+peer+"\r\n\r\n")
+	if resp, err := http.ReadResponse(bufio.NewReader(nc), nil); err != nil || resp.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("bad upgrade: %v %v", resp, err)
+	}
+	const dropped = `msg="dropped a connection that did not prove itself"`
+	eventually(t, "every connection to be dropped", func() bool {
+		return strings.Count(log.String(), "level=DEBUG "+dropped) == 6
+	})
+	l := log.String()
+	if n := strings.Count(l, "level=INFO "+dropped); n != 1 {
+		t.Errorf("%d drops at Info, want 1:\n%s", n, l)
+	}
+	for line := range strings.Lines(l) {
+		if strings.Contains(line, " level=DEBUG ") {
+			continue
+		}
+		if strings.Contains(line, "level=WARN") || strings.Contains(line, "peerwords") || strings.Contains(line, `msg=disconnected`) {
+			t.Errorf("a line above Debug for an unproven connection: %s", line)
+		}
+	}
+}
+
 // A database file that exists but cannot be read is the server's problem:
 // the log has the details, and the unproven peer only db-missing.
 func TestServeTellsAnUnprovenPeerNoFileDetails(t *testing.T) {

@@ -59,7 +59,9 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sv := &server{ctx: ctx, o: o, addr: ln.Addr().String(), port: port}
-	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: sv}
+	sv.refused.msg, sv.unproven.msg = "refused a connection", "dropped a connection that did not prove itself"
+	// Only the handshake goes through HTTP, so its headers are small.
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10, Handler: sv}
 	go func() {
 		<-ctx.Done()
 		srv.Close() // stops accepting; hijacked connections end with their hosts
@@ -75,13 +77,14 @@ func Serve(ctx context.Context, ln net.Listener, o Options) error {
 
 // server answers each handshake on Serve's listener.
 type server struct {
-	ctx     context.Context // ends every host
-	o       Options
-	addr    string // the address Serve listens on, which the Host must name
-	port    string
-	conns   atomic.Int64 // numbers the connections in the log
-	refused refusals
-	hosts   hostGroup
+	ctx      context.Context // ends every host
+	o        Options
+	addr     string // the address Serve listens on, which the Host must name
+	port     string
+	conns    atomic.Int64 // numbers the connections in the log
+	refused  refusals     // handshakes admit turned away
+	unproven refusals     // admitted connections that never proved themselves
+	hosts    hostGroup
 }
 
 func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -95,13 +98,14 @@ func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := sv.o.Log.With("conn", sv.conns.Add(1))
 	origin, ok := admit(r, sv.addr, sv.o.Paths)
 	if !ok {
-		sv.refused.log(log, r)
+		sv.refused.log(r.Context(), log, slog.String("host", r.Host), slog.String("origin", r.Header.Get("Origin")))
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	sock, err := ws.Upgrade(w, r, helloMax)
 	if err != nil {
-		log.Warn("bad handshake", "err", err)
+		log.Debug("bad handshake", "err", err)
+		sv.unproven.log(r.Context(), log, slog.String("why", "bad handshake"))
 		return
 	}
 	// Until it proves itself, a connection has helloWait to do so.
@@ -111,8 +115,23 @@ func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ho.Log, ho.Origin, ho.Port = log, origin, sv.port
 	err = Run(sv.ctx, c, ho)
 	c.close()
-	if errors.Is(err, os.ErrDeadlineExceeded) {
-		log.Warn("dropped a connection that did not prove itself in time", "wait", helloWait)
+	if !c.ok.Load() {
+		// Not known to be mirrormark: logged as briefly as a refusal,
+		// with a fixed reason, never in the peer's words.
+		var st stopped
+		why := "closed"
+		switch {
+		case errors.As(err, &st):
+			why = st.code
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			why = "no proof within " + helloWait.String()
+		case errors.Is(err, context.Canceled):
+			return // the server is stopping
+		case err != nil:
+			log.Debug("unproven connection failed", "err", err)
+			why = "read failed"
+		}
+		sv.unproven.log(r.Context(), log, slog.String("why", why))
 		return
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -172,19 +191,19 @@ func admit(r *http.Request, addr string, p db.Paths) (string, bool) {
 	return "", false
 }
 
-// refusals logs refused handshakes: each at Debug, and at Info at most
-// once a minute with how many there were since the last Info line. A page
-// that keeps knocking costs a line a minute, and the first refusal still
-// shows.
+// refusals logs connections turned away: each at Debug, and at Info at
+// most once a minute with how many there were since the last Info line. A
+// program that keeps knocking costs a line a minute, and the first refusal
+// still shows.
 type refusals struct {
 	mu   sync.Mutex
 	n    int
 	last time.Time
+	msg  string // the line's message: what was done with the connection
 }
 
-func (f *refusals) log(log *slog.Logger, r *http.Request) {
-	h, o := slog.String("host", r.Host), slog.String("origin", r.Header.Get("Origin"))
-	log.LogAttrs(r.Context(), slog.LevelDebug, "refused a connection", h, o)
+func (f *refusals) log(ctx context.Context, log *slog.Logger, attrs ...slog.Attr) {
+	log.LogAttrs(ctx, slog.LevelDebug, f.msg, attrs...)
 	f.mu.Lock()
 	f.n++
 	if !f.last.IsZero() && time.Since(f.last) < time.Minute {
@@ -194,7 +213,7 @@ func (f *refusals) log(log *slog.Logger, r *http.Request) {
 	n := f.n
 	f.n, f.last = 0, time.Now()
 	f.mu.Unlock()
-	log.LogAttrs(r.Context(), slog.LevelInfo, "refused a connection", h, o, slog.Int("count", n))
+	log.LogAttrs(ctx, slog.LevelInfo, f.msg, append(attrs, slog.Int("count", n))...)
 }
 
 // wsConn is a Conn over one WebSocket. It sends a ping message every
@@ -206,6 +225,7 @@ type wsConn struct {
 	stop   chan struct{}
 	once   sync.Once
 	closed atomic.Bool // close has been called
+	ok     atomic.Bool // the peer has proven itself
 }
 
 func newWSConn(sock *ws.Conn, ping time.Duration) *wsConn {
@@ -252,6 +272,7 @@ func (c *wsConn) Write(m Msg) error {
 // calls it once the extension has proven which database it is.
 // The host calls it between Reads: see Run.
 func (c *wsConn) proven() {
+	c.ok.Store(true)
 	c.sock.SetReadDeadline(time.Time{}) // fails only once closed, when Read fails anyway
 	c.sock.SetReadLimit(maxIn)
 }
