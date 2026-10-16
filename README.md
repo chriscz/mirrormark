@@ -152,20 +152,27 @@ A Chrome or Brave that firejail starts (for example through `firecfg`'s
 `/usr/local/bin/brave-browser`) cannot see mirrormark's CRX in
 `~/.local/share/mirrormark`, and firejail's Chrome profile also hides
 `/usr/share/google-chrome/extensions`, so the browser never installs
-mirrormark. `install` notices when the browser's command on `PATH` runs
-firejail and prints the lines to add to `~/.config/firejail/brave.local` or
+mirrormark. `install` notices when any of the browser's commands on `PATH`
+(such as `brave-browser` or `brave-browser-stable`) runs firejail, and
+prints the lines to add to `~/.config/firejail/brave.local` or
 `~/.config/firejail/google-chrome.local`; it never edits them itself. For
 Brave that is:
 
 ```
-whitelist ${HOME}/.local/share/mirrormark
+whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx
 ```
 
 Chrome needs that line and `whitelist /usr/share/google-chrome/extensions`.
-Firejail reads these files only from `~/.config/firejail`. Then quit the
-browser completely and start it again. Firefox Developer Edition and
-LibreWolf need nothing: their add-on lives in the profile. Only firejail
-0.9.72's profiles have been tried.
+The line shows the browser the CRX only, not your databases or their
+tokens. Firejail reads these files only from `~/.config/firejail`. Then
+quit the browser completely and start it again. `install` reads the
+`.local` file as text, takes `~/`, `$HOME` and your home folder spelled out
+as `${HOME}`, and does not follow `include` lines, so a line in an included
+file still gets the advice. If `$XDG_DATA_HOME` puts mirrormark's data
+outside your home folder, `install` cannot tell what firejail hides there
+and says so. Firefox Developer Edition and LibreWolf need nothing: their
+add-on lives in the profile. Only firejail 0.9.72's profiles have been
+tried.
 
 ## Install (Brave on Linux)
 

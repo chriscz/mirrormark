@@ -70,12 +70,13 @@ func digits(s string) int {
 // share the key, the CRX and the extension id; each has its own data
 // directory, command and external extensions directory.
 type Browser struct {
-	Config         string // the --browser value, and browser: in a database
-	Name           string // what messages call it
-	DataDir        string // its data directory under $XDG_CONFIG_HOME or ~/.config
-	Bin            string // the command that starts it
-	ExternalDir    string // where it reads external extension files at start
-	ExtensionsPage string // where the user turns extensions on and off
+	Config         string   // the --browser value, and browser: in a database
+	Name           string   // what messages call it
+	DataDir        string   // its data directory under $XDG_CONFIG_HOME or ~/.config
+	Bin            string   // the command that starts it
+	Aliases        []string // other names it is started by, such as firecfg links
+	ExternalDir    string   // where it reads external extension files at start
+	ExtensionsPage string   // where the user turns extensions on and off
 	// Firejail names the .local file every firejail profile of its
 	// commands reads; JailHidesExternalDir says those profiles hide
 	// ExternalDir.
@@ -89,12 +90,13 @@ type Browser struct {
 // leave out that directory.
 var Chrome = Browser{Config: "chrome", Name: "Chrome", DataDir: "google-chrome", Bin: "google-chrome",
 	ExternalDir: "/usr/share/google-chrome/extensions", ExtensionsPage: "chrome://extensions",
-	Firejail: "google-chrome", JailHidesExternalDir: true}
+	Aliases: []string{"google-chrome-stable"}, Firejail: "google-chrome", JailHidesExternalDir: true}
 
 // Brave is Brave stable from Brave's package. It reads external extension
 // files from its own install directory.
 var Brave = Browser{Config: "brave", Name: "Brave", DataDir: "BraveSoftware/Brave-Browser", Bin: "brave-browser",
-	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions", Firejail: "brave"}
+	ExternalDir: "/opt/brave.com/brave/extensions", ExtensionsPage: "brave://extensions",
+	Aliases: []string{"brave-browser-stable", "brave"}, Firejail: "brave"}
 
 // Browsers are the Chromium-based browsers install knows.
 var Browsers = []Browser{Chrome, Brave}

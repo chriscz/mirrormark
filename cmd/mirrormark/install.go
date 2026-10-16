@@ -121,7 +121,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		list += " --user-data-dir " + quoteArg(uddFlag)
 	}
 	if len(picks) == 0 {
-		return listChromium(p, cb, bin, *udd, list, profiles, stdout, stderr)
+		return listChromium(p, cb, *udd, list, profiles, stdout, stderr)
 	}
 	chosen, err := choose(profiles, picks, list)
 	if err != nil {
@@ -165,7 +165,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 	// The same profiles, named by ID however the user named them.
 	all := again(cb.InstallCommand(), uddFlag, ids(chosen)...)
 	if !ready {
-		fmt.Fprint(stdout, firejailNote(cb, bin, p.Data, " before you restart it"))
+		fmt.Fprint(stdout, firejailNote(cb, p.Data, " before you restart it"))
 		fmt.Fprintf(stdout, "Restart %s (close every window), then run %s again to bind the profiles.\n", cb.Name, all)
 		return 0
 	}
@@ -190,7 +190,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 		}
 		if st.State == chrome.NotInstalledYet {
 			then := fmt.Sprintf(", quit %s completely (close every window) and start it again, wait half a minute, then run %s", cb.Name, cmd)
-			if note := firejailNote(cb, bin, p.Data, then); note != "" {
+			if note := firejailNote(cb, p.Data, then); note != "" {
 				fmt.Fprintf(stdout, "not ready: %s: %s", c.ID(), note)
 				code = 1
 				continue
@@ -222,8 +222,7 @@ func cmdInstall(args []string, stdout, stderr io.Writer) int {
 }
 
 // listChromium prints b's profiles with their state and changes nothing.
-// bin is the command that starts b.
-func listChromium(p db.Paths, b chrome.Browser, bin, udd, list string, profiles []chrome.Profile, stdout, stderr io.Writer) int {
+func listChromium(p db.Paths, b chrome.Browser, udd, list string, profiles []chrome.Profile, stdout, stderr io.Writer) int {
 	want, err := extension.Version()
 	if err != nil {
 		fmt.Fprintln(stderr, "mirrormark:", err)
@@ -259,33 +258,37 @@ func listChromium(p db.Paths, b chrome.Browser, bin, udd, list string, profiles 
 	}
 	code := printList(p, b.Name, udd, list, profiles, func(c chrome.Profile) string { return filepath.Join(udd, c.Dir) }, states, stdout, stderr)
 	if slices.Contains(states, chrome.ProfileState{State: chrome.NotInstalledYet}.String()) {
-		fmt.Fprint(stdout, firejailNote(b, bin, p.Data, fmt.Sprintf(", then quit %s completely (close every window) and start it again", b.Name)))
+		fmt.Fprint(stdout, firejailNote(b, p.Data, fmt.Sprintf(", then quit %s completely (close every window) and start it again", b.Name)))
 	}
 	return code
 }
 
-// firejailNote says, when bin starts b in firejail and b's .local file
-// lacks lines b needs to install mirrormark from data, which lines to add
-// to which file, with then after the file. Otherwise it is empty. It never
-// writes the file: firejail's profiles are the user's to change.
-func firejailNote(b chrome.Browser, bin, data, then string) string {
-	if !chrome.UnderFirejail(bin) {
+// firejailNote says, when b starts in firejail and b's .local file lacks
+// lines b needs to install mirrormark's CRX from data, which lines to add
+// to which file, with then after the file. Where no line can show the
+// CRX, it says so. Otherwise it is empty. It never writes the file:
+// firejail's profiles are the user's to change.
+func firejailNote(b chrome.Browser, data, then string) string {
+	if !b.UnderFirejail() {
 		return ""
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	missing := b.FirejailMissing(home, data)
-	if len(missing) == 0 {
-		return ""
+	note := ""
+	if missing := b.FirejailMissing(home, chrome.CRXPath(data)); len(missing) > 0 {
+		which := "the line below"
+		if len(missing) > 1 {
+			which = "the lines below"
+		}
+		note = fmt.Sprintf("%s runs under firejail, which hides mirrormark's extension from it. Add %s to ~/.config/firejail/%s%s.\n  %s\n",
+			b.Name, which, b.FirejailLocal(), then, strings.Join(missing, "\n  "))
 	}
-	which := "the line below"
-	if len(missing) > 1 {
-		which = "the lines below"
+	if _, ok := chrome.FirejailCRXRule(home, chrome.CRXPath(data)); !ok {
+		note += fmt.Sprintf("%s runs under firejail, which may hide %s. Move it under your home folder, or allow it in ~/.config/firejail/%s yourself.\n", b.Name, data, b.FirejailLocal())
 	}
-	return fmt.Sprintf("%s runs under firejail, which hides mirrormark's extension from it. Add %s to ~/.config/firejail/%s%s.\n  %s\n",
-		b.Name, which, b.FirejailLocal(), then, strings.Join(missing, "\n  "))
+	return note
 }
 
 // listGecko prints b's profiles with their state and changes nothing.

@@ -2038,10 +2038,11 @@ func TestQuoteArg(t *testing.T) {
 }
 
 // jailOnPath puts a command bin first on PATH that is a symlink to a file
-// named firejail, as firecfg makes, which runs the fake browser.
-func jailOnPath(t *testing.T, bin string) {
+// named firejail, as firecfg makes, which runs the fake browser of. bin
+// may be another name for of, which install does not run.
+func jailOnPath(t *testing.T, bin, of string) {
 	t.Helper()
-	fake, err := exec.LookPath(bin)
+	fake, err := exec.LookPath(of)
 	must(t, err)
 	script, err := os.ReadFile(fake)
 	must(t, err)
@@ -2061,7 +2062,7 @@ func TestInstallTellsAJailedBraveItsFirejailLine(t *testing.T) {
 	p := testHome(t)
 	fakeSystem(t)
 	fakeChromeOnPath(t, p)
-	jailOnPath(t, "brave-browser")
+	jailOnPath(t, "brave-browser", "brave-browser")
 	udd := braveData(t)
 	install := func(code int, args ...string) string {
 		t.Helper()
@@ -2072,7 +2073,7 @@ func TestInstallTellsAJailedBraveItsFirejailLine(t *testing.T) {
 		return out.String()
 	}
 	note := "Brave runs under firejail, which hides mirrormark's extension from it. Add the line below to ~/.config/firejail/brave.local"
-	line := "\n  whitelist ${HOME}/.local/share/mirrormark\n"
+	line := "\n  whitelist ${HOME}/.local/share/mirrormark/mirrormark.crx\n"
 	if out := install(0, "--profile", "Default"); !strings.Contains(out, note+" before you restart it."+line+"Restart Brave") {
 		t.Fatalf("first pass:\n%s", out)
 	}
@@ -2086,7 +2087,7 @@ func TestInstallTellsAJailedBraveItsFirejailLine(t *testing.T) {
 
 	local := filepath.Join(os.Getenv("HOME"), ".config", "firejail", "brave.local")
 	must(t, os.MkdirAll(filepath.Dir(local), 0o755))
-	must(t, os.WriteFile(local, []byte("# mine\nwhitelist ${HOME}/.local/share/mirrormark\n"), 0o644))
+	must(t, os.WriteFile(local, []byte("# mine\nwhitelist ~/.local/share/mirrormark/mirrormark.crx\n"), 0o644))
 	if out := install(0); strings.Contains(out, "firejail") {
 		t.Fatalf("listing with the line in place:\n%s", out)
 	}
@@ -2109,14 +2110,46 @@ func TestInstallTellsAJailedChromeBothLines(t *testing.T) {
 	must(t, err)
 	fakeSystem(t)
 	fakeChromeOnPath(t, p)
-	jailOnPath(t, "google-chrome")
+	jailOnPath(t, "google-chrome", "google-chrome")
 	var out, errb bytes.Buffer
 	if code := run([]string{"install", "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
 	}
 	want := "Chrome runs under firejail, which hides mirrormark's extension from it. Add the lines below to ~/.config/firejail/google-chrome.local before you restart it.\n" +
-		"  whitelist ${HOME}/data/mirrormark\n  whitelist /usr/share/google-chrome/extensions\nRestart Chrome"
+		"  whitelist ${HOME}/data/mirrormark/mirrormark.crx\n  whitelist /usr/share/google-chrome/extensions\nRestart Chrome"
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+// A jailed browser under another of its names, such as the one firecfg
+// links as brave-browser-stable, gets the note too, and a data directory
+// outside the home directory, which no line can show, gets a hint instead.
+func TestInstallNotesAJailUnderAnotherNameAndDataOutsideHome(t *testing.T) {
+	for _, c := range []struct{ browser, bin, of string }{
+		{"brave", "brave-browser-stable", "brave-browser"},
+		{"brave", "brave", "brave-browser"},
+		{"chrome", "google-chrome-stable", "google-chrome"},
+	} {
+		t.Run(c.bin, func(t *testing.T) {
+			skipIfRoot(t)
+			testHome(t)
+			data := t.TempDir() // not under $HOME
+			t.Setenv("XDG_DATA_HOME", data)
+			p, err := db.DefaultPaths()
+			must(t, err)
+			fakeSystem(t)
+			fakeChromeOnPath(t, p)
+			jailOnPath(t, c.bin, c.of)
+			var out, errb bytes.Buffer
+			if code := run([]string{"install", "--browser", c.browser, "--user-data-dir", chromeData(t), "--profile", "Default"}, strings.NewReader(""), &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s%s", code, out.String(), errb.String())
+			}
+			b, _ := chrome.Lookup(c.browser)
+			hint := b.Name + " runs under firejail, which may hide " + p.Data + ". Move it under your home folder, or allow it in ~/.config/firejail/" + b.FirejailLocal() + " yourself.\nRestart " + b.Name
+			if !strings.Contains(out.String(), hint) || strings.Contains(out.String(), "whitelist ${HOME}") {
+				t.Fatalf("output:\n%s", out.String())
+			}
+		})
 	}
 }

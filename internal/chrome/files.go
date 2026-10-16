@@ -63,9 +63,12 @@ func Prepare(dataDir string) (Extension, error) {
 	if err != nil {
 		return e, err
 	}
-	e.CRX = filepath.Join(dataDir, "mirrormark.crx")
+	e.CRX = CRXPath(dataDir)
 	return e, WriteCRX(dir, key, e.CRX)
 }
+
+// CRXPath is where Prepare packs the CRX in dataDir.
+func CRXPath(dataDir string) string { return filepath.Join(dataDir, "mirrormark.crx") }
 
 type externalJSON struct {
 	CRX     string `json:"external_crx"`

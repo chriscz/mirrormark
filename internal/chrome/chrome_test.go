@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -329,7 +330,7 @@ func TestSystemFiles(t *testing.T) {
 }
 
 func TestLookup(t *testing.T) {
-	if b, ok := Lookup("chrome"); !ok || b != Chrome {
+	if b, ok := Lookup("chrome"); !ok || !reflect.DeepEqual(b, Chrome) {
 		t.Fatalf("chrome: %+v %v", b, ok)
 	}
 	if _, ok := Lookup("firefox"); ok {
@@ -351,7 +352,7 @@ func TestBraveDescription(t *testing.T) {
 	if got := Brave.ExternalFile("pjjjaeommfpeolloibnafkcmkindkagl"); got != "/opt/brave.com/brave/extensions/pjjjaeommfpeolloibnafkcmkindkagl.json" {
 		t.Fatalf("external file %s", got)
 	}
-	if b, ok := Lookup("brave"); !ok || b != Brave || Brave.InstallCommand() != "mirrormark install --browser brave" {
+	if b, ok := Lookup("brave"); !ok || !reflect.DeepEqual(b, Brave) || Brave.InstallCommand() != "mirrormark install --browser brave" {
 		t.Fatalf("lookup %+v %v", b, ok)
 	}
 	if Brave.ExtensionsPage != "brave://extensions" {

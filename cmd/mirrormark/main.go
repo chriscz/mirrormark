@@ -53,8 +53,9 @@ Sharing folders:
   restart, and the log records each one.
 
 Firejail:
-  Chrome or Brave started through firejail cannot see mirrormark until its
-  firejail .local file allows it; install says what to add, and where.
+  Chrome or Brave started through firejail cannot see mirrormark's CRX
+  until its firejail .local file shows it; install says what to add, and
+  where.
 
 Files:
   config.yaml      %s
